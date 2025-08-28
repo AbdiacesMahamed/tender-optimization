@@ -19,7 +19,7 @@ with st.sidebar:
 
 
 @st.cache_data
-def generate_sample_data(n_days: int, cats: list[str], seed: int = 42) -> pd.DataFrame:
+def generate_sample_data(n_days: int, cats: list, seed: int = 42) -> pd.DataFrame:
     """Generate a synthetic time series dataset for demo purposes."""
     np.random.seed(int(seed))
     dates = pd.date_range(end=pd.Timestamp.today(), periods=n_days)
