@@ -30,7 +30,7 @@ from .suboptimal_analysis import show_suboptimal_analysis
 from .summary_tables import show_summary_tables
 
 # Optimization - directly importing from the modules
-from .optimization_ui import show_unified_optimization_interface
+from .optimization_ui_fixed import show_unified_optimization_interface
 from .optimization_calculations import perform_optimization, get_optimization_results
 
 # Analytics and visualizations
