@@ -4,8 +4,9 @@ Summary tables module for the Carrier Tender Optimization Dashboard
 import streamlit as st
 import pandas as pd
 from .config_styling import section_header
+from .optimization_calculations import get_optimization_results
 
-def get_optimization_results():
+def get_optimization_results_from_session():
     """Get optimization results from session state"""
     return st.session_state.get('optimization_results', None)
 
