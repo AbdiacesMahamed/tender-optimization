@@ -131,13 +131,16 @@ def get_carrier_weighted_performance(final_filtered_data):
             total_volume = valid_perf_records['Container Count'].sum()
             
             if total_volume > 0:
-                carrier_weighted_performance[carrier] = total_weighted_performance / total_volume
+                weighted_avg = total_weighted_performance / total_volume
+                carrier_weighted_performance[carrier] = weighted_avg
             else:
                 # Fallback to simple average if total volume is 0
-                carrier_weighted_performance[carrier] = valid_perf_records['Performance_Score'].mean()
+                simple_avg = valid_perf_records['Performance_Score'].mean()
+                carrier_weighted_performance[carrier] = simple_avg
         elif len(valid_perf_records) > 0:
             # If no container count available, use simple average
-            carrier_weighted_performance[carrier] = valid_perf_records['Performance_Score'].mean()
+            simple_avg = valid_perf_records['Performance_Score'].mean()
+            carrier_weighted_performance[carrier] = simple_avg
         # Note: Carriers with no performance data will not be in this dict
         # The calling function should handle this case
     

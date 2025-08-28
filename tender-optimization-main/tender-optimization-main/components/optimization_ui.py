@@ -1,0 +1,483 @@
+"""
+Unified Optimization UI components for the Carrier Tender Optimization Dashboard
+Handles all user interface elements for linear programming optimization in one clean section
+"""
+import streamlit as st
+import pandas as pd
+from .config_styling import section_header
+
+def show_unified_optimization_interface(final_filtered_data):
+    """Display unified optimization interface with all controls in one section"""
+    
+    # Initialize session state for optimization settings
+    if 'opt_cost_weight' not in st.session_state:
+        st.session_state.opt_cost_weight = 70
+    if 'opt_performance_weight' not in st.session_state:
+        st.session_state.opt_performance_weight = 30
+    if 'carrier_constraints' not in st.session_state:
+        st.session_state.carrier_constraints = {}
+    if 'optimization_results' not in st.session_state:
+        st.session_state.optimization_results = None
+    
+    # Main optimization interface
+    st.markdown("### 🎯 Optimization Control Center")
+    
+    # Create main layout with tabs for organized sections
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "⚖️ Weights & Settings", 
+        "🚛 Carrier Constraints", 
+        "🚀 Run Optimization",
+        "📊 Results"
+    ])
+    
+    with tab1:
+        show_optimization_weights_section()
+    
+    with tab2:
+        show_carrier_constraints_section(final_filtered_data)
+    
+    with tab3:
+        show_optimization_execution_section(final_filtered_data)
+    
+    with tab4:
+        show_optimization_results_section()
+
+def show_optimization_weights_section():
+    """Cost and Performance importance weights section"""
+    st.markdown("#### 🎚️ Cost vs Performance Balance")
+    st.markdown("*Set the importance of cost savings versus carrier performance*")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Cost Importance**")
+        cost_weight = st.slider(
+            "Cost Priority (%)",
+            min_value=0,
+            max_value=100,
+            value=st.session_state.opt_cost_weight,
+            step=5,
+            key="cost_slider",
+            help="Higher values prioritize cost savings",
+            on_change=update_weights_callback
+        )
+        st.caption(f"💰 Cost Weight: {cost_weight}%")
+    
+    with col2:
+        st.markdown("**Performance Importance**")
+        performance_weight = st.slider(
+            "Performance Priority (%)",
+            min_value=0,
+            max_value=100,
+            value=st.session_state.opt_performance_weight,
+            step=5,
+            key="performance_slider",
+            help="Higher values prioritize carrier performance",
+            on_change=update_weights_callback
+        )
+        st.caption(f"📈 Performance Weight: {performance_weight}%")
+    
+    # Auto-balance weights to sum to 100%
+    total_weight = cost_weight + performance_weight
+    if total_weight != 100:
+        if total_weight > 0:
+            normalized_cost = round((cost_weight / total_weight) * 100)
+            normalized_perf = 100 - normalized_cost
+            st.info(f"🔄 Weights normalized: Cost {normalized_cost}% | Performance {normalized_perf}%")
+        else:
+            st.warning("⚠️ Please set at least one weight above 0%")
+    
+    # Store normalized weights
+    if total_weight > 0:
+        st.session_state.normalized_cost_weight = cost_weight / total_weight
+        st.session_state.normalized_performance_weight = performance_weight / total_weight
+    
+    # Visual balance indicator
+    if total_weight > 0:
+        st.markdown("**Balance Visualization**")
+        progress_col1, progress_col2 = st.columns(2)
+        with progress_col1:
+            st.progress(cost_weight / 100, text="Cost Focus")
+        with progress_col2:
+            st.progress(performance_weight / 100, text="Performance Focus")
+
+def update_weights_callback():
+    """Callback to update weights in session state"""
+    st.session_state.opt_cost_weight = st.session_state.cost_slider
+    st.session_state.opt_performance_weight = st.session_state.performance_slider
+
+def show_carrier_constraints_section(final_filtered_data):
+    """Carrier constraints and limits section"""
+    st.markdown("#### 🚛 Carrier Capacity & Constraints")
+    st.markdown("*Set minimum and maximum container limits per carrier*")
+    
+    if len(final_filtered_data) == 0:
+        st.warning("No data available for carrier constraints")
+        return
+    
+    # Get unique carriers
+    carriers = sorted(final_filtered_data['Carrier'].unique()) if 'Carrier' in final_filtered_data.columns else []
+    
+    if not carriers:
+        st.warning("No carriers found in data")
+        return
+    
+    # Create constraints for each carrier
+    for i, carrier in enumerate(carriers):
+        with st.expander(f"🏢 {carrier} Constraints", expanded=i < 3):  # Expand first 3
+            
+            # Get carrier data for context
+            carrier_data = final_filtered_data[final_filtered_data['Carrier'] == carrier]
+            total_volume = carrier_data['Total_Lane_Volume'].sum() if 'Total_Lane_Volume' in carrier_data.columns else 0
+            avg_rate = carrier_data['Base Rate'].mean() if 'Base Rate' in carrier_data.columns else 0
+            avg_performance = carrier_data['Performance_Score'].mean() if 'Performance_Score' in carrier_data.columns else 0
+            
+            # Context metrics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Available Volume", f"{total_volume:,.0f}")
+            with col2:
+                st.metric("Avg Rate", f"${avg_rate:,.2f}")
+            with col3:
+                st.metric("Avg Performance", f"{avg_performance:.2f}")
+            
+            # Constraint inputs
+            constraint_col1, constraint_col2 = st.columns(2)
+            
+            carrier_key = f"carrier_{carrier.replace(' ', '_')}"
+            
+            with constraint_col1:
+                min_containers = st.number_input(
+                    "Minimum Containers",
+                    min_value=0,
+                    max_value=int(total_volume) if total_volume > 0 else 1000,
+                    value=st.session_state.carrier_constraints.get(carrier, {}).get('min', 0),
+                    step=10,
+                    key=f"{carrier_key}_min",
+                    help="Minimum containers this carrier must handle"
+                )
+            
+            with constraint_col2:
+                max_containers = st.number_input(
+                    "Maximum Containers",
+                    min_value=min_containers,
+                    max_value=int(total_volume * 2) if total_volume > 0 else 2000,  # Allow over-allocation
+                    value=st.session_state.carrier_constraints.get(carrier, {}).get('max', int(total_volume) if total_volume > 0 else 1000),
+                    step=10,
+                    key=f"{carrier_key}_max",
+                    help="Maximum containers this carrier can handle"
+                )
+            
+            # Update constraints in session state
+            if carrier not in st.session_state.carrier_constraints:
+                st.session_state.carrier_constraints[carrier] = {}
+            
+            st.session_state.carrier_constraints[carrier]['min'] = min_containers
+            st.session_state.carrier_constraints[carrier]['max'] = max_containers
+
+def show_optimization_execution_section(final_filtered_data):
+    """Optimization execution and settings section"""
+    st.markdown("#### 🚀 Run Optimization")
+    
+    # Pre-flight checks
+    st.markdown("**Pre-flight Checks**")
+    
+    checks_passed = True
+    
+    # Check 1: Data availability
+    if len(final_filtered_data) > 0:
+        st.success(f"✅ Data: {len(final_filtered_data)} records available")
+    else:
+        st.error("❌ No data available for optimization")
+        checks_passed = False
+    
+    # Check 2: Performance scores
+    if 'Performance_Score' in final_filtered_data.columns:
+        missing_perf = final_filtered_data['Performance_Score'].isna().sum()
+        if missing_perf == 0:
+            st.success("✅ Performance: All records have performance scores")
+        else:
+            st.warning(f"⚠️ Performance: {missing_perf} records missing performance scores")
+    else:
+        st.error("❌ Performance: No performance scores found")
+        checks_passed = False
+    
+    # Check 3: Multiple carriers per lane
+    if len(final_filtered_data) > 0 and 'Lane' in final_filtered_data.columns and 'Carrier' in final_filtered_data.columns:
+        lane_carriers = final_filtered_data.groupby('Lane')['Carrier'].nunique()
+        multi_carrier_lanes = (lane_carriers > 1).sum()
+        if multi_carrier_lanes > 0:
+            st.success(f"✅ Choices: {multi_carrier_lanes} lanes have multiple carrier options")
+        else:
+            st.warning("⚠️ Choices: No lanes have multiple carrier options")
+    
+    # Check 4: Weights set
+    total_weight = st.session_state.opt_cost_weight + st.session_state.opt_performance_weight
+    if total_weight > 0:
+        st.success(f"✅ Weights: Cost {st.session_state.opt_cost_weight}% | Performance {st.session_state.opt_performance_weight}%")
+    else:
+        st.error("❌ Weights: Please set optimization weights")
+        checks_passed = False
+    
+    # Optimization button
+    st.markdown("---")
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if st.button(
+            "🚀 Run Optimization Analysis",
+            type="primary",
+            disabled=not checks_passed,
+            use_container_width=True
+        ):
+            run_unified_optimization(final_filtered_data)
+    
+    with col2:
+        if st.button("🔄 Reset", help="Clear all results and constraints"):
+            reset_optimization_state()
+            st.rerun()
+
+def show_optimization_results_section():
+    """Display optimization results and analysis"""
+    if st.session_state.optimization_results is None:
+        st.info("💡 Run optimization to see detailed results here")
+        return
+    
+    results = st.session_state.optimization_results
+    
+    if not results.get('success', False):
+        st.error(f"❌ Optimization failed: {results.get('error', 'Unknown error')}")
+        return
+    
+    st.success("✅ Optimization completed successfully!")
+    
+    # Key metrics
+    st.markdown("#### 📊 Optimization Summary")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            "Total Cost",
+            f"${results['total_cost']:,.2f}",
+            delta=f"{results.get('cost_change', 0):+.2f}" if 'cost_change' in results else None
+        )
+    
+    with col2:
+        st.metric(
+            "Containers Allocated",
+            f"{results['containers_allocated']:,}",
+            delta=f"{results['allocation_rate']:.1f}% of total"
+        )
+    
+    with col3:
+        st.metric(
+            "Avg Performance",
+            f"{results['avg_performance']:.2f}",
+            delta=f"{results.get('performance_change', 0):+.2f}" if 'performance_change' in results else None
+        )
+    
+    # Detailed allocation breakdown
+    st.markdown("#### 🚛 Carrier Allocation Breakdown")
+    
+    if 'allocation_df' in results and len(results['allocation_df']) > 0:
+        # Format the allocation dataframe for display
+        display_df = results['allocation_df'].copy()
+        if 'Cost' in display_df.columns:
+            display_df['Cost'] = display_df['Cost'].apply(lambda x: f"${x:,.2f}")
+        if 'Performance' in display_df.columns:
+            display_df['Performance'] = display_df['Performance'].apply(lambda x: f"{x:.2f}")
+        
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Download button for results
+        csv_data = results['allocation_df'].to_csv(index=False)
+        st.download_button(
+            label="📥 Download Results CSV",
+            data=csv_data,
+            file_name="optimization_results.csv",
+            mime="text/csv"
+        )
+    else:
+        st.warning("No allocation details available")
+
+def run_unified_optimization(final_filtered_data):
+    """Execute the unified optimization process"""
+    with st.spinner("🔄 Running optimization analysis..."):
+        
+        try:
+            # Get current weights
+            cost_weight = st.session_state.get('normalized_cost_weight', 0.7)
+            performance_weight = st.session_state.get('normalized_performance_weight', 0.3)
+            
+            # Prepare data
+            opt_data = final_filtered_data.copy()
+            
+            # Simple allocation algorithm based on combined score
+            results = perform_unified_allocation(
+                opt_data, 
+                cost_weight, 
+                performance_weight,
+                st.session_state.carrier_constraints
+            )
+            
+            # Store results
+            st.session_state.optimization_results = results
+            
+            if results['success']:
+                st.success(f"✅ Optimization complete! Total cost: ${results['total_cost']:,.2f}")
+                st.balloons()  # Celebrate success!
+            else:
+                st.error(f"❌ Optimization failed: {results['error']}")
+                
+        except Exception as e:
+            st.error(f"❌ Optimization error: {str(e)}")
+            st.session_state.optimization_results = {
+                'success': False,
+                'error': str(e)
+            }
+
+def perform_unified_allocation(data, cost_weight, performance_weight, constraints):
+    """Perform the unified allocation algorithm"""
+    
+    try:
+        if len(data) == 0:
+            return {'success': False, 'error': 'No data provided'}
+        
+        # Ensure required columns exist
+        required_cols = ['Carrier', 'Base Rate', 'Performance_Score']
+        missing_cols = [col for col in required_cols if col not in data.columns]
+        if missing_cols:
+            return {'success': False, 'error': f'Missing columns: {missing_cols}'}
+        
+        # Calculate combined scores for ranking
+        data = data.copy()
+        
+        # Cost normalization (inverse - lower cost = higher score)
+        min_cost = data['Base Rate'].min()
+        max_cost = data['Base Rate'].max()
+        if max_cost > min_cost:
+            data['cost_score'] = 1 - ((data['Base Rate'] - min_cost) / (max_cost - min_cost))
+        else:
+            data['cost_score'] = 1.0
+        
+        # Performance normalization
+        min_perf = data['Performance_Score'].min()
+        max_perf = data['Performance_Score'].max()
+        if max_perf > min_perf:
+            data['perf_score'] = (data['Performance_Score'] - min_perf) / (max_perf - min_perf)
+        else:
+            data['perf_score'] = 1.0
+        
+        # Combined score
+        data['combined_score'] = (data['cost_score'] * cost_weight + 
+                                data['perf_score'] * performance_weight)
+        
+        # Sort by combined score (best first)
+        data_ranked = data.sort_values('combined_score', ascending=False)
+        
+        # Get total containers to allocate
+        total_containers = data['Total_Lane_Volume'].sum() if 'Total_Lane_Volume' in data.columns else len(data)
+        remaining_containers = total_containers
+        
+        # Allocation tracking
+        allocation_results = []
+        
+        # Allocate to each carrier based on ranking and constraints
+        for carrier in data_ranked['Carrier'].unique():
+            carrier_data = data_ranked[data_ranked['Carrier'] == carrier]
+            
+            # Get constraints for this carrier
+            carrier_constraints = constraints.get(carrier, {})
+            min_containers = carrier_constraints.get('min', 0)
+            max_containers = carrier_constraints.get('max', total_containers)
+            
+            # Available capacity for this carrier
+            carrier_volume = carrier_data['Total_Lane_Volume'].sum() if 'Total_Lane_Volume' in carrier_data.columns else len(carrier_data)
+            available_capacity = min(max_containers, carrier_volume)
+            
+            # Allocate containers
+            allocated = min(available_capacity, remaining_containers)
+            allocated = max(allocated, min_containers if remaining_containers >= min_containers else 0)
+            
+            if allocated > 0:
+                remaining_containers -= allocated
+                
+                # Calculate metrics for this allocation
+                carrier_cost = carrier_data['Base Rate'].iloc[0] * allocated
+                carrier_performance = carrier_data['Performance_Score'].iloc[0]
+                
+                allocation_results.append({
+                    'Carrier': carrier,
+                    'Containers': allocated,
+                    'Cost': carrier_cost,
+                    'Performance': carrier_performance,
+                    'Combined_Score': carrier_data['combined_score'].iloc[0]
+                })
+                
+                if remaining_containers <= 0:
+                    break
+        
+        # Calculate summary metrics
+        if allocation_results:
+            total_cost = sum([r['Cost'] for r in allocation_results])
+            total_allocated = sum([r['Containers'] for r in allocation_results])
+            avg_performance = sum([r['Performance'] * r['Containers'] for r in allocation_results]) / total_allocated if total_allocated > 0 else 0
+        else:
+            total_cost = 0
+            total_allocated = 0
+            avg_performance = 0
+        
+        allocation_df = pd.DataFrame(allocation_results)
+        
+        return {
+            'success': True,
+            'total_cost': total_cost,
+            'containers_allocated': total_allocated,
+            'allocation_rate': (total_allocated / total_containers * 100) if total_containers > 0 else 0,
+            'avg_performance': avg_performance,
+            'allocation_df': allocation_df,
+            'remaining_containers': remaining_containers
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+def reset_optimization_state():
+    """Reset all optimization state"""
+    keys_to_reset = [
+        'opt_cost_weight', 'opt_performance_weight',
+        'carrier_constraints', 'optimization_results',
+        'normalized_cost_weight', 'normalized_performance_weight'
+    ]
+    
+    for key in keys_to_reset:
+        if key in st.session_state:
+            del st.session_state[key]
+
+# Legacy functions for backward compatibility
+def show_optimization_context(final_filtered_data):
+    """Legacy function - now part of unified interface"""
+    pass
+
+def show_optimization_parameters_ui():
+    """Legacy function - now part of unified interface"""
+    return 0.7, 0.3
+
+def show_container_constraints_ui(final_filtered_data):
+    """Legacy function - now part of unified interface"""
+    pass
+
+def show_container_type_restrictions_ui(final_filtered_data):
+    """Legacy function - now part of unified interface"""
+    pass
+
+def show_missing_rate_analysis_for_optimization(final_filtered_data):
+    """Legacy function for missing rate analysis"""
+    pass

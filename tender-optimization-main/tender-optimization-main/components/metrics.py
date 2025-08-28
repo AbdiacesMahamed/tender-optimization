@@ -5,7 +5,10 @@ import streamlit as st
 import pandas as pd
 from .config_styling import section_header
 from .performance_calculator import calculate_performance_optimization
-from .optimization import get_optimization_results
+
+def get_optimization_results():
+    """Get optimization results from session state"""
+    return st.session_state.get('optimization_results', None)
 
 def calculate_enhanced_metrics(final_filtered_data):
     """Calculate enhanced metrics including alternative optimization strategies"""
@@ -31,8 +34,19 @@ def calculate_enhanced_metrics(final_filtered_data):
     }
     
     # Calculate highest performance cost if performance data available
-    highest_perf_cost, _ = calculate_performance_optimization(final_filtered_data)
+    highest_perf_cost, performance_data_list = calculate_performance_optimization(final_filtered_data)
     metrics['highest_perf_cost'] = highest_perf_cost
+    
+    # Calculate average performance rate
+    if performance_data_list and len(performance_data_list) > 0:
+        total_performance_cost = sum([p['Hypothetical_Total_Cost'] for p in performance_data_list])
+        total_performance_containers = sum([p['Container_Count'] for p in performance_data_list])
+        avg_performance_rate = total_performance_cost / total_performance_containers if total_performance_containers > 0 else 0
+        metrics['avg_performance_rate'] = avg_performance_rate
+        metrics['performance_available'] = True
+    else:
+        metrics['avg_performance_rate'] = 0
+        metrics['performance_available'] = False
     
     # Calculate optimized cost using linear programming if data allows it
     current_cost_weight = st.session_state.get('cost_weight', 0.7)
@@ -215,7 +229,7 @@ def display_current_metrics(metrics):
     # Average rates section
     st.markdown("### 📊 **Rate Analysis**")
     
-    rate_col1, rate_col2, rate_col3 = st.columns(3)
+    rate_col1, rate_col2, rate_col3, rate_col4 = st.columns(4)
     
     with rate_col1:
         st.metric(
@@ -230,10 +244,24 @@ def display_current_metrics(metrics):
             "📉 Average Cheapest Rate", 
             f"${metrics['avg_cheapest_rate']:.2f}",
             delta=f"-${rate_diff:.2f}",
+            delta_color="inverse",  # Green for negative (down is good for rates)
             help="Average of cheapest available rates per lane"
         )
     
     with rate_col3:
+        if metrics['performance_available']:
+            perf_rate_diff = metrics['avg_rate'] - metrics['avg_performance_rate']
+            st.metric(
+                "🏆 Best Performance Avg Rate",
+                f"${metrics['avg_performance_rate']:.2f}",
+                delta=f"{'+' if perf_rate_diff < 0 else '-'}${abs(perf_rate_diff):.2f}",
+                delta_color="inverse",  # Green for negative (down is good for rates)
+                help="Average rate when selecting highest-performing carriers"
+            )
+        else:
+            st.metric("🏆 Best Performance Avg Rate", "N/A", help="Performance data not available")
+    
+    with rate_col4:
         if metrics['optimization_available']:
             opt_avg_rate = metrics['optimized_cost'] / metrics['total_containers'] if metrics['total_containers'] > 0 else 0
             opt_rate_diff = metrics['avg_rate'] - opt_avg_rate
@@ -241,6 +269,7 @@ def display_current_metrics(metrics):
                 "🧮 Optimized Avg Rate",
                 f"${opt_avg_rate:.2f}",
                 delta=f"-${opt_rate_diff:.2f}",
+                delta_color="inverse",  # Green for negative (down is good for rates)
                 help="Average rate from linear programming optimization"
             )
         else:
@@ -355,8 +384,8 @@ def show_detailed_analysis_table(final_filtered_data, metrics=None):
         # 3. Highest Performance (calculate using performance calculator)
         _, performance_data_list = calculate_performance_optimization(final_filtered_data)
         
+        hp_data = []  # Initialize hp_data here
         if performance_data_list:
-            hp_data = []
             base_columns_set = set(base_columns)
             
             for perf_data in performance_data_list:
@@ -575,7 +604,7 @@ def show_suboptimal_analysis(final_filtered_data):
     
     with col3:
         avg_perf_loss = suboptimal_df['Performance_Improvement'].mean()
-        st.metric("📉 Avg Performance Loss", f"{avg_perf_loss:.2%}")
+        st.metric("📉 Avg Performance Loss", f"{avg_perf_loss:.1f}pp")
     
     # Show top issues
     st.markdown("### 🎯 **Top Priority Fixes**")
@@ -583,9 +612,9 @@ def show_suboptimal_analysis(final_filtered_data):
     
     # Format for display
     display_df = priority_fixes.copy()
-    display_df['Current_Performance'] = display_df['Current_Performance'].apply(lambda x: f"{x:.1%}")
-    display_df['Best_Alternative_Performance'] = display_df['Best_Alternative_Performance'].apply(lambda x: f"{x:.1%}")
-    display_df['Performance_Improvement'] = display_df['Performance_Improvement'].apply(lambda x: f"+{x:.1%}")
+    display_df['Current_Performance'] = display_df['Current_Performance'].apply(lambda x: f"{x:.1f}%")
+    display_df['Best_Alternative_Performance'] = display_df['Best_Alternative_Performance'].apply(lambda x: f"{x:.1f}%")
+    display_df['Performance_Improvement'] = display_df['Performance_Improvement'].apply(lambda x: f"+{x:.1f}%")
     display_df['Potential_Cost_Savings'] = display_df['Potential_Cost_Savings'].apply(lambda x: f"${x:,.2f}")
     
     st.dataframe(display_df, use_container_width=True)
@@ -629,7 +658,7 @@ def show_performance_score_analysis(final_filtered_data):
         # Convert performance scores to percentage format for display
         perf_columns = ['Avg_Performance', 'Min_Performance', 'Max_Performance', 'Std_Performance']
         for col in perf_columns:
-            carrier_summary[f'{col}_Display'] = carrier_summary[col].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "N/A")
+            carrier_summary[f'{col}_Display'] = carrier_summary[col].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
         
         # Create display version
         display_summary = carrier_summary[['Dray SCAC(FL)', 'Avg_Performance_Display', 'Min_Performance_Display', 'Max_Performance_Display', 'Std_Performance_Display', 'Record_Count', 'Total_Containers', 'Unique_Lanes', 'Unique_Weeks']].copy()
@@ -689,7 +718,7 @@ def show_performance_score_analysis(final_filtered_data):
             weekly_pivot_display = weekly_pivot.copy()
             for col in weekly_pivot_display.columns:
                 weekly_pivot_display[col] = weekly_pivot_display[col].apply(
-                    lambda x: f"{x:.1%}" if pd.notna(x) else ""
+                    lambda x: f"{x:.1f}%" if pd.notna(x) else ""
                 )
             
             st.markdown("**Performance Score by Carrier and Week (%):**")
@@ -706,7 +735,7 @@ def show_performance_score_analysis(final_filtered_data):
             
             # Format performance score as percentage for display
             detailed_records['Performance %'] = detailed_records['Performance_Score'].apply(
-                lambda x: f"{x:.1%}" if pd.notna(x) else ""
+                lambda x: f"{x:.1f}%" if pd.notna(x) else ""
             )
             
             # Create display version without the original Performance_Score column
@@ -843,7 +872,7 @@ def show_carrier_performance_matrix(final_filtered_data):
         matrix_data.append({
             'Carrier': carrier['Dray SCAC(FL)'],
             'Avg_Rate': f"${carrier['Base Rate']:.2f}",
-            'Avg_Performance': f"{carrier['Performance_Score']:.1%}",
+            'Avg_Performance': f"{carrier['Performance_Score']:.1f}%",
             'Total_Containers': carrier['Container Count'],
             'Category': category
         })

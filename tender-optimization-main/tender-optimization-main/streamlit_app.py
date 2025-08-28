@@ -15,7 +15,7 @@ from components import (
     # Data handling
     show_file_upload_section, load_data_files, process_performance_data,
     validate_and_process_gvt_data, validate_and_process_rate_data, merge_all_data, 
-    apply_volume_weighted_performance, create_comprehensive_data,perform_lane_analysis,
+    apply_volume_weighted_performance, create_comprehensive_data, get_cheapest_rates_by_lane,
     
     # Filtering
     show_filter_interface, apply_filters_to_data, show_selection_summary,
@@ -29,14 +29,13 @@ from components import (
     show_summary_tables,
     
     # Optimization
-    show_optimization_section,
+    show_unified_optimization_interface, perform_optimization, get_optimization_results,
     
     # Analytics and visualizations
     show_advanced_analytics, show_interactive_visualizations,
     
     # Utilities
-    show_calculation_logic, show_debug_performance_merge, show_footer,
-    show_performance_assignments_table, export_performance_assignments
+    show_calculation_logic, show_debug_performance_merge, show_footer
 )
 
 def main():
@@ -58,17 +57,14 @@ def main():
     GVTdata = validate_and_process_gvt_data(GVTdata)
     Ratedata = validate_and_process_rate_data(Ratedata)
     
-    # Perform lane analysis
-    cheapest_rates_by_lane = perform_lane_analysis(Ratedata)
+    # Get cheapest rates by lane (needed for calculations)
+    cheapest_rates_by_lane = get_cheapest_rates_by_lane(Ratedata)
     
     # Merge all data
     merged_data = merge_all_data(GVTdata, Ratedata, cheapest_rates_by_lane, performance_clean, has_performance)
     
     # Apply volume-weighted performance calculations to fill missing data
     merged_data = apply_volume_weighted_performance(merged_data)
-    
-    # Show performance assignments table
-    show_performance_assignments_table()
     
     comprehensive_data = create_comprehensive_data(merged_data)
     
@@ -88,18 +84,31 @@ def main():
     # Show detailed analysis if data exists
     if len(final_filtered_data) > 0:
         show_detailed_analysis_table(final_filtered_data, metrics)
-        show_suboptimal_analysis(final_filtered_data)
+        # show_suboptimal_analysis(final_filtered_data)  # Hidden for now
         show_performance_score_analysis(final_filtered_data)
         show_summary_tables(final_filtered_data)
         show_top_savings_opportunities(final_filtered_data)
         show_complete_data_export(final_filtered_data)
-        export_performance_assignments()  # Export performance assignment data
     
-    # Show optimization section
-    show_optimization_section(final_filtered_data)
+    # Show optimization section with unified interface
+    import streamlit as st
+    from components.config_styling import section_header
     
-    # Show missing rate analysis for optimization (temporarily hidden)
-    # show_missing_rate_analysis_for_optimization(final_filtered_data, merged_data)
+    section_header("🧮 Linear Programming Optimization")
+    
+    if 'Performance_Score' in final_filtered_data.columns and len(final_filtered_data) > 0:
+        st.markdown("**Find the optimal balance between cost savings and carrier performance using our unified optimization system.**")
+        
+        # Check if we have performance data in filtered results
+        perf_data_available = final_filtered_data['Performance_Score'].notna().sum()
+        
+        if perf_data_available == 0:
+            st.warning("⚠️ No performance data found in filtered results. The optimization requires performance scores.")
+        else:
+            # Show the unified optimization interface
+            show_unified_optimization_interface(final_filtered_data)
+    else:
+        st.info("ℹ️ Linear programming optimization requires performance data. Please upload performance data to use this feature.")
     
     # Show advanced analytics
     show_advanced_analytics(final_filtered_data)

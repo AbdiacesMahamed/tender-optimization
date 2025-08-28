@@ -75,6 +75,14 @@ def validate_and_process_rate_data(Ratedata):
     
     return Ratedata
 
+def get_cheapest_rates_by_lane(Ratedata):
+    """Get cheapest rates per lane without UI display"""
+    # Get cheapest rate per lane (this is needed for calculations)
+    cheapest_rates_by_lane = Ratedata.groupby('Lane')['Base Rate'].min().reset_index()
+    cheapest_rates_by_lane = cheapest_rates_by_lane.rename(columns={'Base Rate': 'Cheapest Base Rate'})
+    
+    return cheapest_rates_by_lane
+
 def perform_lane_analysis(Ratedata):
     """Perform lane analysis and show results"""
     section_header("📊 Lane Analysis")
@@ -88,15 +96,8 @@ def perform_lane_analysis(Ratedata):
 
     # Show lanes with multiple rates
     duplicate_lanes = lane_analysis[lane_analysis['Rate_Count'] > 1]
-    if len(duplicate_lanes) > 0:
-        print("Lanes with multiple rates:")
-        try:
-            print(duplicate_lanes.to_string())
-        except Exception:
-            print(duplicate_lanes)
-    else:
-        print("No duplicate lanes found")
-
+    # Lane analysis output removed from UI cleanup
+    
     # Get cheapest rate per lane
     cheapest_rates_by_lane = Ratedata.groupby('Lane')['Base Rate'].min().reset_index()
     cheapest_rates_by_lane = cheapest_rates_by_lane.rename(columns={'Base Rate': 'Cheapest Base Rate'})
@@ -134,7 +135,11 @@ def merge_all_data(GVTdata, Ratedata, cheapest_rates_by_lane, performance_clean,
         )
         
     # NOW CALCULATE PROPER VOLUME-WEIGHTED PERFORMANCE SCORES
-    merged_data = apply_volume_weighted_performance(merged_data)
+    # Pass performance data to enable cross-week averaging when needed
+    if has_performance and len(performance_clean) > 0:
+        merged_data = apply_volume_weighted_performance(merged_data, performance_clean)
+    else:
+        merged_data = apply_volume_weighted_performance(merged_data)
 
     # Remove rows where Base Rate is null (no matching rate found)
     merged_data = merged_data.dropna(subset=['Base Rate'])
@@ -147,7 +152,7 @@ def merge_all_data(GVTdata, Ratedata, cheapest_rates_by_lane, performance_clean,
 
     return merged_data
 
-def apply_volume_weighted_performance(merged_data):
+def apply_volume_weighted_performance(merged_data, external_performance_data=None):
     """Apply proper volume-weighted performance scores after merging with container counts"""
     from .performance_calculator import get_carrier_weighted_performance
     from .performance_assignments import track_performance_assignment, track_processing_step, clear_performance_tracking
@@ -161,29 +166,46 @@ def apply_volume_weighted_performance(merged_data):
     
     # Only process if we have performance data
     if 'Performance_Score' not in merged_data.columns:
-        print("Warning: No Performance_Score column found - skipping performance calculation")
         return merged_data
     
     # Count missing before processing
     missing_before = merged_data['Performance_Score'].isna().sum()
+    total_records = len(merged_data)
     
     # If no missing scores, mark as processed and return
     if missing_before == 0:
         merged_data._performance_processed = True
-        print("All performance scores already complete - no processing needed")
         return merged_data
     
     track_processing_step("Initial Assessment", f"Found {missing_before} missing performance scores")
     
     # Calculate volume-weighted performance averages for each carrier
+    # First try with merged data, then fall back to external data if needed
     carrier_weighted_performance = get_carrier_weighted_performance(merged_data)
+    
+    # If we have external performance data and very few carriers got averages from merged data,
+    # calculate from external data instead
+    if (external_performance_data is not None and 
+        len(carrier_weighted_performance) < len(merged_data['Dray SCAC(FL)'].unique()) * 0.1):  # Less than 10% coverage
+        external_weighted_performance = get_carrier_weighted_performance(external_performance_data)
+        
+        # Merge the two dictionaries, prioritizing merged data over external
+        for carrier, performance in external_weighted_performance.items():
+            if carrier not in carrier_weighted_performance:
+                carrier_weighted_performance[carrier] = performance
+    
     track_processing_step("Carrier Analysis", f"Calculated performance for {len(carrier_weighted_performance)} carriers with existing data")
     
     # Get all unique carriers in the dataset
     all_carriers = merged_data['Dray SCAC(FL)'].unique()
     
     # For carriers not in performance dict (no performance data at all), assign default score
-    global_avg_performance = merged_data['Performance_Score'].dropna().mean() if not merged_data['Performance_Score'].dropna().empty else 3.0
+    # Since we're now keeping scores as percentages (0-100), use appropriate defaults
+    valid_performance_scores = merged_data['Performance_Score'].dropna()
+    if len(valid_performance_scores) > 0:
+        global_avg_performance = valid_performance_scores.mean()
+    else:
+        global_avg_performance = 75.0  # Default to 75% if no performance data exists
     
     carriers_with_no_data = []
     for carrier in all_carriers:
@@ -192,16 +214,20 @@ def apply_volume_weighted_performance(merged_data):
             carriers_with_no_data.append(carrier)
     
     if carriers_with_no_data:
-        track_processing_step("Default Assignment", f"Assigned global average ({global_avg_performance:.3f}) to {len(carriers_with_no_data)} carriers with no performance data")
+        track_processing_step("Default Assignment", f"Assigned global average ({global_avg_performance:.1f}%) to {len(carriers_with_no_data)} carriers with no performance data")
     
     # Fill missing performance scores with volume-weighted averages
     filled_count = 0
+    
     for carrier, weighted_avg in carrier_weighted_performance.items():
         # Find records for this carrier with missing performance scores
         missing_mask = (
             (merged_data['Dray SCAC(FL)'] == carrier) & 
             (merged_data['Performance_Score'].isna())
         )
+        
+        carrier_total_records = (merged_data['Dray SCAC(FL)'] == carrier).sum()
+        missing_for_carrier = missing_mask.sum()
         
         if missing_mask.any():
             records_affected = missing_mask.sum()
@@ -219,12 +245,6 @@ def apply_volume_weighted_performance(merged_data):
     
     # Verify all missing scores were filled
     missing_after = merged_data['Performance_Score'].isna().sum()
-    
-    # Display summary
-    if missing_after > 0:
-        print(f"Error: Still have {missing_after} missing performance scores after processing!")
-    else:
-        print(f"Performance scores completed: {filled_count} values filled across {len(carrier_weighted_performance)} carriers")
     
     track_processing_step("Final Result", f"Filled {filled_count} missing values, {missing_after} remaining")
     
@@ -292,7 +312,7 @@ def process_performance_data(Performancedata, has_performance):
         # Map week column names to week numbers
         performance_melted['Week Number'] = performance_melted['Week_Column'].map(week_mapping)
         
-        # Clean up performance scores (remove % and convert to decimal)
+        # Clean up performance scores (remove % and keep as percentage values)
         performance_melted['Performance_Score'] = (
             performance_melted['Performance_Score']
             .astype(str)
@@ -301,13 +321,24 @@ def process_performance_data(Performancedata, has_performance):
             .replace('', None)       # Replace empty strings with None
         )
         
-        # Convert to float, handling missing values
+        # Convert to float, handling missing values - KEEP AS PERCENTAGE VALUES (80.0 not 0.8)
         performance_melted['Performance_Score'] = pd.to_numeric(
             performance_melted['Performance_Score'], errors='coerce'
-        ) / 100
+        )
         
-        # Ensure performance scores are between 0 and 1 (only for non-null values)
-        performance_melted['Performance_Score'] = performance_melted['Performance_Score'].clip(0, 1)
+        # Debug: Check the range of performance scores
+        valid_scores = performance_melted['Performance_Score'].dropna()
+        if len(valid_scores) > 0:
+            print(f"Performance scores range: {valid_scores.min():.1f}% to {valid_scores.max():.1f}%")
+        
+        # Ensure performance scores are reasonable (0 to 100 for percentages)
+        mask = performance_melted['Performance_Score'].notna()
+        performance_melted.loc[mask, 'Performance_Score'] = performance_melted.loc[mask, 'Performance_Score'].clip(0, 100.0)
+        
+        # Debug: Check final range
+        final_max = performance_melted['Performance_Score'].max()
+        final_min = performance_melted['Performance_Score'].min()
+        print(f"Final performance score range: {final_min:.3f} to {final_max:.3f}")
         
         # Remove any rows with missing carriers
         performance_melted = performance_melted.dropna(subset=['Carrier'])

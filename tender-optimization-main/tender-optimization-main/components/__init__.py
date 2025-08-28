@@ -12,7 +12,7 @@ from .data_processor import (
     process_performance_data, validate_and_process_gvt_data, 
     validate_and_process_rate_data, merge_all_data, 
     apply_volume_weighted_performance, create_comprehensive_data, 
-    perform_lane_analysis
+    perform_lane_analysis, get_cheapest_rates_by_lane
 )
 
 # Filtering
@@ -29,8 +29,9 @@ from .metrics import (
 from .suboptimal_analysis import show_suboptimal_analysis
 from .summary_tables import show_summary_tables
 
-# Optimization
-from .optimization import show_optimization_section
+# Optimization - directly importing from the modules
+from .optimization_ui import show_unified_optimization_interface
+from .optimization_calculations import perform_optimization, get_optimization_results
 
 # Analytics and visualizations
 from .analytics import show_advanced_analytics
@@ -64,7 +65,7 @@ __all__ = [
     'show_summary_tables',
     
     # Optimization
-    'show_optimization_section',
+    'show_unified_optimization_interface', 'perform_optimization', 'get_optimization_results',
     
     # Analytics and visualizations
     'show_advanced_analytics', 'show_interactive_visualizations',

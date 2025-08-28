@@ -66,7 +66,7 @@ class PerformanceAssignmentTracker:
             
             with col3:
                 avg_score = assignments_df['Assigned_Score'].mean()
-                st.metric("Average Assigned Score", f"{avg_score:.3f}")
+                st.metric("Average Assigned Score", f"{avg_score:.1f}%")
             
             st.markdown("### Assignment Details")
             
@@ -100,8 +100,35 @@ def track_processing_step(step_name, details):
     performance_tracker.log_processing_step(step_name, details)
 
 def show_performance_assignments_table():
-    """Display the performance assignments table"""
-    performance_tracker.show_assignments_summary()
+    """Display the performance assignments table with debugging"""
+    st.subheader("🔍 Performance Assignments Debug")
+    
+    # Show debug information about the tracker
+    total_assignments = len(performance_tracker.assignments)
+    total_logs = len(performance_tracker.processing_log)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Total Assignments Recorded", total_assignments)
+    with col2:
+        st.metric("Processing Log Entries", total_logs)
+    
+    if total_logs > 0:
+        st.write("**Processing Log:**")
+        log_df = performance_tracker.get_processing_log_table()
+        st.dataframe(log_df, use_container_width=True)
+    else:
+        st.warning("⚠️ No processing log entries found - performance processing may not be running")
+    
+    if total_assignments == 0:
+        st.error("❌ No performance assignments recorded")
+        st.info("🔍 Possible issues:")
+        st.write("• Performance data merge failed")
+        st.write("• No missing performance scores to fill")
+        st.write("• Processing functions not being called")
+        st.write("• Carrier name mismatches between datasets")
+    else:
+        performance_tracker.show_assignments_summary()
 
 def clear_performance_tracking():
     """Clear all performance tracking data"""
