@@ -96,6 +96,15 @@ def main():
     
     section_header("🧮 Linear Programming Optimization")
     
+    # Debug data before passing to optimization
+    with st.expander("Debug Data Information", expanded=False):
+        st.write(f"Records in filtered data: {len(final_filtered_data)}")
+        st.write(f"Columns in filtered data: {final_filtered_data.columns.tolist()}")
+        if 'Container Count' in final_filtered_data.columns:
+            st.write(f"Total Container Count: {final_filtered_data['Container Count'].sum()}")
+        if 'Total_Lane_Volume' in final_filtered_data.columns:
+            st.write(f"Total Lane Volume: {final_filtered_data['Total_Lane_Volume'].sum()}")
+    
     if 'Performance_Score' in final_filtered_data.columns and len(final_filtered_data) > 0:
         st.markdown("**Find the optimal balance between cost savings and carrier performance using our unified optimization system.**")
         

@@ -144,6 +144,11 @@ def merge_all_data(GVTdata, Ratedata, cheapest_rates_by_lane, performance_clean,
     # Remove rows where Base Rate is null (no matching rate found)
     merged_data = merged_data.dropna(subset=['Base Rate'])
 
+    # Ensure Total_Lane_Volume exists (use Container Count if needed)
+    if 'Container Count' in merged_data.columns and 'Total_Lane_Volume' not in merged_data.columns:
+        merged_data['Total_Lane_Volume'] = merged_data['Container Count']
+        
+    # Calculate total rate based on container counts
     merged_data['Total Rate'] = merged_data['Base Rate'] * merged_data['Container Count']
 
     # Calculate potential savings (now based on cheapest lane rate)

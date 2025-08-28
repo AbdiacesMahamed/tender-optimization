@@ -1,6 +1,6 @@
 """
-Unified Optimization UI components for the Carrier Tender Optimization Dashboard
-Handles all user interface elements for linear programming optimization in one clean section
+Consolidated Optimization UI components for the Carrier Tender Optimization Dashboard
+Handles all user interface elements for linear programming optimization with a unified constraints view
 """
 import streamlit as st
 import pandas as pd
@@ -24,16 +24,14 @@ def show_unified_optimization_interface(final_filtered_data):
         st.session_state.port_constraints = {}
     if 'optimization_results' not in st.session_state:
         st.session_state.optimization_results = None
-    # We'll use the existing week filter from filters.py instead of creating a new one
     
     # Main optimization interface
     st.markdown("### 🎯 Optimization Control Center")
     
     # Create main layout with tabs for organized sections
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3 = st.tabs([
         "⚖️ Weights & Settings", 
-        "🚛 Unified Constraints", 
-        "🚀 Run Optimization",
+        "🔄 All Constraints", 
         "📊 Results"
     ])
     
@@ -41,12 +39,9 @@ def show_unified_optimization_interface(final_filtered_data):
         show_optimization_weights_section()
     
     with tab2:
-        show_carrier_constraints_section(final_filtered_data)
+        show_unified_constraints_section(final_filtered_data)
     
     with tab3:
-        show_optimization_execution_section(final_filtered_data)
-    
-    with tab4:
         show_optimization_results_section()
 
 def show_optimization_weights_section():
@@ -107,6 +102,20 @@ def show_optimization_weights_section():
             st.progress(cost_weight / 100, text="Cost Focus")
         with progress_col2:
             st.progress(performance_weight / 100, text="Performance Focus")
+    
+    # Pre-flight checks
+    st.markdown("#### 🧪 Pre-flight Checks")
+    st.info("✅ Set your cost vs performance weights above, then run optimization after setting constraints")
+
+    # Note: We'll handle the actual optimization run button in the unified constraints section
+    # since we need access to the final_filtered_data there
+            # Explicitly ensure all constraint types are reset
+            st.session_state.carrier_constraints = {}
+            st.session_state.scac_constraints = {}
+            st.session_state.category_constraints = {}
+            st.session_state.port_constraints = {}
+            reset_optimization_state()
+            st.rerun()
 
 def update_weights_callback():
     """Callback to update weights in session state"""
@@ -117,14 +126,17 @@ def update_weights_callback():
     st.session_state.normalized_cost_weight = st.session_state.cost_slider / 100.0
     st.session_state.normalized_performance_weight = st.session_state.performance_slider / 100.0
 
-def show_carrier_constraints_section(final_filtered_data):
-    """Completely unified constraints interface with all types in one view"""
+def show_unified_constraints_section(final_filtered_data):
+    """Unified constraints view showing all constraint types together"""
     st.markdown("#### 🔗 Unified Constraints Dashboard")
-    st.markdown("*Set constraints and allocations for carriers across ports and categories*")
+    st.markdown("*Set minimum and maximum container limits across carriers, categories and ports*")
     
     if len(final_filtered_data) == 0:
         st.warning("No data available for constraints")
         return
+    
+    # Initialize container to hold all constraint data for summary
+    all_constraints = []
     
     # Get unique carriers - try both 'Carrier' and 'Dray SCAC(FL)' columns
     carriers = []
@@ -141,12 +153,11 @@ def show_carrier_constraints_section(final_filtered_data):
         scacs = sorted(final_filtered_data['Dray SCAC(FL)'].unique())
         scacs = [scac for scac in scacs if pd.notna(scac)]  # Filter out NaN values
     
-    # Get unique categories from the Category column
+    # Get unique categories if available
     categories = []
     if 'Category' in final_filtered_data.columns and not final_filtered_data['Category'].isna().all():
         categories = sorted(final_filtered_data['Category'].unique())
         categories = [category for category in categories if pd.notna(category)]  # Filter out NaN values
-        st.sidebar.info(f"Found {len(categories)} shipping categories in data")  # Debug info
         
     # Get unique ports if available
     ports = []
@@ -155,6 +166,9 @@ def show_carrier_constraints_section(final_filtered_data):
         ports = [port for port in ports if pd.notna(port)]  # Filter out NaN values
     
     # Initialize session state for constraints if not already present
+    if 'carrier_constraints' not in st.session_state:
+        st.session_state.carrier_constraints = {}
+    
     if 'scac_constraints' not in st.session_state:
         st.session_state.scac_constraints = {}
     
@@ -168,7 +182,7 @@ def show_carrier_constraints_section(final_filtered_data):
     constraint_options_available = []
     if carriers:
         constraint_options_available.append("Carrier")
-    if scacs and scacs != carriers:  # Only add if different from carriers
+    if scacs:
         constraint_options_available.append("Carrier SCAC")
     if categories:
         constraint_options_available.append("Category")
@@ -177,53 +191,28 @@ def show_carrier_constraints_section(final_filtered_data):
         
     if constraint_options_available:
         st.info(f"Constraint options available: {', '.join(constraint_options_available)}")
-        
-    if not carriers and not categories and not ports:
+    
+    if not carriers and not categories and not ports and not scacs:
         st.warning("No constraint options found in data. Check that the necessary columns contain valid data.")
         return
     
-    # Create a container to hold all constraints data for the unified table
-    all_constraints = []
+    # Unified constraints view - all constraint types in one table
+    st.markdown("#### 📋 All Constraints")
     
-    # COMPLETELY UNIFIED CONSTRAINTS (Carriers, Ports, Categories)
+    # CARRIER CONSTRAINTS SECTION
     if carriers:
-        st.subheader("🚚 Complete Unified Constraints")
+        st.subheader("Carrier Constraints")
         
-        # Selections section - Create a row of multi-selects for all constraint types
-        col1, col2, col3 = st.columns(3)
+        # Create multi-select for carriers
+        selected_carriers = st.multiselect(
+            "Select carriers to add constraints for:",
+            options=carriers,
+            default=[carriers[0]] if carriers else []  # Default to first carrier
+        )
         
-        with col1:
-            # Create multi-select for carriers
-            selected_carriers = st.multiselect(
-                "Select carriers:",
-                options=carriers,
-                default=[carriers[0]] if carriers else [],  # Default to first carrier
-                key="carrier_multiselect"
-            )
+        # Create a dataframe to display all carrier constraints
+        carrier_constraints_data = []
         
-        with col2:
-            # Create multi-select for ports
-            selected_ports = st.multiselect(
-                "Select ports:",
-                options=ports,
-                default=[],
-                key="unified_port_multiselect"
-            )
-            
-        with col3:
-            # Create multi-select for categories from the Category column
-            selected_categories = st.multiselect(
-                "Select categories:",
-                options=categories,
-                default=[],
-                key="category_multiselect",
-                help="Select one or more shipping categories to add constraints for"
-            )
-            
-        # Create a container for all constraint data
-        all_constraint_combinations = []
-        
-        # Process all selected carriers
         for carrier in selected_carriers:
             # Get carrier data for context
             if 'Carrier' in final_filtered_data.columns and carrier in final_filtered_data['Carrier'].values:
@@ -232,7 +221,7 @@ def show_carrier_constraints_section(final_filtered_data):
                 carrier_data = final_filtered_data[final_filtered_data['Dray SCAC(FL)'] == carrier]
             else:
                 carrier_data = pd.DataFrame()
-            
+                
             # Check for the right container volume column
             if 'Total_Lane_Volume' in carrier_data.columns:
                 volume_column = 'Total_Lane_Volume'
@@ -241,333 +230,299 @@ def show_carrier_constraints_section(final_filtered_data):
             else:
                 volume_column = None
             
-            # Get carrier metrics
             total_volume = carrier_data[volume_column].sum() if (volume_column and len(carrier_data) > 0) else 0
             avg_rate = carrier_data['Base Rate'].mean() if ('Base Rate' in carrier_data.columns and len(carrier_data) > 0) else 0
             avg_performance = carrier_data['Performance_Score'].mean() if ('Performance_Score' in carrier_data.columns and len(carrier_data) > 0) else 0
             
-            # Create a dedicated section for this carrier with port and category options
-            st.markdown(f"### Carrier: {carrier}")
-            st.markdown(f"**Total Volume: {int(total_volume)} containers | Avg Rate: ${avg_rate:.2f} | Avg Performance: {avg_performance:.2f}**")
-            
-            # Carrier-level constraints
-            st.markdown("#### Overall Carrier Allocation")
-            carrier_col1, carrier_col2 = st.columns(2)
-            
-            with carrier_col1:
-                # Min containers input for carrier
-                default_min = st.session_state.carrier_constraints.get(carrier, {}).get('min', 0)
-                min_value = st.number_input(
-                    "Minimum Containers for Carrier:",
-                    min_value=0,
-                    max_value=int(total_volume) if total_volume > 0 else 10000,
-                    value=default_min,
-                    step=10,
-                    key=f"min_{carrier}_input"
-                )
-                # Update session state
-                if carrier not in st.session_state.carrier_constraints:
-                    st.session_state.carrier_constraints[carrier] = {}
-                st.session_state.carrier_constraints[carrier]['min'] = min_value
-                
-            with carrier_col2:
-                # Max containers input for carrier
-                default_max = st.session_state.carrier_constraints.get(carrier, {}).get('max', int(total_volume) if total_volume > 0 else 1000)
-                max_value = st.number_input(
-                    "Maximum Containers for Carrier:",
-                    min_value=0,
-                    max_value=int(total_volume * 1.5) if total_volume > 0 else 10000,  # Allow some flexibility
-                    value=default_max,
-                    step=10,
-                    key=f"max_{carrier}_input"
-                )
-                # Update session state
-                st.session_state.carrier_constraints[carrier]['max'] = max_value
-            
             # Add carrier to constraints data
+            carrier_constraints_data.append({
+                'Type': 'Carrier',
+                'Name': carrier,
+                'Available Volume': total_volume,
+                'Avg Rate': f"${avg_rate:.2f}",
+                'Avg Performance': f"{avg_performance:.2f}",
+                'Min Containers': st.session_state.carrier_constraints.get(carrier, {}).get('min', 0),
+                'Max Containers': st.session_state.carrier_constraints.get(carrier, {}).get('max', int(total_volume) if total_volume > 0 else 1000)
+            })
+            
+            # Add to all constraints for summary
             all_constraints.append({
                 'Type': 'Carrier',
                 'Name': carrier,
-                'Available Volume': int(total_volume),
-                'Avg Rate': f"${avg_rate:.2f}",
-                'Avg Performance': f"{avg_performance:.2f}",
-                'Min': min_value,
-                'Max': max_value
+                'Min': st.session_state.carrier_constraints.get(carrier, {}).get('min', 0),
+                'Max': st.session_state.carrier_constraints.get(carrier, {}).get('max', int(total_volume) if total_volume > 0 else 1000)
             })
-            
-            # PORT CONSTRAINTS FOR THIS CARRIER
-            if selected_ports:
-                st.markdown(f"#### 🚢 Port Constraints for {carrier}")
-                
-                for port in selected_ports:
-                    # Filter data for this carrier and port
-                    carrier_port_data = carrier_data[carrier_data['Discharged Port'] == port] if len(carrier_data) > 0 else pd.DataFrame()
-                    
-                    # Get volume for this carrier+port combination
-                    port_volume = carrier_port_data[volume_column].sum() if (volume_column and len(carrier_port_data) > 0) else 0
-                    
-                    if port_volume > 0:
-                        # Create a unique key for this carrier+port combination
-                        combo_key = f"{carrier}_{port}"
-                        
-                        # Create a row for this port
-                        st.markdown(f"**Port: {port} - Available: {int(port_volume)} containers**")
-                        port_col1, port_col2 = st.columns(2)
-                        
-                        with port_col1:
-                            # Min containers for this carrier+port
-                            combo_min = st.number_input(
-                                f"Min containers for {port}:",
-                                min_value=0,
-                                max_value=int(port_volume),
-                                value=0,
-                                step=5,
-                                key=f"min_{combo_key}"
-                            )
-                            
-                        with port_col2:
-                            # Max containers for this carrier+port
-                            combo_max = st.number_input(
-                                f"Max containers for {port}:",
-                                min_value=0,
-                                max_value=int(port_volume * 1.5),
-                                value=int(port_volume),
-                                step=5,
-                                key=f"max_{combo_key}"
-                            )
-                        
-                        # Store this carrier+port constraint
-                        if port not in st.session_state.port_constraints:
-                            st.session_state.port_constraints[port] = {}
-                        if carrier not in st.session_state.port_constraints[port]:
-                            st.session_state.port_constraints[port][carrier] = {}
-                        
-                        st.session_state.port_constraints[port][carrier]['min'] = combo_min
-                        st.session_state.port_constraints[port][carrier]['max'] = combo_max
-                        
-                        # Add to unified constraints
-                        all_constraints.append({
-                            'Type': 'Carrier+Port',
-                            'Name': f"{carrier} @ {port}",
-                            'Available Volume': int(port_volume),
-                            'Min': combo_min,
-                            'Max': combo_max
-                        })
-            
-            # CATEGORY CONSTRAINTS FOR THIS CARRIER
-            if selected_categories:
-                st.markdown(f"#### 🏷️ Category Constraints for {carrier}")
-                st.info(f"Set container allocation limits for each shipping category served by {carrier}")
-                
-                for category in selected_categories:
-                    # Filter data for this carrier and category
-                    carrier_category_data = carrier_data[carrier_data['Category'] == category] if len(carrier_data) > 0 else pd.DataFrame()
-                    
-                    # Get volume for this carrier+category combination
-                    category_volume = carrier_category_data[volume_column].sum() if (volume_column and len(carrier_category_data) > 0) else 0
-                    
-                    if category_volume > 0:
-                        # Create a unique key for this carrier+category combination
-                        combo_key = f"{carrier}_{category}"
-                        
-                        # Create a row for this category
-                        st.markdown(f"**Category: {category} - Available: {int(category_volume)} containers**")
-                        cat_col1, cat_col2 = st.columns(2)
-                        
-                        with cat_col1:
-                            # Min containers for this carrier+category
-                            combo_min = st.number_input(
-                                f"Min containers for {category}:",
-                                min_value=0,
-                                max_value=int(category_volume),
-                                value=0,
-                                step=5,
-                                key=f"min_{combo_key}"
-                            )
-                            
-                        with cat_col2:
-                            # Max containers for this carrier+category
-                            combo_max = st.number_input(
-                                f"Max containers for {category}:",
-                                min_value=0,
-                                max_value=int(category_volume * 1.5),
-                                value=int(category_volume),
-                                step=5,
-                                key=f"max_{combo_key}"
-                            )
-                        
-                        # Store this carrier+category constraint
-                        if category not in st.session_state.category_constraints:
-                            st.session_state.category_constraints[category] = {}
-                        if carrier not in st.session_state.category_constraints[category]:
-                            st.session_state.category_constraints[category][carrier] = {}
-                        
-                        st.session_state.category_constraints[category][carrier]['min'] = combo_min
-                        st.session_state.category_constraints[category][carrier]['max'] = combo_max
-                        
-                        # Add to unified constraints
-                        all_constraints.append({
-                            'Type': 'Carrier+Category',
-                            'Name': f"{carrier} / {category}",
-                            'Available Volume': int(category_volume),
-                            'Min': combo_min,
-                            'Max': combo_max
-                        })
-            
-            st.markdown("---")
-    
-    # We're removing the standalone PORT CONSTRAINTS section and integrating it with carrier constraints
-    
-    # We're removing the standalone CATEGORY CONSTRAINTS section and integrating it with carrier constraints
-    
-    # UNIFIED CONSTRAINT TABLE
-    if all_constraints:
-        st.subheader("🔄 All Constraints in One View")
-        st.markdown("*Edit all constraints in one place*")
         
-        # Create a dataframe with all constraints
-        constraints_df = pd.DataFrame(all_constraints)
+        # Create editable dataframe for carrier constraints
+        if carrier_constraints_data:
+            carrier_df = pd.DataFrame(carrier_constraints_data)
+            
+            edited_carrier_df = st.data_editor(
+                carrier_df,
+                column_config={
+                    'Type': st.column_config.TextColumn('Type', disabled=True),
+                    'Name': st.column_config.TextColumn('Name', disabled=True),
+                    'Available Volume': st.column_config.NumberColumn('Available Volume', disabled=True),
+                    'Avg Rate': st.column_config.TextColumn('Avg Rate', disabled=True),
+                    'Avg Performance': st.column_config.TextColumn('Avg Performance', disabled=True),
+                    'Min Containers': st.column_config.NumberColumn('Min Containers', min_value=0, step=10),
+                    'Max Containers': st.column_config.NumberColumn('Max Containers', min_value=0, step=10)
+                },
+                use_container_width=True,
+                hide_index=True,
+                key="carrier_constraints_editor"
+            )
+            
+            # Update session state with edited values
+            for _, row in edited_carrier_df.iterrows():
+                carrier_name = row['Name']
+                min_containers = row['Min Containers']
+                max_containers = row['Max Containers']
+                
+                if carrier_name not in st.session_state.carrier_constraints:
+                    st.session_state.carrier_constraints[carrier_name] = {}
+                
+                st.session_state.carrier_constraints[carrier_name]['min'] = min_containers
+                st.session_state.carrier_constraints[carrier_name]['max'] = max_containers
+    
+    # PORT CONSTRAINTS SECTION
+    if ports:
+        st.subheader("Port Constraints")
         
-        # Make the dataframe editable
-        edited_df = st.data_editor(
-            constraints_df,
-            column_config={
-                'Type': st.column_config.TextColumn('Type', disabled=True),
-                'Name': st.column_config.TextColumn('Name', disabled=True),
-                'Available Volume': st.column_config.NumberColumn('Available Volume', disabled=True, format="%d"),
-                'Avg Rate': st.column_config.TextColumn('Avg Rate', disabled=True),
-                'Avg Performance': st.column_config.TextColumn('Avg Performance', disabled=True),
-                'Min': st.column_config.NumberColumn('Min Containers', min_value=0, step=10, format="%d"),
-                'Max': st.column_config.NumberColumn('Max Containers', min_value=0, step=10, format="%d")
-            },
-            hide_index=True,
-            use_container_width=True,
-            key="unified_constraints_table"
+        # Create multi-select for ports
+        selected_ports = st.multiselect(
+            "Select ports to add constraints for:",
+            options=ports,
+            default=[]
         )
         
-        # Update session state based on edited values
-        for _, row in edited_df.iterrows():
-            constraint_type = row['Type']
-            constraint_name = row['Name']
-            min_value = int(row['Min'])
-            max_value = int(row['Max'])
-            
-            # Update the appropriate constraint type
-            if constraint_type == 'Carrier':
-                if constraint_name not in st.session_state.carrier_constraints:
-                    st.session_state.carrier_constraints[constraint_name] = {}
-                st.session_state.carrier_constraints[constraint_name]['min'] = min_value
-                st.session_state.carrier_constraints[constraint_name]['max'] = max_value
-            
-            elif constraint_type == 'Port':
-                if constraint_name not in st.session_state.port_constraints:
-                    st.session_state.port_constraints[constraint_name] = {}
-                st.session_state.port_constraints[constraint_name]['min'] = min_value
-                st.session_state.port_constraints[constraint_name]['max'] = max_value
-            
-            elif constraint_type == 'Category':
-                if constraint_name not in st.session_state.category_constraints:
-                    st.session_state.category_constraints[constraint_name] = {}
-                st.session_state.category_constraints[constraint_name]['min'] = min_value
-                st.session_state.category_constraints[constraint_name]['max'] = max_value
-            
-            elif constraint_type == 'SCAC':
-                if constraint_name not in st.session_state.scac_constraints:
-                    st.session_state.scac_constraints[constraint_name] = {}
-                st.session_state.scac_constraints[constraint_name]['min'] = min_value
-                st.session_state.scac_constraints[constraint_name]['max'] = max_value
+        # Create a dataframe to display all port constraints
+        port_constraints_data = []
         
-        # Run optimization button at the bottom of the constraints section
-        st.markdown("---")
+        for port in selected_ports:
+            port_data = final_filtered_data[final_filtered_data['Discharged Port'] == port]
+            
+            # Check for the right container volume column
+            if 'Total_Lane_Volume' in port_data.columns:
+                volume_column = 'Total_Lane_Volume'
+            elif 'Container Count' in port_data.columns:
+                volume_column = 'Container Count'
+            else:
+                volume_column = None
+            
+            total_volume = port_data[volume_column].sum() if (volume_column and len(port_data) > 0) else 0
+            
+            # Add port to constraints data
+            port_constraints_data.append({
+                'Type': 'Port',
+                'Name': port,
+                'Available Volume': total_volume,
+                'Min Containers': st.session_state.port_constraints.get(port, {}).get('min', 0),
+                'Max Containers': st.session_state.port_constraints.get(port, {}).get('max', int(total_volume) if total_volume > 0 else 1000)
+            })
+            
+            # Add to all constraints for summary
+            all_constraints.append({
+                'Type': 'Port',
+                'Name': port,
+                'Min': st.session_state.port_constraints.get(port, {}).get('min', 0),
+                'Max': st.session_state.port_constraints.get(port, {}).get('max', int(total_volume) if total_volume > 0 else 1000)
+            })
         
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            if st.button(
-                "🚀 Run Optimization Analysis",
-                type="primary",
+        # Create editable dataframe for port constraints
+        if port_constraints_data:
+            port_df = pd.DataFrame(port_constraints_data)
+            
+            edited_port_df = st.data_editor(
+                port_df,
+                column_config={
+                    'Type': st.column_config.TextColumn('Type', disabled=True),
+                    'Name': st.column_config.TextColumn('Name', disabled=True),
+                    'Available Volume': st.column_config.NumberColumn('Available Volume', disabled=True),
+                    'Min Containers': st.column_config.NumberColumn('Min Containers', min_value=0, step=10),
+                    'Max Containers': st.column_config.NumberColumn('Max Containers', min_value=0, step=10)
+                },
                 use_container_width=True,
-                key="run_optimization_button"
-            ):
-                run_unified_optimization(final_filtered_data)
+                hide_index=True,
+                key="port_constraints_editor"
+            )
+            
+            # Update session state with edited values
+            for _, row in edited_port_df.iterrows():
+                port_name = row['Name']
+                min_containers = row['Min Containers']
+                max_containers = row['Max Containers']
+                
+                if port_name not in st.session_state.port_constraints:
+                    st.session_state.port_constraints[port_name] = {}
+                
+                st.session_state.port_constraints[port_name]['min'] = min_containers
+                st.session_state.port_constraints[port_name]['max'] = max_containers
+    
+    # CATEGORY CONSTRAINTS SECTION
+    if categories:
+        st.subheader("Category Constraints")
         
-        with col2:
-            if st.button("🔄 Reset", help="Clear all constraints", key="reset_constraints_button"):
-                # Reset all constraints
-                st.session_state.carrier_constraints = {}
-                st.session_state.scac_constraints = {}
-                st.session_state.category_constraints = {}
-                st.session_state.port_constraints = {}
-                st.session_state.optimization_results = None
-                st.rerun()
-    else:
-        st.warning("No constraint options selected. Please select carriers, ports, or categories to add constraints.")
-
-def show_optimization_execution_section(final_filtered_data):
-    """Optimization execution and settings section"""
-    st.markdown("#### 🚀 Run Optimization")
+        # Create multi-select for categories
+        selected_categories = st.multiselect(
+            "Select categories to add constraints for:",
+            options=categories,
+            default=[]
+        )
+        
+        # Create a dataframe to display all category constraints
+        category_constraints_data = []
+        
+        for category in selected_categories:
+            category_data = final_filtered_data[final_filtered_data['Category'] == category]
+            
+            # Check for the right container volume column
+            if 'Total_Lane_Volume' in category_data.columns:
+                volume_column = 'Total_Lane_Volume'
+            elif 'Container Count' in category_data.columns:
+                volume_column = 'Container Count'
+            else:
+                volume_column = None
+            
+            total_volume = category_data[volume_column].sum() if (volume_column and len(category_data) > 0) else 0
+            
+            # Add category to constraints data
+            category_constraints_data.append({
+                'Type': 'Category',
+                'Name': category,
+                'Available Volume': total_volume,
+                'Min Containers': st.session_state.category_constraints.get(category, {}).get('min', 0),
+                'Max Containers': st.session_state.category_constraints.get(category, {}).get('max', int(total_volume) if total_volume > 0 else 1000)
+            })
+            
+            # Add to all constraints for summary
+            all_constraints.append({
+                'Type': 'Category',
+                'Name': category,
+                'Min': st.session_state.category_constraints.get(category, {}).get('min', 0),
+                'Max': st.session_state.category_constraints.get(category, {}).get('max', int(total_volume) if total_volume > 0 else 1000)
+            })
+        
+        # Create editable dataframe for category constraints
+        if category_constraints_data:
+            category_df = pd.DataFrame(category_constraints_data)
+            
+            edited_category_df = st.data_editor(
+                category_df,
+                column_config={
+                    'Type': st.column_config.TextColumn('Type', disabled=True),
+                    'Name': st.column_config.TextColumn('Name', disabled=True),
+                    'Available Volume': st.column_config.NumberColumn('Available Volume', disabled=True),
+                    'Min Containers': st.column_config.NumberColumn('Min Containers', min_value=0, step=10),
+                    'Max Containers': st.column_config.NumberColumn('Max Containers', min_value=0, step=10)
+                },
+                use_container_width=True,
+                hide_index=True,
+                key="category_constraints_editor"
+            )
+            
+            # Update session state with edited values
+            for _, row in edited_category_df.iterrows():
+                category_name = row['Name']
+                min_containers = row['Min Containers']
+                max_containers = row['Max Containers']
+                
+                if category_name not in st.session_state.category_constraints:
+                    st.session_state.category_constraints[category_name] = {}
+                
+                st.session_state.category_constraints[category_name]['min'] = min_containers
+                st.session_state.category_constraints[category_name]['max'] = max_containers
     
-    # Pre-flight checks
-    st.markdown("**Pre-flight Checks**")
+    # SCAC CONSTRAINTS SECTION
+    if scacs and not carriers: # Only show if different from carriers
+        st.subheader("SCAC Constraints")
+        
+        # Create multi-select for SCACs
+        selected_scacs = st.multiselect(
+            "Select SCACs to add constraints for:",
+            options=scacs,
+            default=[]
+        )
+        
+        # Create a dataframe to display all SCAC constraints
+        scac_constraints_data = []
+        
+        for scac in selected_scacs:
+            scac_data = final_filtered_data[final_filtered_data['Dray SCAC(FL)'] == scac]
+            
+            # Check for the right container volume column
+            if 'Total_Lane_Volume' in scac_data.columns:
+                volume_column = 'Total_Lane_Volume'
+            elif 'Container Count' in scac_data.columns:
+                volume_column = 'Container Count'
+            else:
+                volume_column = None
+            
+            total_volume = scac_data[volume_column].sum() if (volume_column and len(scac_data) > 0) else 0
+            
+            # Add SCAC to constraints data
+            scac_constraints_data.append({
+                'Type': 'SCAC',
+                'Name': scac,
+                'Available Volume': total_volume,
+                'Min Containers': st.session_state.scac_constraints.get(scac, {}).get('min', 0),
+                'Max Containers': st.session_state.scac_constraints.get(scac, {}).get('max', int(total_volume) if total_volume > 0 else 1000)
+            })
+            
+            # Add to all constraints for summary
+            all_constraints.append({
+                'Type': 'SCAC',
+                'Name': scac,
+                'Min': st.session_state.scac_constraints.get(scac, {}).get('min', 0),
+                'Max': st.session_state.scac_constraints.get(scac, {}).get('max', int(total_volume) if total_volume > 0 else 1000)
+            })
+        
+        # Create editable dataframe for SCAC constraints
+        if scac_constraints_data:
+            scac_df = pd.DataFrame(scac_constraints_data)
+            
+            edited_scac_df = st.data_editor(
+                scac_df,
+                column_config={
+                    'Type': st.column_config.TextColumn('Type', disabled=True),
+                    'Name': st.column_config.TextColumn('Name', disabled=True),
+                    'Available Volume': st.column_config.NumberColumn('Available Volume', disabled=True),
+                    'Min Containers': st.column_config.NumberColumn('Min Containers', min_value=0, step=10),
+                    'Max Containers': st.column_config.NumberColumn('Max Containers', min_value=0, step=10)
+                },
+                use_container_width=True,
+                hide_index=True,
+                key="scac_constraints_editor"
+            )
+            
+            # Update session state with edited values
+            for _, row in edited_scac_df.iterrows():
+                scac_name = row['Name']
+                min_containers = row['Min Containers']
+                max_containers = row['Max Containers']
+                
+                if scac_name not in st.session_state.scac_constraints:
+                    st.session_state.scac_constraints[scac_name] = {}
+                
+                st.session_state.scac_constraints[scac_name]['min'] = min_containers
+                st.session_state.scac_constraints[scac_name]['max'] = max_containers
     
-    checks_passed = True
-    
-    # Check 1: Data availability
-    if len(final_filtered_data) > 0:
-        st.success(f"✅ Data: {len(final_filtered_data)} records available")
-    else:
-        st.error("❌ No data available for optimization")
-        checks_passed = False
-    
-    # Check 2: Performance scores
-    if 'Performance_Score' in final_filtered_data.columns:
-        missing_perf = final_filtered_data['Performance_Score'].isna().sum()
-        if missing_perf == 0:
-            st.success("✅ Performance: All records have performance scores")
-        else:
-            st.warning(f"⚠️ Performance: {missing_perf} records missing performance scores")
-    else:
-        st.error("❌ Performance: No performance scores found")
-        checks_passed = False
-    
-    # Check 3: Multiple carriers per lane
-    if len(final_filtered_data) > 0 and 'Lane' in final_filtered_data.columns and 'Carrier' in final_filtered_data.columns:
-        lane_carriers = final_filtered_data.groupby('Lane')['Carrier'].nunique()
-        multi_carrier_lanes = (lane_carriers > 1).sum()
-        if multi_carrier_lanes > 0:
-            st.success(f"✅ Choices: {multi_carrier_lanes} lanes have multiple carrier options")
-        else:
-            st.warning("⚠️ Choices: No lanes have multiple carrier options")
-    
-    # Check 4: Weights set
-    total_weight = st.session_state.opt_cost_weight + st.session_state.opt_performance_weight
-    if total_weight > 0:
-        st.success(f"✅ Weights: Cost {st.session_state.opt_cost_weight}% | Performance {st.session_state.opt_performance_weight}%")
-    else:
-        st.error("❌ Weights: Please set optimization weights")
-        checks_passed = False
-    
-    # Optimization button
-    st.markdown("---")
-    
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        if st.button(
-            "🚀 Run Optimization Analysis",
-            type="primary",
-            disabled=not checks_passed,
-            use_container_width=True
-        ):
-            run_unified_optimization(final_filtered_data)
-    
-    with col2:
-        if st.button("🔄 Reset", help="Clear all results and constraints"):
-            # Explicitly ensure all constraint types are reset
-            st.session_state.carrier_constraints = {}
-            st.session_state.scac_constraints = {}
-            st.session_state.category_constraints = {}
-            st.session_state.port_constraints = {}
-            reset_optimization_state()
-            st.rerun()
+    # CONSTRAINT SUMMARY
+    if all_constraints:
+        st.subheader("Constraints Summary")
+        summary_df = pd.DataFrame(all_constraints)
+        
+        st.dataframe(
+            summary_df,
+            column_config={
+                'Type': st.column_config.TextColumn('Type'),
+                'Name': st.column_config.TextColumn('Name'),
+                'Min': st.column_config.NumberColumn('Min Containers'),
+                'Max': st.column_config.NumberColumn('Max Containers')
+            },
+            use_container_width=True,
+            hide_index=True
+        )
 
 def show_optimization_results_section():
     """Display optimization results and analysis"""
@@ -576,12 +531,6 @@ def show_optimization_results_section():
         return
     
     results = st.session_state.optimization_results
-    
-    # Debug information
-    with st.expander("Debug Information", expanded=False):
-        st.write("Results available:", results is not None)
-        st.write("Keys in results:", list(results.keys()) if isinstance(results, dict) else "Not a dictionary")
-        st.write("Success flag:", results.get('success', 'Not available'))
     
     if not results.get('success', False):
         st.error(f"❌ Optimization failed: {results.get('error', 'Unknown error')}")
@@ -642,6 +591,11 @@ def show_optimization_results_section():
     else:
         st.warning("No allocation details available")
 
+def reset_optimization_state():
+    """Reset all optimization-related session state"""
+    if 'optimization_results' in st.session_state:
+        st.session_state.optimization_results = None
+
 def run_unified_optimization(final_filtered_data):
     """Execute the unified optimization process"""
     with st.spinner("🔄 Running optimization analysis..."):
@@ -651,13 +605,8 @@ def run_unified_optimization(final_filtered_data):
             cost_weight = st.session_state.get('normalized_cost_weight', 0.7)
             performance_weight = st.session_state.get('normalized_performance_weight', 0.3)
             
-            # Use the already filtered data from the main filters
+            # Prepare data
             opt_data = final_filtered_data.copy()
-                
-            # Check if we have data to work with
-            if len(opt_data) == 0:
-                st.error("No data available for optimization. Please check your filters.")
-                return
             
             # Simple allocation algorithm based on combined score
             results = perform_unified_allocation(
@@ -686,12 +635,7 @@ def run_unified_optimization(final_filtered_data):
                 'error': str(e)
             }
 
-def reset_optimization_state():
-    """Reset all optimization-related session state"""
-    if 'optimization_results' in st.session_state:
-        st.session_state.optimization_results = None
-
-# Copy the function from the original file
+# Copy the allocation function from the original file
 def perform_unified_allocation(data, cost_weight, performance_weight, carrier_constraints, scac_constraints=None, category_constraints=None, port_constraints=None):
     """Perform the unified allocation algorithm with carrier, SCAC, category, and port constraints"""
     
