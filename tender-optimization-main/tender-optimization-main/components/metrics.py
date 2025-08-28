@@ -351,6 +351,10 @@ def show_detailed_analysis_table(final_filtered_data, metrics=None):
         base_columns = ['Discharged Port', 'Dray SCAC(FL)', 'Lane', 'Facility', 
                        'Week Number', 'Container Count']
         
+        # Add Category if available in the data (from GVT data)
+        if 'Category' in final_filtered_data.columns:
+            base_columns.append('Category')
+        
         # 1. Current Selection
         current_columns = base_columns + ['Base Rate', 'Total Rate']
         if 'Performance_Score' in final_filtered_data.columns:
@@ -400,6 +404,19 @@ def show_detailed_analysis_table(final_filtered_data, metrics=None):
                 hp_row['Facility'] = perf_data['Facility']
                 hp_row['Week Number'] = perf_data['Week_Number']
                 hp_row['Container Count'] = perf_data['Container_Count']
+                
+                # Add Category if available in the performance data
+                if 'Category' in perf_data:
+                    hp_row['Category'] = perf_data['Category']
+                elif 'Category' in base_columns:
+                    # Try to get Category from the original data
+                    matching_row = final_filtered_data[
+                        (final_filtered_data['Discharged Port'] == perf_data['Discharged_Port']) &
+                        (final_filtered_data['Lane'] == perf_data['Lane']) &
+                        (final_filtered_data['Week Number'] == perf_data['Week_Number'])
+                    ]
+                    if not matching_row.empty:
+                        hp_row['Category'] = matching_row.iloc[0]['Category']
                 hp_row['Hypothetical_Carrier'] = perf_data['Best_Performance_Carrier']
                 hp_row['Hypothetical_Base_Rate'] = perf_data['Best_Performance_Rate']
                 hp_row['Hypothetical_Total_Cost'] = perf_data['Hypothetical_Total_Cost']

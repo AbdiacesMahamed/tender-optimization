@@ -146,7 +146,7 @@ def show_carrier_constraints_section(final_filtered_data):
     if 'Category' in final_filtered_data.columns and not final_filtered_data['Category'].isna().all():
         categories = sorted(final_filtered_data['Category'].unique())
         categories = [category for category in categories if pd.notna(category)]  # Filter out NaN values
-        st.sidebar.info(f"Found {len(categories)} shipping categories in data")  # Debug info
+    # Found categories in data (no debug output)
         
     # Get unique ports if available
     ports = []

@@ -8,7 +8,7 @@ from .config_styling import section_header
 def validate_and_process_gvt_data(GVTdata):
     """Validate and process GVT data"""
     # Check if required columns exist and handle missing ones
-    required_gvt_columns = ['SSL ATA', 'Discharged Port', 'Dray SCAC(FL)', 'Facility']
+    required_gvt_columns = ['SSL ATA', 'Discharged Port', 'Dray SCAC(FL)', 'Facility', 'Category']
     missing_columns = [col for col in required_gvt_columns if col not in GVTdata.columns]
 
     if missing_columns:
@@ -107,7 +107,12 @@ def perform_lane_analysis(Ratedata):
 def merge_all_data(GVTdata, Ratedata, cheapest_rates_by_lane, performance_clean, has_performance):
     """Merge all data sources together"""
     # Update lane_count to include Lane column - MOVED BEFORE THE MERGE
-    lane_count = GVTdata.groupby(['Week Number', 'Discharged Port', 'Dray SCAC(FL)', 'Facility', 'Lane', 'Lookup']).size().reset_index(name='Container Count')
+    # Include Category in the groupby to preserve it in the final data
+    groupby_columns = ['Week Number', 'Discharged Port', 'Dray SCAC(FL)', 'Facility', 'Lane', 'Lookup']
+    if 'Category' in GVTdata.columns:
+        groupby_columns.append('Category')
+    
+    lane_count = GVTdata.groupby(groupby_columns).size().reset_index(name='Container Count')
 
     # Merge with rate data first
     merged_data = pd.merge(lane_count, Ratedata, how='left', on='Lookup', suffixes=('', '_rate'))
