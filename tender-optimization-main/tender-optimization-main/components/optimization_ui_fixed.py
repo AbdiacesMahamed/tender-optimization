@@ -127,14 +127,23 @@ def show_carrier_constraints_section(final_filtered_data):
         return
     
     # Get unique carriers - try both 'Carrier' and 'Dray SCAC(FL)' columns
+    # Robust carrier extraction: prefer 'Carrier' then 'Dray SCAC(FL)'; coerce to str, drop NaN/empty
     carriers = []
-    if 'Carrier' in final_filtered_data.columns and not final_filtered_data['Carrier'].isna().all():
-        carriers = sorted(final_filtered_data['Carrier'].unique())
-    elif 'Dray SCAC(FL)' in final_filtered_data.columns and not final_filtered_data['Dray SCAC(FL)'].isna().all():
-        carriers = sorted(final_filtered_data['Dray SCAC(FL)'].unique())
+    if final_filtered_data is None or final_filtered_data.empty:
+        carriers = []
+    else:
+        carrier_series = None
+        for col in ['Carrier', 'Dray SCAC(FL)']:
+            if col in final_filtered_data.columns:
+                s = final_filtered_data[col].dropna()
+                if len(s) > 0:
+                    carrier_series = s.astype(str).str.strip()
+                    break
+        if carrier_series is None:
+            carriers = []
+        else:
+            carriers = sorted([c for c in pd.unique(carrier_series) if c and str(c).lower() != 'nan'])
         
-    carriers = [carrier for carrier in carriers if pd.notna(carrier)]  # Filter out NaN values
-    
     # Get unique SCACs
     scacs = []
     if 'Dray SCAC(FL)' in final_filtered_data.columns and not final_filtered_data['Dray SCAC(FL)'].isna().all():
