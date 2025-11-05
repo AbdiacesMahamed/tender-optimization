@@ -199,6 +199,9 @@ def show_trend_analysis_interface(final_filtered_data, perf_trends, top_carriers
 
 def show_performance_ranking(final_filtered_data):
     """Show performance ranking table"""
+    # Ensure Performance_Score is numeric
+    final_filtered_data['Performance_Score'] = pd.to_numeric(final_filtered_data['Performance_Score'], errors='coerce')
+    
     current_perf = final_filtered_data.groupby('Dray SCAC(FL)')['Performance_Score'].mean().sort_values(ascending=False)
     st.write("**Current Performance Ranking:**")
     perf_rank_df = pd.DataFrame({

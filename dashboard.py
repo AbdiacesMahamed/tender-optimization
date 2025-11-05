@@ -59,25 +59,28 @@ def main():
     
     # File upload and data loading
     gvt_file, rate_file, performance_file, constraints_file = show_file_upload_section()
-    GVTdata, Ratedata, Performancedata, has_performance = load_data_files(gvt_file, rate_file, performance_file)
     
-    # Process performance data
-    performance_clean, has_performance = process_performance_data(Performancedata, has_performance)
-    
-    # Validate and process data
-    GVTdata = validate_and_process_gvt_data(GVTdata)
-    Ratedata = validate_and_process_rate_data(Ratedata)
-    
-    # Merge all data
-    merged_data = merge_all_data(GVTdata, Ratedata, performance_clean, has_performance)
-    
-    # Apply volume-weighted performance calculations to fill missing data
-    merged_data = apply_volume_weighted_performance(merged_data)
+    with st.spinner('⚙️ Loading and processing data...'):
+        GVTdata, Ratedata, Performancedata, has_performance = load_data_files(gvt_file, rate_file, performance_file)
+        
+        # Process performance data
+        performance_clean, has_performance = process_performance_data(Performancedata, has_performance)
+        
+        # Validate and process data
+        GVTdata = validate_and_process_gvt_data(GVTdata)
+        Ratedata = validate_and_process_rate_data(Ratedata)
+        
+        # Merge all data
+        merged_data = merge_all_data(GVTdata, Ratedata, performance_clean, has_performance)
+        
+        # Apply volume-weighted performance calculations to fill missing data
+        merged_data = apply_volume_weighted_performance(merged_data)
     
     # Show performance assignments table
     show_performance_assignments_table()
     
-    comprehensive_data = create_comprehensive_data(merged_data)
+    with st.spinner('📊 Creating comprehensive data view...'):
+        comprehensive_data = create_comprehensive_data(merged_data)
     
     # Show rate type selector (Base Rate vs CPC)
     show_rate_type_selector(comprehensive_data)
@@ -92,28 +95,29 @@ def main():
     show_selection_summary(display_ports, display_fcs, display_weeks, display_scacs, final_filtered_data)
     
     # Process and apply constraints if file is uploaded
-    constraints_df = None
-    constrained_data = pd.DataFrame()
-    unconstrained_data = final_filtered_data.copy()
-    constraint_summary = []
-    
-    if constraints_file is not None:
-        st.markdown("---")
-        constraints_df = process_constraints_file(constraints_file)
+    with st.spinner('🔒 Processing constraints...'):
+        constraints_df = None
+        constrained_data = pd.DataFrame()
+        unconstrained_data = final_filtered_data.copy()
+        constraint_summary = []
         
-        if constraints_df is not None:
-            # Apply constraints to filtered data
-            constrained_data, unconstrained_data, constraint_summary = apply_constraints_to_data(
-                final_filtered_data, constraints_df
-            )
+        if constraints_file is not None:
+            st.markdown("---")
+            constraints_df = process_constraints_file(constraints_file)
             
-            # Show constraint summary
-            if len(constraint_summary) > 0:
-                show_constraints_summary(constraint_summary)
+            if constraints_df is not None:
+                # Apply constraints to filtered data
+                constrained_data, unconstrained_data, constraint_summary = apply_constraints_to_data(
+                    final_filtered_data, constraints_df
+                )
+                
+                # Show constraint summary
+                if len(constraint_summary) > 0:
+                    show_constraints_summary(constraint_summary)
+            else:
+                st.warning("⚠️ Constraints file could not be processed")
         else:
-            st.warning("⚠️ Constraints file could not be processed")
-    else:
-        st.info("ℹ️ No constraints file uploaded - all data is unconstrained")
+            st.info("ℹ️ No constraints file uploaded - all data is unconstrained")
     
     # Calculate metrics on the FULL filtered data (before constraint split)
     metrics = calculate_enhanced_metrics(final_filtered_data)

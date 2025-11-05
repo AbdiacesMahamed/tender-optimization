@@ -3,6 +3,7 @@ Performance calculation module for the Carrier Tender Optimization Dashboard
 Handles performance-based cost optimization calculations
 """
 import pandas as pd
+import streamlit as st
 
 def calculate_performance_optimization(final_filtered_data, rate_type='Base Rate'):
     """
@@ -152,7 +153,7 @@ def get_carrier_weighted_performance(final_filtered_data):
         valid_perf_records = carrier_group.dropna(subset=['Performance_Score'])
         
         if len(valid_perf_records) > 0 and 'Container Count' in final_filtered_data.columns:
-            # Calculate TRUE volume-weighted average performance
+            # Calculate TRUE volume-weighted average performance PER CARRIER
             total_weighted_performance = (
                 valid_perf_records['Performance_Score'] * 
                 valid_perf_records['Container Count']
@@ -163,11 +164,6 @@ def get_carrier_weighted_performance(final_filtered_data):
                 weighted_avg = total_weighted_performance / total_volume
                 carrier_weighted_performance[carrier] = weighted_avg
                 carriers_with_data += 1
-                
-                # Debug: Show unique performance scores for this carrier
-                unique_scores = valid_perf_records['Performance_Score'].unique()
-                if len(unique_scores) > 1:
-                    print(f"  Carrier {carrier}: {len(unique_scores)} different scores, weighted avg = {weighted_avg:.3f}")
             else:
                 # Fallback to simple average if total volume is 0
                 carrier_weighted_performance[carrier] = valid_perf_records['Performance_Score'].mean()
@@ -180,11 +176,6 @@ def get_carrier_weighted_performance(final_filtered_data):
             carriers_without_data += 1
         # Note: Carriers with no performance data will not be in this dict
         # The calling function should handle this case
-    
-    print(f"\nPerformance Weighting Summary:")
-    print(f"  - Carriers with performance data: {carriers_with_data}")
-    print(f"  - Carriers without performance data: {carriers_without_data}")
-    print(f"  - Unique weighted averages calculated: {len(set(carrier_weighted_performance.values()))}")
     
     return carrier_weighted_performance
 

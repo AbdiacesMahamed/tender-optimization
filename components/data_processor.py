@@ -159,6 +159,9 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
             how='left'
         )
         
+        # Ensure Performance_Score is numeric after merge
+        merged_data['Performance_Score'] = pd.to_numeric(merged_data['Performance_Score'], errors='coerce')
+        
     # NOW CALCULATE PROPER VOLUME-WEIGHTED PERFORMANCE SCORES
     merged_data = apply_volume_weighted_performance(merged_data)
 
@@ -183,32 +186,40 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
 
     return merged_data
 
-def perform_lane_analysis(Ratedata):
-    """Perform lane analysis and show results"""
-    section_header("📊 Lane Analysis")
-    """Apply proper volume-weighted performance scores after merging with container counts"""
+def apply_volume_weighted_performance(merged_data):
+    """Apply proper volume-weighted performance scores after merging with container counts
+    
+    For each carrier, calculates a volume-weighted average performance score across all weeks
+    where the carrier has data, then fills in missing weeks with that weighted average.
+    """
     from .performance_calculator import get_carrier_weighted_performance
     from .performance_assignments import track_performance_assignment, track_processing_step, clear_performance_tracking
     
-    # Check if already processed to avoid duplicate processing
-    if hasattr(merged_data, '_performance_processed') and merged_data._performance_processed:
-        return merged_data
+    # Make a copy to avoid modifying cached data
+    merged_data = merged_data.copy()
     
     # Clear previous tracking data
     clear_performance_tracking()
     
     # Only process if we have performance data
     if 'Performance_Score' not in merged_data.columns:
-        print("Warning: No Performance_Score column found - skipping performance calculation")
         return merged_data
     
     # Count missing before processing
     missing_before = merged_data['Performance_Score'].isna().sum()
+    total_records = len(merged_data)
     
-    # If no missing scores, mark as processed and return
+    # Check if all performance scores are identical (indicating default fill)
+    unique_scores = merged_data['Performance_Score'].dropna().nunique()
+    all_scores_same = unique_scores == 1
+    
+    if all_scores_same and missing_before == 0:
+        # Mark all as missing to force recalculation with volume-weighted averages
+        merged_data['Performance_Score'] = None
+        missing_before = total_records
+    
+    # If no missing scores and they vary by carrier, nothing to do
     if missing_before == 0:
-        merged_data._performance_processed = True
-        print("All performance scores already complete - no processing needed")
         return merged_data
     
     track_processing_step("Initial Assessment", f"Found {missing_before} missing performance scores")
@@ -217,36 +228,26 @@ def perform_lane_analysis(Ratedata):
     carrier_weighted_performance = get_carrier_weighted_performance(merged_data)
     track_processing_step("Carrier Analysis", f"Calculated performance for {len(carrier_weighted_performance)} carriers with existing data")
     
-    # Debug: Show the range of weighted averages
-    if carrier_weighted_performance:
-        avg_values = list(carrier_weighted_performance.values())
-        print(f"  Weighted performance range: {min(avg_values):.3f} to {max(avg_values):.3f}")
-        print(f"  Unique values: {len(set(avg_values))}")
-        
-        # Show a few examples
-        print(f"  Sample carriers:")
-        for i, (carrier, score) in enumerate(list(carrier_weighted_performance.items())[:5]):
-            print(f"    {carrier}: {score:.3f}")
-    
     # Get all unique carriers in the dataset
     all_carriers = merged_data['Dray SCAC(FL)'].unique()
     
-    # For carriers not in performance dict (no performance data at all), assign default score
-    global_avg_performance = merged_data['Performance_Score'].dropna().mean() if not merged_data['Performance_Score'].dropna().empty else 3.0
-    
-    print(f"\n  Global average performance (for carriers with NO data): {global_avg_performance:.3f}")
-    
-    carriers_with_no_data = []
-    for carrier in all_carriers:
-        if carrier not in carrier_weighted_performance:
-            carrier_weighted_performance[carrier] = global_avg_performance
-            carriers_with_no_data.append(carrier)
+    # For carriers not in performance dict (no performance data at all), assign global default
+    carriers_with_some_data = set(carrier_weighted_performance.keys())
+    carriers_with_no_data = [c for c in all_carriers if c not in carriers_with_some_data]
     
     if carriers_with_no_data:
+        # Calculate global average from all available performance scores
+        global_avg_performance = merged_data['Performance_Score'].dropna().mean() if not merged_data['Performance_Score'].dropna().empty else 0.75
+        
+        for carrier in carriers_with_no_data:
+            carrier_weighted_performance[carrier] = global_avg_performance
+        
         track_processing_step("Default Assignment", f"Assigned global average ({global_avg_performance:.3f}) to {len(carriers_with_no_data)} carriers with no performance data")
     
     # Fill missing performance scores with volume-weighted averages
     filled_count = 0
+    carriers_filled = {}
+    
     for carrier, weighted_avg in carrier_weighted_performance.items():
         # Find records for this carrier with missing performance scores
         missing_mask = (
@@ -256,33 +257,58 @@ def perform_lane_analysis(Ratedata):
         
         if missing_mask.any():
             records_affected = missing_mask.sum()
+            
+            # Fill the missing scores
             merged_data.loc[missing_mask, 'Performance_Score'] = weighted_avg
             filled_count += records_affected
             
-            # Determine assignment type
-            if carrier in carriers_with_no_data:
-                assignment_type = "Global Average (No Data)"
-            else:
-                assignment_type = "Volume-Weighted Average"
+            # Track for reporting
+            carriers_filled[carrier] = {
+                'count': records_affected,
+                'score': weighted_avg,
+                'type': 'Global Average' if carrier in carriers_with_no_data else 'Volume-Weighted'
+            }
             
-            # Track this assignment
+            # Track this assignment (for detailed logging)
+            assignment_type = "Global Average (No Data)" if carrier in carriers_with_no_data else "Volume-Weighted Average"
             track_performance_assignment(carrier, assignment_type, weighted_avg, records_affected)
+
     
     # Verify all missing scores were filled
     missing_after = merged_data['Performance_Score'].isna().sum()
     
-    # Display summary
-    if missing_after > 0:
-        print(f"Error: Still have {missing_after} missing performance scores after processing!")
-    else:
-        print(f"Performance scores completed: {filled_count} values filled across {len(carrier_weighted_performance)} carriers")
+    track_processing_step("Final Result", f"Filled {filled_count} missing values, {missing_after} remaining")
+    
+    return merged_data
+    
+    # Verify all missing scores were filled
+    missing_after = merged_data['Performance_Score'].isna().sum()
     
     track_processing_step("Final Result", f"Filled {filled_count} missing values, {missing_after} remaining")
     
-    # Mark as processed to prevent duplicate runs
-    merged_data._performance_processed = True
-    
     return merged_data
+
+def perform_lane_analysis(Ratedata):
+    """Perform lane analysis and show results"""
+    section_header("📊 Lane Analysis")
+    
+    lane_analysis = Ratedata.groupby('Lane').agg({
+        'Base Rate': ['count', 'min', 'max', 'mean'],
+        'Lookup': 'count'
+    }).round(2)
+    lane_analysis.columns = ['Rate_Count', 'Min_Rate', 'Max_Rate', 'Avg_Rate', 'Lookup_Count']
+    lane_analysis = lane_analysis.reset_index()
+
+    # Show lanes with multiple rates
+    duplicate_lanes = lane_analysis[lane_analysis['Rate_Count'] > 1]
+    if len(duplicate_lanes) > 0:
+        print("Lanes with multiple rates:")
+        try:
+            print(duplicate_lanes.to_string())
+        except Exception:
+            print(duplicate_lanes)
+    else:
+        print("No duplicate lanes found")
 
 def create_comprehensive_data(merged_data):
     """Create comprehensive data table with additional calculated columns"""
