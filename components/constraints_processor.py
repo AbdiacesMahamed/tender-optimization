@@ -15,6 +15,7 @@ def process_constraints_file(constraints_file):
     - Category
     - Carrier
     - Lane
+    - Port (Discharged Port)
     - Week Number
     - Maximum container number / Maximum Container Count
     - minimum container number / Minimum Container Count
@@ -48,6 +49,9 @@ def process_constraints_file(constraints_file):
             # Map Lane
             elif col_lower == 'lane':
                 column_mapping[col] = 'Lane'
+            # Map Port (Discharged Port)
+            elif col_lower == 'port' or 'discharged' in col_lower and 'port' in col_lower:
+                column_mapping[col] = 'Port'
             # Map Week Number
             elif 'week' in col_lower and 'number' in col_lower:
                 column_mapping[col] = 'Week Number'
@@ -66,7 +70,7 @@ def process_constraints_file(constraints_file):
         
         # Define expected columns
         expected_cols = [
-            'Category', 'Carrier', 'Lane', 'Week Number',
+            'Category', 'Carrier', 'Lane', 'Port', 'Week Number',
             'Maximum Container Count', 'Minimum Container Count',
             'Percent Allocation', 'Priority Score'
         ]
@@ -83,7 +87,7 @@ def process_constraints_file(constraints_file):
                 constraints_df[col] = None
         
         # Clean up text fields - convert empty strings to None
-        for col in ['Category', 'Lane', 'Carrier']:
+        for col in ['Category', 'Lane', 'Carrier', 'Port']:
             if col in constraints_df.columns:
                 # Replace empty strings with None
                 constraints_df[col] = constraints_df[col].apply(
@@ -214,6 +218,12 @@ def apply_constraints_to_data(data, constraints_df):
         if is_valid_value(constraint['Lane']):
             mask &= remaining_data['Lane'] == constraint['Lane']
             filters_applied.append(f"Lane={constraint['Lane']}")
+        
+        # Apply Port filter if specified
+        if is_valid_value(constraint['Port']):
+            if 'Discharged Port' in remaining_data.columns:
+                mask &= remaining_data['Discharged Port'] == constraint['Port']
+                filters_applied.append(f"Port={constraint['Port']}")
         
         # Apply Week Number filter if specified
         if is_valid_value(constraint['Week Number']):
