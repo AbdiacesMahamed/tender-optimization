@@ -231,11 +231,32 @@ def calculate_enhanced_metrics(data):
 
 # ==================== DISPLAY FUNCTIONS ====================
 
-def display_current_metrics(metrics):
-    """Display main metrics dashboard"""
+def display_current_metrics(metrics, constrained_data=None, unconstrained_data=None):
+    """Display main metrics dashboard
+    
+    Args:
+        metrics: Dictionary containing calculated metrics
+        constrained_data: DataFrame containing constrained/locked containers (optional)
+        unconstrained_data: DataFrame containing unconstrained containers (optional)
+    """
     if metrics is None:
         st.warning("⚠️ No data matches your selection.")
         return
+    
+    # Determine if constraints are active
+    has_constraints = (
+        constrained_data is not None 
+        and len(constrained_data) > 0 
+        and unconstrained_data is not None
+    )
+    
+    # Get rate columns for cost calculations
+    rate_cols = get_rate_columns()
+    
+    # Calculate constrained cost once if constraints are active
+    constrained_cost = 0
+    if has_constraints:
+        constrained_cost = constrained_data[rate_cols['total_rate']].sum()
     
     # Get current rate type for display
     rate_type = st.session_state.get('rate_type', 'Base Rate')
@@ -247,12 +268,18 @@ def display_current_metrics(metrics):
     st.markdown(f"### 💰 Cost Strategy Comparison {rate_type_label}")
     col1, col2, col3, col4 = st.columns(4)
     
-    # Current Selection
+    # Current Selection - sum constrained + unconstrained costs
     with col1:
+        if has_constraints:
+            unconstrained_current_cost = unconstrained_data[rate_cols['total_rate']].sum()
+            total_current_cost = constrained_cost + unconstrained_current_cost
+        else:
+            total_current_cost = metrics['total_cost']
+        
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px;">
             <h4 style="color: #1f77b4; margin: 0;">📋 Current</h4>
-            <h2 style="color: #1f77b4; margin: 5px 0;">${metrics['total_cost']:,.2f}</h2>
+            <h2 style="color: #1f77b4; margin: 5px 0;">${total_current_cost:,.2f}</h2>
             <p style="margin: 0; color: #666;">Your selections</p>
         </div>
         """, unsafe_allow_html=True)
@@ -260,9 +287,10 @@ def display_current_metrics(metrics):
     # Performance scenario (calculated based on highest performance carriers)
     with col2:
         if metrics.get('performance_cost') is not None:
-            perf_cost = metrics['performance_cost']
-            perf_diff = perf_cost - metrics['total_cost']
-            perf_diff_pct = (perf_diff / metrics['total_cost'] * 100) if metrics['total_cost'] > 0 else 0
+            # Add constrained cost to scenario cost
+            perf_cost = constrained_cost + metrics['performance_cost'] if has_constraints else metrics['performance_cost']
+            perf_diff = perf_cost - total_current_cost
+            perf_diff_pct = (perf_diff / total_current_cost * 100) if total_current_cost > 0 else 0
             
             if perf_diff > 0:
                 diff_text = f"Cost ${perf_diff:,.2f} more ({perf_diff_pct:+.1f}%)"
@@ -293,9 +321,10 @@ def display_current_metrics(metrics):
     # Cheapest Cost scenario
     with col3:
         if metrics.get('cheapest_cost') is not None:
-            cheap_cost = metrics['cheapest_cost']
-            cheap_diff = cheap_cost - metrics['total_cost']
-            cheap_diff_pct = (cheap_diff / metrics['total_cost'] * 100) if metrics['total_cost'] > 0 else 0
+            # Add constrained cost to scenario cost
+            cheap_cost = constrained_cost + metrics['cheapest_cost'] if has_constraints else metrics['cheapest_cost']
+            cheap_diff = cheap_cost - total_current_cost
+            cheap_diff_pct = (cheap_diff / total_current_cost * 100) if total_current_cost > 0 else 0
             
             if cheap_diff > 0:
                 diff_text = f"Cost ${cheap_diff:,.2f} more ({cheap_diff_pct:+.1f}%)"
@@ -326,9 +355,10 @@ def display_current_metrics(metrics):
     # Optimized scenario (calculated using cascading logic with LP + historical constraints)
     with col4:
         if metrics.get('optimized_cost') is not None:
-            opt_cost = metrics['optimized_cost']
-            opt_diff = opt_cost - metrics['total_cost']
-            opt_diff_pct = (opt_diff / metrics['total_cost'] * 100) if metrics['total_cost'] > 0 else 0
+            # Add constrained cost to scenario cost
+            opt_cost = constrained_cost + metrics['optimized_cost'] if has_constraints else metrics['optimized_cost']
+            opt_diff = opt_cost - total_current_cost
+            opt_diff_pct = (opt_diff / total_current_cost * 100) if total_current_cost > 0 else 0
             
             # Get current slider settings for display
             cost_pct = st.session_state.get('opt_cost_weight', 70)

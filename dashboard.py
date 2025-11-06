@@ -126,8 +126,8 @@ def main():
         st.warning("⚠️ No data available after applying filters.")
         return
     
-    # Display cost analysis dashboard
-    display_current_metrics(metrics)
+    # Display cost analysis dashboard - pass constraint data for proper cost calculation
+    display_current_metrics(metrics, constrained_data, unconstrained_data)
     
     # Show detailed analysis table with constrained and unconstrained data
     show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics)
