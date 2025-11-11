@@ -510,6 +510,35 @@ def _cascade_allocate_volume(
                     f"Allocated: {allocations[carrier]:.0f} containers (cascaded)"
                 )
     
+    # Third pass: if volume still remains, assign to rank 1 (best) carrier
+    if remaining > 0.5 and sorted_carriers:  # Check for remaining (> 0.5 to handle rounding)
+        best_carrier = sorted_carriers[0]  # Rank 1 carrier
+        allocations[best_carrier] += remaining
+        
+        # Update notes to indicate overflow was assigned
+        hist_pct = historical_pcts.get(best_carrier, 0)
+        new_pct = (allocations[best_carrier] / total_containers * 100) if total_containers > 0 else 0
+        rank = carrier_ranks.get(best_carrier, 999)
+        
+        if hist_pct > 0:
+            change_pct = new_pct - hist_pct
+            change_abs = allocations[best_carrier] - ((hist_pct / 100) * total_containers)
+            notes[best_carrier] = (
+                f"Rank #{rank} | "
+                f"Historical: {hist_pct:.1f}% → New: {new_pct:.1f}% | "
+                f"Change: {change_pct:+.1f}% ({change_abs:+.0f} containers) | "
+                f"⚠️ +{remaining:.0f} overflow containers assigned"
+            )
+        else:
+            notes[best_carrier] = (
+                f"Rank #{rank} | "
+                f"Historical: 0% (new carrier) → New: {new_pct:.1f}% | "
+                f"Allocated: {allocations[best_carrier]:.0f} containers | "
+                f"⚠️ +{remaining:.0f} overflow containers assigned"
+            )
+        
+        remaining = 0  # All volume now allocated
+    
     return allocations, notes
 
 
