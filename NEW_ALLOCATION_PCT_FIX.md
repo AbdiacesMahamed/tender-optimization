@@ -1,9 +1,11 @@
 # New Allocation Percentage Recalculation Fix
 
 ## Issue
+
 The `New_Allocation_Pct` (displayed as "🆕 New %") was not being recalculated after Container Count was updated from Container Numbers. This caused the displayed percentage to be based on the cascading allocation logic's container count, which could differ from the actual container count after Container Numbers were proportionally distributed.
 
 ## Root Cause
+
 In `optimization/cascading_logic.py`, the flow was:
 
 1. **Cascading allocation determines** `allocated_count` for each carrier
@@ -16,6 +18,7 @@ In `optimization/cascading_logic.py`, the flow was:
 This meant the displayed percentage reflected the allocation logic's intended distribution, not the actual final container counts after proportional distribution of Container Numbers.
 
 ## Solution
+
 Added recalculation of `New_Allocation_Pct` after Container Count is updated from Container Numbers:
 
 ```python
@@ -27,11 +30,13 @@ if total_containers_actual > 0 and 'New_Allocation_Pct' in result.columns:
 ```
 
 ## Impact
+
 - **New %** now accurately reflects the actual container count each carrier received
 - Percentages now match the actual Container Count values in the table
 - Historical % remains unchanged (correctly calculated from last 5 weeks of historical data)
 
 ## Historical % Calculation
+
 The `Historical_Allocation_Pct` (displayed as "📊 Historical %") is calculated correctly:
 
 1. Gets last 5 completed weeks of historical data
@@ -46,13 +51,17 @@ The formula: **Historical % = (Carrier's containers in last N weeks) / (Lane's t
 Where N = number of weeks the carrier was active (up to 5).
 
 ## Files Modified
+
 - `optimization/cascading_logic.py` - Added New_Allocation_Pct recalculation after Container Count update
 
 ## Date Applied
+
 November 10, 2025
 
 ## Testing
+
 After this fix:
+
 1. ✅ New % should match Container Count proportions
 2. ✅ Historical % should reflect past 5 weeks (or fewer if carrier has less history)
 3. ✅ Both percentages should add up correctly per group
