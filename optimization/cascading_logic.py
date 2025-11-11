@@ -304,6 +304,12 @@ def _cascading_allocate_single_group(
         
         result[container_column] = result[container_numbers_column].apply(count_containers_in_string)
         
+        # CRITICAL: Recalculate New_Allocation_Pct using the NEW Container Count
+        # This ensures the percentage reflects the actual container count after recalculation
+        total_containers_actual = result[container_column].sum()
+        if total_containers_actual > 0 and 'New_Allocation_Pct' in result.columns:
+            result['New_Allocation_Pct'] = (result[container_column] / total_containers_actual * 100).fillna(0)
+        
         # CRITICAL: Recalculate Total Cost using the NEW Container Count
         # Support both Base Rate and CPC for dynamic rate selection
         if 'Base Rate' in result.columns:
