@@ -212,13 +212,26 @@ def calculate_enhanced_metrics(data):
             
             carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in data_with_rates.columns else 'Carrier'
             
+            # Prepare optimization source - recalculate Container Count from Container Numbers
+            optimization_source = data_with_rates.copy()
+            
+            # CRITICAL: Recalculate Container Count from Container Numbers to ensure consistency
+            if 'Container Numbers' in optimization_source.columns:
+                def count_containers_from_string(container_str):
+                    """Count actual container IDs in a comma-separated string"""
+                    if pd.isna(container_str) or not str(container_str).strip():
+                        return 0
+                    return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+                
+                optimization_source['Container Count'] = optimization_source['Container Numbers'].apply(count_containers_from_string)
+            
             # Get optimization parameters from session state
             cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0
             performance_weight = st.session_state.get('opt_performance_weight', 30) / 100.0
             max_growth_pct = st.session_state.get('opt_max_growth_pct', 30) / 100.0
             
             optimized_allocated = cascading_allocate_with_constraints(
-                data_with_rates.copy(),
+                optimization_source,
                 max_growth_pct=max_growth_pct,
                 cost_weight=cost_weight,
                 performance_weight=performance_weight,
