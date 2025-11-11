@@ -164,23 +164,6 @@ def allocate_to_highest_performance(
         
         best_carriers["__actual_count"] = best_carriers[container_numbers_column].apply(count_containers_in_string)
         
-        # DEBUG: Check if there are any mismatches
-        import streamlit as st
-        mismatches = best_carriers[best_carriers["__original_summed_count"] != best_carriers["__actual_count"]]
-        if len(mismatches) > 0:
-            st.warning(f"⚠️ **Performance Scenario - Container Count Mismatch Detected!**")
-            st.write(f"Found {len(mismatches)} rows where summed count differs from actual container IDs")
-            # Show first few mismatches with relevant columns
-            debug_cols = [container_column, "__original_summed_count", "__actual_count"]
-            if "Lane" in mismatches.columns:
-                debug_cols.insert(0, "Lane")
-            if "Week Number" in mismatches.columns:
-                debug_cols.insert(1, "Week Number")
-            available_cols = [col for col in debug_cols if col in mismatches.columns]
-            if container_numbers_column in mismatches.columns:
-                available_cols.append(container_numbers_column)
-            st.dataframe(mismatches[available_cols].head(10), use_container_width=True)
-        
         # Use actual count instead of summed count
         best_carriers[container_column] = best_carriers["__actual_count"]
 
