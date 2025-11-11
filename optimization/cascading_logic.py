@@ -471,10 +471,17 @@ def _cascade_allocate_volume(
                 f"Change: {change_pct:+.1f}% ({change_abs:+.0f} containers){constraint_note}"
             )
         else:
+            # New carrier - show if at growth limit
+            max_allowed_pct = max_growth_pct * 100
+            if allocated >= max_allowed_containers - 0.01:
+                limit_note = f" (at {max_growth_pct*100:.0f}% growth limit)"
+            else:
+                limit_note = f" (limit {max_growth_pct*100:.0f}%)"
+            
             notes[carrier] = (
                 f"Rank #{rank} | "
                 f"Historical: 0% (new carrier) → New: {new_pct:.1f}% | "
-                f"Allocated: {allocated:.0f} containers"
+                f"Allocated: {allocated:.0f} containers{limit_note}"
             )
     
     # Second pass: if volume remains, cascade to carriers that can take more
@@ -501,14 +508,26 @@ def _cascade_allocate_volume(
                 allocations[carrier] += additional
                 remaining -= additional
                 
-                # Update notes
+                # Update notes - show if at growth limit
                 new_pct = (allocations[carrier] / total_containers * 100) if total_containers > 0 else 0
                 rank = carrier_ranks.get(carrier, 999)
-                notes[carrier] = (
-                    f"Rank #{rank} | "
-                    f"Historical: 0% (new carrier) → New: {new_pct:.1f}% | "
-                    f"Allocated: {allocations[carrier]:.0f} containers (cascaded)"
-                )
+                
+                # Check if this carrier hit the growth limit (100% for new carriers)
+                max_allowed_pct = max_growth_pct * 100  # For new carriers, max is max_growth_pct of total
+                if new_pct >= max_allowed_pct - 0.1:
+                    # At growth limit
+                    notes[carrier] = (
+                        f"Rank #{rank} | "
+                        f"Historical: 0% (new carrier) → New: {new_pct:.1f}% | "
+                        f"Allocated: {allocations[carrier]:.0f} containers (at {max_growth_pct*100:.0f}% growth limit)"
+                    )
+                else:
+                    # Not at limit, just cascaded
+                    notes[carrier] = (
+                        f"Rank #{rank} | "
+                        f"Historical: 0% (new carrier) → New: {new_pct:.1f}% | "
+                        f"Allocated: {allocations[carrier]:.0f} containers (cascaded, limit {max_growth_pct*100:.0f}%)"
+                    )
     
     # Third pass: if volume still remains, assign to rank 1 (best) carrier
     if remaining > 0.5 and sorted_carriers:  # Check for remaining (> 0.5 to handle rounding)
