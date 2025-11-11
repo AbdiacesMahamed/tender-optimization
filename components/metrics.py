@@ -168,15 +168,34 @@ def calculate_enhanced_metrics(data):
                     # Get cheapest carrier per group
                     cheapest_per_group = working.groupby(group_cols_cheap, as_index=False).first()
                     
-                    # Sum all containers in each group
-                    container_totals = working.groupby(group_cols_cheap)['Container Count'].sum()
+                    # If Container Numbers exists, concatenate them and recalculate Container Count
+                    if 'Container Numbers' in working.columns:
+                        # Concatenate all Container Numbers for each group
+                        container_numbers_concat = (
+                            working.groupby(group_cols_cheap)['Container Numbers']
+                            .apply(lambda x: ', '.join(str(v) for v in x if pd.notna(v) and str(v).strip()))
+                            .reset_index(name='_container_numbers_all')
+                        )
+                        
+                        # Merge back to cheapest_per_group
+                        cheapest_per_group = cheapest_per_group.merge(container_numbers_concat, on=group_cols_cheap, how='left')
+                        
+                        # Recalculate Container Count from concatenated Container Numbers
+                        def count_containers_in_string(container_str):
+                            if pd.isna(container_str) or not str(container_str).strip():
+                                return 0
+                            containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
+                            return len(containers)
+                        
+                        cheapest_per_group['Container Count'] = cheapest_per_group['_container_numbers_all'].apply(count_containers_in_string)
+                    else:
+                        # Fall back to summing Container Count if Container Numbers doesn't exist
+                        container_totals = working.groupby(group_cols_cheap)['Container Count'].sum()
+                        cheapest_per_group = cheapest_per_group.set_index(group_cols_cheap)
+                        cheapest_per_group['Container Count'] = container_totals
+                        cheapest_per_group = cheapest_per_group.reset_index()
                     
-                    # Assign total containers to cheapest carrier - use merge for efficiency
-                    cheapest_per_group = cheapest_per_group.set_index(group_cols_cheap)
-                    cheapest_per_group['Container Count'] = container_totals
-                    cheapest_per_group = cheapest_per_group.reset_index()
-                    
-                    # Vectorized cost calculation
+                    # Vectorized cost calculation using the corrected Container Count
                     cheapest_per_group['Total Cost'] = (
                         cheapest_per_group[rate_cols['rate']] * cheapest_per_group['Container Count']
                     )
@@ -542,6 +561,16 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             # Use data_with_rates to ensure consistent container counts across all scenarios
             optimization_source = display_data_with_rates.copy()
             
+            # Recalculate Container Count from Container Numbers to fix input data mismatches
+            if 'Container Numbers' in optimization_source.columns:
+                def count_containers_from_string(container_str):
+                    """Count actual container IDs in a comma-separated string"""
+                    if pd.isna(container_str) or not str(container_str).strip():
+                        return 0
+                    return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+                
+                optimization_source['Container Count'] = optimization_source['Container Numbers'].apply(count_containers_from_string)
+            
             # Get optimization parameters from session state (set by sliders in Optimization Settings tab)
             cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0  # Convert from % to decimal
             performance_weight = st.session_state.get('opt_performance_weight', 30) / 100.0
@@ -588,6 +617,17 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         elif selected == 'Performance':
             # Use data_with_rates to ensure consistent container counts across all scenarios
             performance_source = display_data_with_rates.copy()
+            
+            # Recalculate Container Count from Container Numbers to fix input data mismatches
+            if 'Container Numbers' in performance_source.columns:
+                def count_containers_from_string(container_str):
+                    """Count actual container IDs in a comma-separated string"""
+                    if pd.isna(container_str) or not str(container_str).strip():
+                        return 0
+                    return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+                
+                performance_source['Container Count'] = performance_source['Container Numbers'].apply(count_containers_from_string)
+            
             if carrier_col in performance_source.columns:
                 performance_source['Original Carrier'] = performance_source[carrier_col]
             try:
@@ -865,6 +905,16 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         # Use unconstrained data when constraints are active
         source_data = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
         
+        # Recalculate Container Count from Container Numbers to fix input data mismatches
+        if 'Container Numbers' in source_data.columns:
+            def count_containers_from_string(container_str):
+                """Count actual container IDs in a comma-separated string"""
+                if pd.isna(container_str) or not str(container_str).strip():
+                    return 0
+                return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+            
+            source_data['Container Count'] = source_data['Container Numbers'].apply(count_containers_from_string)
+        
         # Filter out carriers with missing rates to ensure consistency
         if 'Missing_Rate' in source_data.columns:
             source_data = source_data[source_data['Missing_Rate'] == False].copy()
@@ -922,6 +972,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             )
             
             # Concatenate all container numbers in each group
+            # Concatenate all container numbers if present
             if 'Container Numbers' in working.columns:
                 container_numbers = (
                     working.groupby(group_cols)['Container Numbers']
@@ -930,10 +981,28 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                 )
                 cheapest_per_group = cheapest_per_group.merge(container_numbers, on=group_cols, how='left')
                 cheapest_per_group['Container Numbers'] = cheapest_per_group['_container_numbers'].fillna('')
+                
+                # Recalculate Container Count based on actual container IDs in the concatenated string
+                # This ensures Container Count matches the number of containers listed in Container Numbers
+                def count_containers_in_string(container_str):
+                    """Count actual container IDs in a comma-separated string"""
+                    if pd.isna(container_str) or not str(container_str).strip():
+                        return 0
+                    # Split by comma and count non-empty items
+                    containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
+                    return len(containers)
+                
+                cheapest_per_group['_actual_container_count'] = cheapest_per_group['Container Numbers'].apply(count_containers_in_string)
             
             # Assign total containers to the cheapest carrier
             cheapest_per_group = cheapest_per_group.merge(container_totals, on=group_cols, how='left')
-            cheapest_per_group['Container Count'] = cheapest_per_group['_total_containers'].fillna(0)
+            
+            # Use the actual count from Container Numbers if available, otherwise use the sum
+            if 'Container Numbers' in working.columns and '_actual_container_count' in cheapest_per_group.columns:
+                # Use the corrected count
+                cheapest_per_group['Container Count'] = cheapest_per_group['_actual_container_count']
+            else:
+                cheapest_per_group['Container Count'] = cheapest_per_group['_total_containers'].fillna(0)
             
             # Calculate total cost using the cheapest carrier's rate
             cheapest_per_group['Total Cost'] = (
@@ -959,7 +1028,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             )
             
             # Clean up helper columns
-            for col in ['_rate_sort', '_carrier_sort', '_total_containers', '_container_numbers', '_current_total_cost']:
+            for col in ['_rate_sort', '_carrier_sort', '_total_containers', '_container_numbers', '_current_total_cost', '_actual_container_count', '_summed_count']:
                 if col in cheapest_per_group.columns:
                     cheapest_per_group = cheapest_per_group.drop(columns=col)
             

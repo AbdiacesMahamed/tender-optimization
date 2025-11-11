@@ -178,6 +178,14 @@ def _cascading_allocate_single_group(
     if len(carriers) == 0:
         return None
     
+    # Collect all Container Numbers for this group if the column exists
+    all_container_numbers = []
+    container_numbers_column = "Container Numbers"
+    if container_numbers_column in group_data.columns:
+        for containers_str in group_data[container_numbers_column]:
+            if pd.notna(containers_str) and str(containers_str).strip():
+                all_container_numbers.extend([c.strip() for c in str(containers_str).split(',') if c.strip()])
+    
     # Build carrier lookup
     carrier_data = {}
     for idx, row in group_data.iterrows():
@@ -219,12 +227,23 @@ def _cascading_allocate_single_group(
     # Build result rows
     result_rows = []
     
+    # Track remaining container numbers for proportional distribution
+    remaining_container_numbers = all_container_numbers.copy() if all_container_numbers else []
+    
     for carrier, allocated_count in allocations.items():
         if allocated_count == 0:
             continue
         
         row = carrier_data[carrier].copy()
         row[container_column] = allocated_count
+        
+        # Assign Container Numbers proportionally if available
+        if remaining_container_numbers:
+            proportion = allocated_count / total_containers
+            num_to_assign = max(1, round(len(all_container_numbers) * proportion))
+            assigned_containers = remaining_container_numbers[:num_to_assign]
+            remaining_container_numbers = remaining_container_numbers[num_to_assign:]
+            row[container_numbers_column] = ", ".join(assigned_containers)
         
         # Add rank
         row['Carrier_Rank'] = carrier_ranks.get(carrier, 999)
@@ -260,10 +279,37 @@ def _cascading_allocate_single_group(
         
         result_rows.append(row)
     
+    # Assign any remaining container numbers due to rounding
+    if remaining_container_numbers and result_rows:
+        first_row_containers = result_rows[0].get(container_numbers_column, "")
+        if first_row_containers:
+            result_rows[0][container_numbers_column] = first_row_containers + ", " + ", ".join(remaining_container_numbers)
+        else:
+            result_rows[0][container_numbers_column] = ", ".join(remaining_container_numbers)
+    
     if not result_rows:
         return None
     
     result = pd.DataFrame(result_rows)
+    
+    # CRITICAL: Recalculate Container Count from Container Numbers after assignment
+    # This ensures Container Count always matches the actual number of IDs in Container Numbers
+    if container_numbers_column in result.columns:
+        def count_containers_in_string(container_str):
+            """Count actual container IDs in a comma-separated string"""
+            if pd.isna(container_str) or not str(container_str).strip():
+                return 0
+            containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
+            return len(containers)
+        
+        result[container_column] = result[container_numbers_column].apply(count_containers_in_string)
+        
+        # CRITICAL: Recalculate Total Cost using the NEW Container Count
+        # Support both Base Rate and CPC for dynamic rate selection
+        if 'Base Rate' in result.columns:
+            result['Total Rate'] = result['Base Rate'] * result[container_column]
+        if 'CPC' in result.columns:
+            result['Total CPC'] = result['CPC'] * result[container_column]
     
     return result
 

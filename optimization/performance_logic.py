@@ -139,6 +139,9 @@ def allocate_to_highest_performance(
     best_carriers[container_column] = best_carriers["__total_containers"].fillna(0)
 
     if container_numbers_column in working.columns:
+        # Store original summed count for debugging
+        best_carriers["__original_summed_count"] = best_carriers[container_column].copy()
+        
         container_number_map = (
             working.groupby(_prepare_group_columns(data))[container_numbers_column]
             .apply(lambda values: ", ".join(str(v) for v in values if str(v).strip()))
@@ -150,6 +153,36 @@ def allocate_to_highest_performance(
             how="left",
         )
         best_carriers[container_numbers_column] = best_carriers["__container_numbers"].fillna("")
+        
+        # CRITICAL FIX: Recalculate Container Count based on actual container IDs in the concatenated string
+        def count_containers_in_string(container_str):
+            """Count actual container IDs in a comma-separated string"""
+            if pd.isna(container_str) or not str(container_str).strip():
+                return 0
+            containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
+            return len(containers)
+        
+        best_carriers["__actual_count"] = best_carriers[container_numbers_column].apply(count_containers_in_string)
+        
+        # DEBUG: Check if there are any mismatches
+        import streamlit as st
+        mismatches = best_carriers[best_carriers["__original_summed_count"] != best_carriers["__actual_count"]]
+        if len(mismatches) > 0:
+            st.warning(f"⚠️ **Performance Scenario - Container Count Mismatch Detected!**")
+            st.write(f"Found {len(mismatches)} rows where summed count differs from actual container IDs")
+            # Show first few mismatches with relevant columns
+            debug_cols = [container_column, "__original_summed_count", "__actual_count"]
+            if "Lane" in mismatches.columns:
+                debug_cols.insert(0, "Lane")
+            if "Week Number" in mismatches.columns:
+                debug_cols.insert(1, "Week Number")
+            available_cols = [col for col in debug_cols if col in mismatches.columns]
+            if container_numbers_column in mismatches.columns:
+                available_cols.append(container_numbers_column)
+            st.dataframe(mismatches[available_cols].head(10), use_container_width=True)
+        
+        # Use actual count instead of summed count
+        best_carriers[container_column] = best_carriers["__actual_count"]
 
     # Recalculate total rate columns where possible so costs reflect the new allocation.
     if "Base Rate" in best_carriers.columns:
@@ -173,6 +206,8 @@ def allocate_to_highest_performance(
         "__carrier_sort",
         "__total_containers",
         "__container_numbers",
+        "__actual_count",
+        "__original_summed_count",
     }
     for col in helper_columns:
         if col in best_carriers.columns:

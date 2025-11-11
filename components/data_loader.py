@@ -224,9 +224,25 @@ def load_gvt_data(gvt_file):
             st.error(f"Missing required columns in GVT data: {missing_cols}")
             return None
         
-        # Clean and process data
-        gvt_data['Container Count'] = gvt_data['Container Numbers'].str.split(',').apply(len)
+        # First, ensure Container Numbers column exists and is clean
+        if 'Container Numbers' not in gvt_data.columns:
+            st.error("Container Numbers column is required but not found!")
+            return None
+        
+        # Process other columns
         gvt_data['Discharged Port'] = gvt_data['Lane'].str.split('-').str[0]
+        
+        # CRITICAL: Calculate Container Count AFTER Container Numbers is confirmed to exist
+        # This ensures we're counting from the actual data
+        def count_containers_properly(container_str):
+            """Count actual non-empty container IDs"""
+            if pd.isna(container_str) or not str(container_str).strip():
+                return 0
+            # Split by comma and count non-empty items after stripping whitespace
+            ids = [c.strip() for c in str(container_str).split(',') if c.strip()]
+            return len(ids)
+        
+        gvt_data['Container Count'] = gvt_data['Container Numbers'].apply(count_containers_properly)
         
         # Keep Category column if it exists
         select_cols = ['Discharged Port', 'Dray SCAC(FL)', 'Lane', 'Facility', 
@@ -285,15 +301,30 @@ def create_comprehensive_data(gvt_data, performance_data):
             group_cols.insert(1, 'Category')  # Add Category after Discharged Port
         
         # Aggregate the data
+        # NOTE: We aggregate Container Numbers first, then recalculate Container Count
+        # This ensures Container Count is always based on the actual Container Numbers data
         agg_dict = {
-            'Container Numbers': lambda x: ','.join(x),
-            'Container Count': 'sum',
+            'Container Numbers': lambda x: ','.join(x),  # Concatenate all container IDs
+            'Container Count': 'sum',  # Temporary - will be recalculated below
             'Base Rate': 'first',  # Assuming same rate per group
             'Total Rate': 'sum',
             'Performance_Score': 'first'  # Assuming same performance per carrier
         }
         
         comprehensive_data = comprehensive_data.groupby(group_cols, as_index=False).agg(agg_dict)
+        
+        # CRITICAL: Now that Container Numbers are concatenated, recalculate Container Count
+        # This is done AFTER aggregation to ensure Container Count matches Container Numbers
+        def recount_containers(container_str):
+            """Recount containers from concatenated string - the source of truth"""
+            if pd.isna(container_str) or not str(container_str).strip():
+                return 0
+            # Split by comma, strip whitespace, filter empty values, then count
+            ids = [c.strip() for c in str(container_str).split(',') if c.strip()]
+            return len(ids)
+        
+        # This line ensures Container Count is ALWAYS calculated FROM Container Numbers
+        comprehensive_data['Container Count'] = comprehensive_data['Container Numbers'].apply(recount_containers)
         
         return comprehensive_data
         

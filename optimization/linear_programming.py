@@ -368,6 +368,25 @@ def _optimize_single_group(
     
     result = pd.DataFrame(result_rows)
     
+    # CRITICAL: Recalculate Container Count from Container Numbers after assignment
+    # This ensures Container Count always matches the actual number of IDs in Container Numbers
+    if container_numbers_column in result.columns:
+        def count_containers_in_string(container_str):
+            """Count actual container IDs in a comma-separated string"""
+            if pd.isna(container_str) or not str(container_str).strip():
+                return 0
+            containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
+            return len(containers)
+        
+        result[container_column] = result[container_numbers_column].apply(count_containers_in_string)
+        
+        # CRITICAL: Recalculate Total Cost using the NEW Container Count
+        # Support both Base Rate and CPC for dynamic rate selection
+        if 'Base Rate' in result.columns:
+            result['Total Rate'] = result['Base Rate'] * result[container_column]
+        if 'CPC' in result.columns:
+            result['Total CPC'] = result['CPC'] * result[container_column]
+    
     return result
 
 

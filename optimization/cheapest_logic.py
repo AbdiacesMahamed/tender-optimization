@@ -163,12 +163,36 @@ def allocate_to_cheapest_carrier(
             how="left",
         )
         cheapest_carriers[container_numbers_column] = cheapest_carriers["__container_numbers"].fillna("")
+        
+        # CRITICAL FIX: Recalculate Container Count based on actual container IDs
+        def count_containers_in_string(container_str):
+            """Count actual container IDs in a comma-separated string"""
+            if pd.isna(container_str) or not str(container_str).strip():
+                return 0
+            containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
+            return len(containers)
+        
+        cheapest_carriers["__actual_count"] = cheapest_carriers[container_numbers_column].apply(count_containers_in_string)
+        # Override the summed count with actual count
+        cheapest_carriers[container_column] = cheapest_carriers["__actual_count"]
 
     # Calculate total cost based on cheapest rate × total containers
     # The cheapest_rate_column already contains the cheapest rate for this lane
     cheapest_carriers["Total Cost"] = (
         cheapest_carriers[cheapest_rate_column].fillna(0) * cheapest_carriers[container_column]
     )
+    
+    # Also recalculate standard Total Rate and Total CPC columns if Base Rate/CPC exist
+    if "Base Rate" in cheapest_carriers.columns:
+        cheapest_carriers["Total Rate"] = (
+            pd.to_numeric(cheapest_carriers["Base Rate"], errors="coerce").fillna(0)
+            * cheapest_carriers[container_column]
+        )
+    if "CPC" in cheapest_carriers.columns:
+        cheapest_carriers["Total CPC"] = (
+            pd.to_numeric(cheapest_carriers["CPC"], errors="coerce").fillna(0)
+            * cheapest_carriers[container_column]
+        )
 
     cheapest_carriers["Allocation Strategy"] = "Cheapest Carrier"
 
@@ -178,6 +202,7 @@ def allocate_to_cheapest_carrier(
         "__carrier_sort",
         "__total_containers",
         "__container_numbers",
+        "__actual_count",
     }
     for col in helper_columns:
         if col in cheapest_carriers.columns:
