@@ -18,7 +18,19 @@ def validate_and_process_gvt_data(GVTdata):
 
     # Calculate week number from Ocean ETA date - use inplace operations
     GVTdata['Ocean ETA'] = pd.to_datetime(GVTdata['Ocean ETA'], errors='coerce')
-    GVTdata['Week Number'] = GVTdata['Ocean ETA'].dt.isocalendar().week
+    
+    # Check if WK num column already exists (from Excel WEEKNUM formula)
+    # If it exists, use it directly to match Excel's calculation exactly
+    if 'WK num' in GVTdata.columns:
+        GVTdata['Week Number'] = GVTdata['WK num'].astype(float).round().astype('Int64')
+    else:
+        # Calculate week number to match Excel's WEEKNUM(date, 1) formula
+        # Excel WEEKNUM with return_type=1: weeks start on SUNDAY, first week contains Jan 1
+        # Python equivalent: strftime('%U') gives week number with Sunday as first day
+        # Add 1 because strftime %U counts from 0, but WEEKNUM counts from 1
+        GVTdata['Week Number'] = GVTdata['Ocean ETA'].apply(
+            lambda x: int(x.strftime('%U')) + 1 if pd.notna(x) else None
+        )
 
     # Remove rows where Ocean ETA is null (couldn't be converted to date)
     GVTdata = GVTdata.dropna(subset=['Ocean ETA'])
@@ -114,6 +126,7 @@ def perform_lane_analysis(Ratedata):
 @st.cache_data(show_spinner=False)
 def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
     """Merge all data sources together"""
+    
     # Detect container column once at the start
     container_col = None
     for col in GVTdata.columns:
@@ -130,8 +143,10 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
     if container_col:
         # Combine aggregation operations
         agg_dict = {container_col: lambda x: ', '.join(x.astype(str).unique())}
+        
         lane_count = GVTdata.groupby(group_cols).agg(agg_dict).reset_index()
         lane_count = lane_count.rename(columns={container_col: 'Container Numbers'})
+        
         # Add container count using size() which is faster than len()
         lane_count['Container Count'] = GVTdata.groupby(group_cols).size().values
     else:
