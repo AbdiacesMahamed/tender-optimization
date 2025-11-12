@@ -91,7 +91,8 @@ def cascading_allocate_with_constraints(
     if excluded_carriers is None:
         excluded_carriers = set()
     
-    # Filter out excluded carriers (those with maximum constraints)
+    # Separate excluded carrier data from allocatable data
+    excluded_data = pd.DataFrame()
     if excluded_carriers:
         original_count = len(data)
         # Check both carrier column variations
@@ -99,16 +100,21 @@ def cascading_allocate_with_constraints(
         if 'Carrier' in data.columns and carrier_column != 'Carrier':
             carrier_cols_to_check.append('Carrier')
         
-        mask = pd.Series([True] * len(data), index=data.index)
+        # Create mask for EXCLUDED carriers (these will be reallocated)
+        excluded_mask = pd.Series([False] * len(data), index=data.index)
         for col in carrier_cols_to_check:
             if col in data.columns:
-                mask &= ~data[col].isin(excluded_carriers)
+                excluded_mask |= data[col].isin(excluded_carriers)
         
-        data = data[mask].copy()
+        # Separate the data
+        excluded_data = data[excluded_mask].copy()
+        data = data[~excluded_mask].copy()
         filtered_count = len(data)
         
-        if filtered_count < original_count:
-            print(f"🔒 Excluded {original_count - filtered_count} rows from {len(excluded_carriers)} carriers with maximum constraints: {', '.join(sorted(excluded_carriers))}")
+        if len(excluded_data) > 0:
+            excluded_containers = excluded_data[container_column].sum()
+            print(f"🔒 Found {len(excluded_data)} rows ({excluded_containers:.0f} containers) from {len(excluded_carriers)} carriers with maximum constraints: {', '.join(sorted(excluded_carriers))}")
+            print(f"   These containers will be reallocated to available carriers or marked as unallocatable.")
     
     # Determine grouping columns
     group_columns = [lane_column]
@@ -148,8 +154,19 @@ def cascading_allocate_with_constraints(
     
     # Process each group independently
     result_rows = []
+    unallocatable_rows = []
     
     for group_key, group_data in data.groupby(group_columns):
+        # Check if there are excluded carrier containers for this group
+        excluded_group_data = pd.DataFrame()
+        if not excluded_data.empty:
+            # Filter excluded_data for this group
+            group_mask = pd.Series([True] * len(excluded_data), index=excluded_data.index)
+            for i, col in enumerate(group_columns):
+                if col in excluded_data.columns:
+                    group_mask &= (excluded_data[col] == group_key[i])
+            excluded_group_data = excluded_data[group_mask].copy()
+        
         allocated_group = _cascading_allocate_single_group(
             group_data=group_data,
             group_key=group_key,
@@ -162,6 +179,7 @@ def cascading_allocate_with_constraints(
             lane_column=lane_column,
             category_column=category_column,
             excluded_carriers=excluded_carriers,
+            excluded_group_data=excluded_group_data,
         )
         
         if allocated_group is not None and not allocated_group.empty:
@@ -187,24 +205,54 @@ def _cascading_allocate_single_group(
     lane_column: str,
     category_column: str,
     excluded_carriers: Set[str],
+    excluded_group_data: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Allocate containers for a single group using cascading logic.
     
     Internal function that handles allocation for one lane/week/category group.
+    Also handles reallocation of containers from excluded carriers.
     """
     if group_data.empty:
         return None
     
+    # Calculate containers from allocatable carriers
     total_containers = group_data[container_column].sum()
     
-    if total_containers == 0:
+    # Add excluded carrier containers (these need to be reallocated)
+    excluded_containers = 0
+    excluded_container_numbers = []
+    if not excluded_group_data.empty:
+        excluded_containers = excluded_group_data[container_column].sum()
+        # Collect container numbers from excluded carriers
+        container_numbers_column = "Container Numbers"
+        if container_numbers_column in excluded_group_data.columns:
+            for containers_str in excluded_group_data[container_numbers_column]:
+                if pd.notna(containers_str) and str(containers_str).strip():
+                    excluded_container_numbers.extend([c.strip() for c in str(containers_str).split(',') if c.strip()])
+    
+    # Total containers to allocate = allocatable + excluded (to be reallocated)
+    total_containers_to_allocate = total_containers + excluded_containers
+    
+    if total_containers_to_allocate == 0:
         return None
     
-    # Get carriers in this group
+    # Get carriers in this group (ONLY allocatable carriers)
     carriers = group_data[carrier_column].unique().tolist()
     
     if len(carriers) == 0:
+        # No available carriers - create unallocatable record
+        if excluded_containers > 0:
+            unallocatable_row = excluded_group_data.iloc[0].copy()
+            unallocatable_row[container_column] = excluded_containers
+            unallocatable_row['Container Numbers'] = ", ".join(excluded_container_numbers) if excluded_container_numbers else ""
+            unallocatable_row['Carrier_Rank'] = 999
+            unallocatable_row['Historical_Allocation_Pct'] = 0
+            unallocatable_row['New_Allocation_Pct'] = 0
+            unallocatable_row['Allocation_Notes'] = f"⚠️ UNALLOCATABLE: {excluded_containers:.0f} containers cannot be assigned (all carriers have maximum constraints)"
+            unallocatable_row['Volume_Change'] = "❌ Blocked"
+            unallocatable_row['Growth_Constrained'] = "Max Constraint"
+            return pd.DataFrame([unallocatable_row])
         return None
     
     # Collect all Container Numbers for this group if the column exists
@@ -214,6 +262,9 @@ def _cascading_allocate_single_group(
         for containers_str in group_data[container_numbers_column]:
             if pd.notna(containers_str) and str(containers_str).strip():
                 all_container_numbers.extend([c.strip() for c in str(containers_str).split(',') if c.strip()])
+    
+    # Add excluded container numbers to the pool
+    all_container_numbers.extend(excluded_container_numbers)
     
     # Build carrier lookup
     carrier_data = {}
@@ -244,12 +295,12 @@ def _cascading_allocate_single_group(
         category_column=category_column,
     )
     
-    # Perform cascading allocation
+    # Perform cascading allocation (use total including excluded containers)
     allocations, notes = _cascade_allocate_volume(
         carriers=carriers,
         carrier_ranks=carrier_ranks,
         historical_pcts=historical_pcts,
-        total_containers=total_containers,
+        total_containers=total_containers_to_allocate,
         max_growth_pct=max_growth_pct,
         excluded_carriers=excluded_carriers,
     )
@@ -269,7 +320,7 @@ def _cascading_allocate_single_group(
         
         # Assign Container Numbers proportionally if available
         if remaining_container_numbers:
-            proportion = allocated_count / total_containers
+            proportion = allocated_count / total_containers_to_allocate
             num_to_assign = max(1, round(len(all_container_numbers) * proportion))
             assigned_containers = remaining_container_numbers[:num_to_assign]
             remaining_container_numbers = remaining_container_numbers[num_to_assign:]
@@ -280,7 +331,7 @@ def _cascading_allocate_single_group(
         
         # Add historical and new percentages
         row['Historical_Allocation_Pct'] = historical_pcts.get(carrier, 0)
-        row['New_Allocation_Pct'] = (allocated_count / total_containers * 100) if total_containers > 0 else 0
+        row['New_Allocation_Pct'] = (allocated_count / total_containers_to_allocate * 100) if total_containers_to_allocate > 0 else 0
         
         # Add allocation notes
         row['Allocation_Notes'] = notes.get(carrier, "")
