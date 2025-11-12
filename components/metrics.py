@@ -643,6 +643,22 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         if selected == 'Current Selection':
             display_data = display_data_with_rates.copy()
             
+            # IMPORTANT: Remove max-constrained carriers from display
+            # These carriers have reached their maximum allocation in constrained data
+            # Their containers will be reallocated in optimization scenarios
+            if max_constrained_carriers and len(max_constrained_carriers) > 0:
+                if carrier_col in display_data.columns:
+                    before_count = len(display_data)
+                    before_containers = display_data['Container Count'].sum()
+                    display_data = display_data[~display_data[carrier_col].isin(max_constrained_carriers)].copy()
+                    after_count = len(display_data)
+                    after_containers = display_data['Container Count'].sum()
+                    
+                    if before_count > after_count:
+                        removed_containers = before_containers - after_containers
+                        st.info(f"🔒 **{len(max_constrained_carriers)} carriers with maximum constraints are not shown** "
+                               f"({removed_containers:.0f} containers will be reallocated in optimization scenarios)")
+            
             # CRITICAL: Recalculate Container Count from Container Numbers to ensure accuracy
             # This ensures container counts match the actual concatenated container IDs after grouping
             if 'Container Numbers' in display_data.columns:
