@@ -120,7 +120,9 @@ def main():
             st.info("ℹ️ No constraints file uploaded - all data is unconstrained")
     
     # Calculate metrics on the FULL filtered data (before constraint split)
-    metrics = calculate_enhanced_metrics(final_filtered_data)
+    # Pass unconstrained_data so scenarios (Performance, Cheapest, Optimized) 
+    # only run on unconstrained containers when constraints are active
+    metrics = calculate_enhanced_metrics(final_filtered_data, unconstrained_data)
     
     if metrics is None:
         st.warning("⚠️ No data available after applying filters.")

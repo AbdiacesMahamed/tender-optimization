@@ -91,8 +91,15 @@ def add_missing_rate_rows(display_data, source_data, carrier_col='Dray SCAC(FL)'
 
 # ==================== METRICS CALCULATION ====================
 
-def calculate_enhanced_metrics(data):
-    """Calculate comprehensive metrics for the dashboard"""
+def calculate_enhanced_metrics(data, unconstrained_data=None):
+    """Calculate comprehensive metrics for the dashboard
+    
+    Args:
+        data: Full dataset (may include constrained + unconstrained data)
+        unconstrained_data: Optional - data excluding constrained containers.
+                           When provided, scenarios (Performance, Cheapest, Optimized) 
+                           will run on this subset instead of full data.
+    """
     if data is None or len(data) == 0:
         return None
     
@@ -104,6 +111,10 @@ def calculate_enhanced_metrics(data):
 
     # Use ALL data regardless of rate availability
     data_with_rates = data.copy()
+    
+    # For scenario calculations, use unconstrained_data if provided
+    # This ensures scenarios only manipulate unconstrained containers
+    scenario_data = unconstrained_data.copy() if unconstrained_data is not None else data_with_rates.copy()
 
     # If there are no rows with rates, continue but note rate-based metrics will be zero/defaults
     
@@ -127,13 +138,13 @@ def calculate_enhanced_metrics(data):
     # Performance averages (for reference only)
     avg_performance = data_with_rates['Performance_Score'].mean() if 'Performance_Score' in data_with_rates.columns else None
 
-    # Calculate performance scenario cost using data_with_rates
+    # Calculate performance scenario cost using scenario_data (unconstrained only when constraints active)
     performance_cost = None
-    if 'Performance_Score' in data_with_rates.columns and len(data_with_rates) > 0:
+    if 'Performance_Score' in scenario_data.columns and len(scenario_data) > 0:
         try:
-            carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in data_with_rates.columns else 'Carrier'
+            carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
             performance_allocated = allocate_to_highest_performance(
-                data_with_rates.copy(),
+                scenario_data.copy(),
                 carrier_column=carrier_col,
                 container_column='Container Count',
                 performance_column='Performance_Score',
@@ -144,13 +155,13 @@ def calculate_enhanced_metrics(data):
         except (ValueError, KeyError):
             pass
     
-    # Calculate cheapest cost scenario - optimized with early numeric conversion
+    # Calculate cheapest cost scenario using scenario_data - optimized with early numeric conversion
     cheapest_cost = None
-    if len(data_with_rates) > 0:
+    if len(scenario_data) > 0:
         try:
-            carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in data_with_rates.columns else 'Carrier'
+            carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
             
-            working = data_with_rates.copy()
+            working = scenario_data.copy()
             
             # Ensure numeric comparisons - do this once
             working[rate_cols['rate']] = pd.to_numeric(working[rate_cols['rate']], errors='coerce')
@@ -208,15 +219,16 @@ def calculate_enhanced_metrics(data):
             pass
 
     # Calculate optimized cost scenario using cascading logic with LP + historical constraints
+    # Uses scenario_data (unconstrained only when constraints active)
     optimized_cost = None
-    if len(data_with_rates) > 0:
+    if len(scenario_data) > 0:
         try:
             from optimization import cascading_allocate_with_constraints
             
-            carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in data_with_rates.columns else 'Carrier'
+            carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
             
             # Prepare optimization source - recalculate Container Count from Container Numbers
-            optimization_source = data_with_rates.copy()
+            optimization_source = scenario_data.copy()
             
             # CRITICAL: Recalculate Container Count from Container Numbers to ensure consistency
             if 'Container Numbers' in optimization_source.columns:
@@ -579,6 +591,17 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         # For Current Selection, use the filtered data directly
         if selected == 'Current Selection':
             display_data = display_data_with_rates.copy()
+            
+            # CRITICAL: Recalculate Container Count from Container Numbers to ensure accuracy
+            # This ensures container counts match the actual concatenated container IDs after grouping
+            if 'Container Numbers' in display_data.columns:
+                def count_containers_from_string(container_str):
+                    """Count actual container IDs in a comma-separated string"""
+                    if pd.isna(container_str) or not str(container_str).strip():
+                        return 0
+                    return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+                
+                display_data['Container Count'] = display_data['Container Numbers'].apply(count_containers_from_string)
         
         # When viewing the optimized scenario, reallocate volume using cascading logic with LP + historical constraints
         elif selected == 'Optimized':
