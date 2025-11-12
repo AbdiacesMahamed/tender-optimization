@@ -7,6 +7,60 @@ import streamlit as st
 import math
 
 
+# ==================== HELPER FUNCTIONS FOR CONTAINER-LEVEL TRACKING ====================
+
+def split_container_numbers(container_str):
+    """Split container numbers string into list of container IDs"""
+    if pd.isna(container_str) or not str(container_str).strip():
+        return []
+    return [c.strip() for c in str(container_str).split(',') if c.strip()]
+
+
+def join_container_numbers(container_list):
+    """Join list of container IDs into comma-separated string"""
+    return ', '.join(str(c) for c in container_list if c)
+
+
+def allocate_specific_containers(row, num_containers, allocated_tracker, target_carrier, week_num):
+    """
+    Allocate specific container IDs from a row, tracking which containers are allocated
+    
+    Args:
+        row: Data row containing Container Numbers
+        num_containers: Number of containers to allocate
+        allocated_tracker: Dict tracking allocated container IDs
+        target_carrier: Carrier to assign containers to
+        week_num: Week number for tracking
+    
+    Returns:
+        tuple: (allocated_container_ids, remaining_container_ids)
+    """
+    container_ids = split_container_numbers(row.get('Container Numbers', ''))
+    
+    # Filter out already-allocated containers
+    available_ids = [cid for cid in container_ids if cid not in allocated_tracker]
+    
+    if len(available_ids) == 0:
+        return [], []
+    
+    # Take up to num_containers
+    actual_to_allocate = min(num_containers, len(available_ids))
+    allocated_ids = available_ids[:actual_to_allocate]
+    remaining_ids = available_ids[actual_to_allocate:]
+    
+    # Mark as allocated with metadata
+    for cid in allocated_ids:
+        allocated_tracker[cid] = {
+            'carrier': target_carrier,
+            'week': week_num,
+            'row_idx': row.name if hasattr(row, 'name') else None
+        }
+    
+    return allocated_ids, remaining_ids
+
+
+# ==================== MAIN CONSTRAINT PROCESSING FUNCTIONS ====================
+
 def process_constraints_file(constraints_file):
     """
     Read and validate constraints file
@@ -181,8 +235,9 @@ def apply_constraints_to_data(data, constraints_df):
     remaining_data = data.copy().reset_index(drop=True)
     constraint_summary = []
     
-    # Track which indices have been constrained
-    constrained_indices = set()
+    # Track which INDIVIDUAL container IDs have been allocated
+    # Key: container_id, Value: dict with {carrier, week, row_idx}
+    allocated_containers_tracker = {}
     
     st.write(f"🔍 Applying {len(constraints_df)} constraints...")
     
@@ -238,9 +293,18 @@ def apply_constraints_to_data(data, constraints_df):
         else:
             constraint_desc += filter_desc
         
-        # Get eligible data (not already constrained)
-        available_mask = mask & ~remaining_data.index.isin(constrained_indices)
-        eligible_data = remaining_data[available_mask].copy()
+        # Get eligible data that matches the filter mask
+        eligible_data = remaining_data[mask].copy()
+        
+        # For each row, calculate how many containers are available (not already allocated)
+        available_container_counts = []
+        for idx_val, row in eligible_data.iterrows():
+            container_ids = split_container_numbers(row.get('Container Numbers', ''))
+            available_ids = [cid for cid in container_ids if cid not in allocated_containers_tracker]
+            available_container_counts.append(len(available_ids))
+        
+        eligible_data['_available_containers'] = available_container_counts
+        eligible_data = eligible_data[eligible_data['_available_containers'] > 0].copy()
         
         if len(eligible_data) == 0:
             st.warning(f"⚠️ No eligible data for constraint: {constraint_desc}")
@@ -252,7 +316,7 @@ def apply_constraints_to_data(data, constraints_df):
             })
             continue
         
-        total_eligible_containers = eligible_data['Container Count'].sum()
+        total_eligible_containers = eligible_data['_available_containers'].sum()
         
         # Determine how many containers to allocate
         target_containers = None
@@ -294,26 +358,30 @@ def apply_constraints_to_data(data, constraints_df):
             })
             continue
         
-        # Allocate containers
-        allocated_containers = 0
-        allocated_indices = []
+        # Allocate containers at the CONTAINER ID level (not just counts)
+        allocated_containers_count = 0
         
         # Sort by week for consistency
         allocation_data = eligible_data.sort_values('Week Number')
         
         for row_idx, row in allocation_data.iterrows():
-            if allocated_containers >= target_containers:
+            if allocated_containers_count >= target_containers:
                 break
             
-            containers_to_allocate = min(
-                row['Container Count'],
-                target_containers - allocated_containers
+            # How many MORE containers do we need?
+            containers_needed = target_containers - allocated_containers_count
+            
+            # Allocate specific container IDs from this row
+            week_num = row.get('Week Number', None)
+            allocated_ids, remaining_ids = allocate_specific_containers(
+                row, containers_needed, allocated_containers_tracker, target_carrier, week_num
             )
             
-            if containers_to_allocate > 0:
-                # Create constrained record - ASSIGN to target carrier if specified
+            if len(allocated_ids) > 0:
+                # Create constrained record with ONLY the allocated container IDs
                 constrained_record = row.copy()
-                constrained_record['Container Count'] = containers_to_allocate
+                constrained_record['Container Numbers'] = join_container_numbers(allocated_ids)
+                constrained_record['Container Count'] = len(allocated_ids)
                 
                 # ASSIGN to target carrier (override existing carrier)
                 if target_carrier:
@@ -332,30 +400,28 @@ def apply_constraints_to_data(data, constraints_df):
                 constrained_record['Constraint_Description'] = constraint_desc
                 
                 constrained_records.append(constrained_record)
-                allocated_containers += containers_to_allocate
-                allocated_indices.append(row_idx)
+                allocated_containers_count += len(allocated_ids)
                 
-                # If partial allocation, reduce container count in remaining data
-                if containers_to_allocate < row['Container Count']:
-                    remaining_data.loc[row_idx, 'Container Count'] -= containers_to_allocate
+                # Update remaining_data: Remove allocated containers from this row
+                if len(remaining_ids) > 0:
+                    # Partial allocation - update with remaining containers
+                    remaining_data.loc[row_idx, 'Container Numbers'] = join_container_numbers(remaining_ids)
+                    remaining_data.loc[row_idx, 'Container Count'] = len(remaining_ids)
                 else:
-                    # Full allocation - mark for removal
-                    constrained_indices.add(row_idx)
+                    # Full allocation - mark row for removal (set container count to 0)
+                    remaining_data.loc[row_idx, 'Container Count'] = 0
+                    remaining_data.loc[row_idx, 'Container Numbers'] = ''
         
         constraint_summary.append({
             'priority': constraint['Priority Score'],
             'description': constraint_desc,
             'status': 'Applied',
-            'containers_allocated': allocated_containers,
+            'containers_allocated': allocated_containers_count,
             'target_containers': target_containers,
             'method': allocation_method
         })
     
-    # Remove fully constrained indices
-    if constrained_indices:
-        remaining_data = remaining_data[~remaining_data.index.isin(constrained_indices)].copy()
-    
-    # Remove any rows with zero containers (safety check)
+    # Remove rows with zero containers from remaining data
     remaining_data = remaining_data[remaining_data['Container Count'] > 0].copy()
     
     # Create constrained dataframe
