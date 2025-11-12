@@ -100,6 +100,7 @@ def main():
         constrained_data = pd.DataFrame()
         unconstrained_data = final_filtered_data.copy()
         constraint_summary = []
+        max_constrained_carriers = set()  # Carriers with maximum constraints (hard caps)
         
         if constraints_file is not None:
             st.markdown("---")
@@ -107,7 +108,7 @@ def main():
             
             if constraints_df is not None:
                 # Apply constraints to filtered data
-                constrained_data, unconstrained_data, constraint_summary = apply_constraints_to_data(
+                constrained_data, unconstrained_data, constraint_summary, max_constrained_carriers = apply_constraints_to_data(
                     final_filtered_data, constraints_df
                 )
                 
@@ -122,7 +123,8 @@ def main():
     # Calculate metrics on the FULL filtered data (before constraint split)
     # Pass unconstrained_data so scenarios (Performance, Cheapest, Optimized) 
     # only run on unconstrained containers when constraints are active
-    metrics = calculate_enhanced_metrics(final_filtered_data, unconstrained_data)
+    # Pass max_constrained_carriers so optimization knows which carriers have hard caps
+    metrics = calculate_enhanced_metrics(final_filtered_data, unconstrained_data, max_constrained_carriers)
     
     if metrics is None:
         st.warning("⚠️ No data available after applying filters.")
@@ -132,7 +134,7 @@ def main():
     display_current_metrics(metrics, constrained_data, unconstrained_data)
     
     # Show detailed analysis table with constrained and unconstrained data
-    show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics)
+    show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics, max_constrained_carriers)
     
     # 🔬 DIAGNOSTIC TOOL - Enable to debug container count discrepancies
     

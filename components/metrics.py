@@ -91,7 +91,7 @@ def add_missing_rate_rows(display_data, source_data, carrier_col='Dray SCAC(FL)'
 
 # ==================== METRICS CALCULATION ====================
 
-def calculate_enhanced_metrics(data, unconstrained_data=None):
+def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_carriers=None):
     """Calculate comprehensive metrics for the dashboard
     
     Args:
@@ -99,6 +99,8 @@ def calculate_enhanced_metrics(data, unconstrained_data=None):
         unconstrained_data: Optional - data excluding constrained containers.
                            When provided, scenarios (Performance, Cheapest, Optimized) 
                            will run on this subset instead of full data.
+        max_constrained_carriers: Optional - set of carrier names that have Maximum Container Count constraints.
+                                 These carriers should NOT receive additional volume in optimization.
     """
     if data is None or len(data) == 0:
         return None
@@ -115,6 +117,10 @@ def calculate_enhanced_metrics(data, unconstrained_data=None):
     # For scenario calculations, use unconstrained_data if provided
     # This ensures scenarios only manipulate unconstrained containers
     scenario_data = unconstrained_data.copy() if unconstrained_data is not None else data_with_rates.copy()
+    
+    # Store max_constrained_carriers for later use in optimization
+    if max_constrained_carriers is None:
+        max_constrained_carriers = set()
 
     # If there are no rows with rates, continue but note rate-based metrics will be zero/defaults
     
@@ -253,6 +259,7 @@ def calculate_enhanced_metrics(data, unconstrained_data=None):
                 n_historical_weeks=5,
                 carrier_column=carrier_col,
                 container_column='Container Count',
+                excluded_carriers=max_constrained_carriers,  # Exclude carriers with maximum constraints
             )
             
             if optimized_allocated is not None and len(optimized_allocated) > 0:
@@ -440,9 +447,21 @@ def display_current_metrics(metrics, constrained_data=None, unconstrained_data=N
     
     st.markdown("---")
 
-def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics=None):
-    """Show detailed analysis table - uses same data source as Cost Analysis Dashboard"""
+def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics=None, max_constrained_carriers=None):
+    """Show detailed analysis table - uses same data source as Cost Analysis Dashboard
+    
+    Args:
+        final_filtered_data: Complete filtered dataset
+        unconstrained_data: Data not locked by constraints
+        constrained_data: Data locked by constraints
+        metrics: Pre-calculated metrics (optional)
+        max_constrained_carriers: Set of carriers with maximum constraints (optional)
+    """
     section_header("📋 Detailed Analysis Table")
+    
+    # Default to empty set if not provided
+    if max_constrained_carriers is None:
+        max_constrained_carriers = set()
     
     bal_wk47_final = final_filtered_data[
         (final_filtered_data['Discharged Port'] == 'BAL') & 
@@ -666,6 +685,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                     n_historical_weeks=5,   # Last 5 weeks of data
                     carrier_column=carrier_col,
                     container_column='Container Count',
+                    excluded_carriers=max_constrained_carriers,  # Exclude carriers with maximum constraints
                 )
             except (ValueError, ImportError) as exc:
                 st.warning(f"Unable to build optimized scenario: {exc}")

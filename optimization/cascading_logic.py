@@ -35,6 +35,7 @@ def cascading_allocate_with_constraints(
     lane_column: str = "Lane",
     week_column: str = "Week Number",
     category_column: str = "Category",
+    excluded_carriers: set = None,
 ) -> pd.DataFrame:
     """
     Allocate containers using cascading logic with historical volume constraints.
@@ -68,6 +69,9 @@ def cascading_allocate_with_constraints(
         Column with week numbers
     category_column : str
         Column identifying categories
+    excluded_carriers : set, optional
+        Set of carrier names to EXCLUDE from receiving any volume allocation.
+        These carriers have maximum constraints and should not get additional volume.
     
     Returns
     -------
@@ -82,6 +86,29 @@ def cascading_allocate_with_constraints(
     """
     if data is None or data.empty:
         return pd.DataFrame()
+    
+    # Default to empty set if not provided
+    if excluded_carriers is None:
+        excluded_carriers = set()
+    
+    # Filter out excluded carriers (those with maximum constraints)
+    if excluded_carriers:
+        original_count = len(data)
+        # Check both carrier column variations
+        carrier_cols_to_check = [carrier_column]
+        if 'Carrier' in data.columns and carrier_column != 'Carrier':
+            carrier_cols_to_check.append('Carrier')
+        
+        mask = pd.Series([True] * len(data), index=data.index)
+        for col in carrier_cols_to_check:
+            if col in data.columns:
+                mask &= ~data[col].isin(excluded_carriers)
+        
+        data = data[mask].copy()
+        filtered_count = len(data)
+        
+        if filtered_count < original_count:
+            print(f"🔒 Excluded {original_count - filtered_count} rows from {len(excluded_carriers)} carriers with maximum constraints: {', '.join(sorted(excluded_carriers))}")
     
     # Determine grouping columns
     group_columns = [lane_column]

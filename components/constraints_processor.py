@@ -226,10 +226,12 @@ def apply_constraints_to_data(data, constraints_df):
         constrained_data: DataFrame with containers locked by constraints
         unconstrained_data: DataFrame with remaining containers for scenarios
         constraint_summary: List of applied constraints with details
+        max_constrained_carriers: Set of carriers that have Maximum Container Count constraints
+                                   (these carriers should NOT receive additional volume in optimization)
     """
     
     if constraints_df is None or len(constraints_df) == 0:
-        return pd.DataFrame(), data.copy(), []
+        return pd.DataFrame(), data.copy(), [], set()
     
     constrained_records = []
     remaining_data = data.copy().reset_index(drop=True)
@@ -238,6 +240,10 @@ def apply_constraints_to_data(data, constraints_df):
     # Track which INDIVIDUAL container IDs have been allocated
     # Key: container_id, Value: dict with {carrier, week, row_idx}
     allocated_containers_tracker = {}
+    
+    # Track carriers with MAXIMUM constraints (hard caps)
+    # These carriers should NOT receive additional volume in optimization scenarios
+    max_constrained_carriers = set()
     
     st.write(f"🔍 Applying {len(constraints_df)} constraints...")
     
@@ -321,11 +327,17 @@ def apply_constraints_to_data(data, constraints_df):
         # Determine how many containers to allocate
         target_containers = None
         allocation_method = None
+        is_maximum_constraint = False  # Track if this is a hard cap
         
         # Priority: Max Count > Min Count > Percent Allocation
         if pd.notna(constraint['Maximum Container Count']) and constraint['Maximum Container Count'] > 0:
             target_containers = min(int(constraint['Maximum Container Count']), total_eligible_containers)
             allocation_method = f"Max {int(constraint['Maximum Container Count'])} containers"
+            is_maximum_constraint = True  # This is a hard cap - carrier should not get more
+            
+            # Track this carrier as having a maximum constraint (hard cap)
+            if target_carrier:
+                max_constrained_carriers.add(target_carrier)
         
         elif pd.notna(constraint['Minimum Container Count']) and constraint['Minimum Container Count'] > 0:
             target_containers = min(int(constraint['Minimum Container Count']), total_eligible_containers)
@@ -444,7 +456,12 @@ def apply_constraints_to_data(data, constraints_df):
     if abs(total_original - (total_constrained + total_unconstrained)) > 0.01:
         st.error(f"⚠️ Container mismatch! Lost {total_original - (total_constrained + total_unconstrained):,.0f} containers")
     
-    return constrained_data, remaining_data, constraint_summary
+    # Show carriers with maximum constraints (hard caps)
+    if max_constrained_carriers:
+        st.info(f"🔒 **Carriers with Maximum Constraints (Hard Caps):** {', '.join(sorted(max_constrained_carriers))}\n\n"
+                f"These carriers will NOT receive additional volume in optimization scenarios.")
+    
+    return constrained_data, remaining_data, constraint_summary, max_constrained_carriers
 
 
 def show_constraints_summary(constraint_summary):
