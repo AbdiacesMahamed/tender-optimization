@@ -102,14 +102,17 @@ def calculate_enhanced_metrics(data):
     # Preserve a canonical total that INCLUDES rows with missing rates
     total_containers_all = data['Container Count'].sum()
 
-    # Filter out rows with missing rates for calculations that require rates
-    has_missing_rate_col = 'Missing_Rate' in data.columns
-    data_with_rates = data[data['Missing_Rate'] == False].copy() if has_missing_rate_col else data.copy()
+    # Use ALL data regardless of rate availability
+    data_with_rates = data.copy()
 
     # If there are no rows with rates, continue but note rate-based metrics will be zero/defaults
     
     # Basic metrics - use dynamic rate columns - vectorized operations
-    total_cost = data_with_rates[rate_cols['total_rate']].sum() if rate_cols['total_rate'] in data_with_rates.columns else 0
+    # For cost calculations, only sum rows that have valid rates (not NaN)
+    if rate_cols['total_rate'] in data_with_rates.columns:
+        total_cost = data_with_rates[rate_cols['total_rate']].fillna(0).sum()
+    else:
+        total_cost = 0
     total_containers_with_rates = data_with_rates['Container Count'].sum()
 
     # Use vectorized operations for unique counts
@@ -540,17 +543,9 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     # Use unconstrained data for scenarios when constraints are active
     display_data = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
     
-    # For scenarios that need to allocate based on rates (Performance, Cheapest, Optimized),
-    # we work with a subset that has valid rates for calculations,
-    # but we'll add the missing rate rows back at the end to maintain consistent container counts
-    if 'Missing_Rate' in display_data.columns and selected in ('Performance', 'Cheapest Cost', 'Optimized'):
-        display_data_with_rates = display_data[display_data['Missing_Rate'] == False].copy()
-        # Store the missing rate rows to add back later
-        missing_rate_rows = display_data[display_data['Missing_Rate'] == True].copy()
-    else:
-        # For Current Selection, keep ALL rows including those with missing rates
-        display_data_with_rates = display_data.copy()
-        missing_rate_rows = pd.DataFrame()  # Empty dataframe
+    # Use ALL data regardless of rate availability - no filtering
+    display_data_with_rates = display_data.copy()
+    missing_rate_rows = pd.DataFrame()  # Empty dataframe - not needed anymore
     
     # Select and rename columns based on strategy
     if selected in ('Current Selection', 'Performance', 'Optimized'):
@@ -871,9 +866,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             
         display_data = display_data.rename(columns=rename_dict)
         
-        # ADD BACK MISSING RATE ROWS for all scenarios to maintain consistent container counts
-        if len(missing_rate_rows) > 0:
-            display_data = pd.concat([display_data, missing_rate_rows], ignore_index=True)
+        # No need to add back missing rate rows since we're keeping all data now
 
         # Get rate type label for description
         rate_type_label = st.session_state.get('rate_type', 'Base Rate')
@@ -928,13 +921,10 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             
             source_data['Container Count'] = source_data['Container Numbers'].apply(count_containers_from_string)
         
-        # Filter out carriers with missing rates to ensure consistency
-        if 'Missing_Rate' in source_data.columns:
-            source_data = source_data[source_data['Missing_Rate'] == False].copy()
-        
-        # Ensure rate column is numeric and filter out NaN values
-        source_data[rate_cols['rate']] = pd.to_numeric(source_data[rate_cols['rate']], errors='coerce')
-        source_data = source_data[source_data[rate_cols['rate']].notna()].copy()
+        # Keep ALL carriers regardless of rate availability
+        # Ensure rate column is numeric but don't filter out NaN values yet
+        if rate_cols['rate'] in source_data.columns:
+            source_data[rate_cols['rate']] = pd.to_numeric(source_data[rate_cols['rate']], errors='coerce')
         
         if len(source_data) == 0:
             st.warning("⚠️ No carriers with valid rates found for cheapest cost analysis.")
