@@ -211,6 +211,53 @@ def load_gvt_data(gvt_file):
     try:
         gvt_data = pd.read_excel(gvt_file)
         
+        st.write(f"- Total rows loaded from Excel: {len(gvt_data)}")
+        st.write(f"- Available columns: {list(gvt_data.columns)}")
+        
+        # Check Week 47 data BEFORE any filtering
+        if 'Week Number' in gvt_data.columns:
+            wk47_all = gvt_data[gvt_data['Week Number'] == 47]
+            st.write(f"- Total Week 47 rows (all ports): {len(wk47_all)}")
+            
+            # Check different ways to identify BAL
+            if 'Lane' in gvt_data.columns:
+                st.write(f"- Unique Lanes in Week 47: {sorted(wk47_all['Lane'].unique())}")
+                bal_lanes = wk47_all[wk47_all['Lane'].str.startswith('BAL', na=False)]
+                st.write(f"- Week 47 rows with Lane starting with 'BAL': {len(bal_lanes)}")
+                
+        # CRITICAL: Collect ALL BAL Week 47 container IDs from raw Excel
+        bal_wk47_container_ids_initial = []
+        if 'Container Numbers' in gvt_data.columns and 'Week Number' in gvt_data.columns and 'Lane' in gvt_data.columns:
+            bal_wk47_raw = gvt_data[(gvt_data['Week Number'] == 47) & (gvt_data['Lane'].str.startswith('BAL', na=False))]
+            
+            st.write(f"\n**🎯 BAL WEEK 47 RAW DATA FROM EXCEL:**")
+            st.write(f"- Total BAL Week 47 rows in Excel: {len(bal_wk47_raw)}")
+            
+            for idx, row in bal_wk47_raw.iterrows():
+                cn = row['Container Numbers']
+                if pd.notna(cn) and str(cn).strip():
+                    ids = [c.strip() for c in str(cn).split(',') if c.strip()]
+                    bal_wk47_container_ids_initial.extend(ids)
+                    
+            st.write(f"- **Total BAL Week 47 container IDs (with duplicates): {len(bal_wk47_container_ids_initial)}**")
+            st.write(f"- **Unique BAL Week 47 container IDs: {len(set(bal_wk47_container_ids_initial))}**")
+            st.write(f"- **Duplicate container IDs: {len(bal_wk47_container_ids_initial) - len(set(bal_wk47_container_ids_initial))}**")
+            
+            if len(bal_wk47_container_ids_initial) > 0:
+                st.write(f"- First 15 BAL Week 47 containers: {bal_wk47_container_ids_initial[:15]}")
+                st.write(f"- Last 15 BAL Week 47 containers: {bal_wk47_container_ids_initial[-15:]}")
+            
+            # Show row-by-row breakdown
+            st.write("\n**Row-by-row breakdown:**")
+            for idx, row in bal_wk47_raw.iterrows():
+                cn = row['Container Numbers']
+                if pd.notna(cn) and str(cn).strip():
+                    ids = [c.strip() for c in str(cn).split(',') if c.strip()]
+                    lane = row.get('Lane', 'N/A')
+                    carrier = row.get('Dray SCAC(FL)', 'N/A')
+                    facility = row.get('Facility', 'N/A')
+                    st.write(f"  Row {idx}: {lane} | {carrier} | {facility} → {len(ids)} containers")
+        
         # Ensure required columns exist
         required_cols = ['Dray SCAC(FL)', 'Lane', 'Facility', 'Week Number', 
                         'Container Numbers', 'Base Rate', 'Total Rate']
@@ -244,6 +291,22 @@ def load_gvt_data(gvt_file):
         
         gvt_data['Container Count'] = gvt_data['Container Numbers'].apply(count_containers_properly)
         
+        bal_wk47_after = gvt_data[(gvt_data['Week Number'] == 47) & (gvt_data['Lane'].str.startswith('BAL', na=False))]
+        st.write(f"- BAL Week 47 rows: {len(bal_wk47_after)}")
+        st.write(f"- BAL Week 47 total Container Count (sum): {bal_wk47_after['Container Count'].sum()}")
+        
+        # Collect container IDs after calculation
+        bal_container_ids_after_calc = []
+        for cn in bal_wk47_after['Container Numbers']:
+            if pd.notna(cn) and str(cn).strip():
+                ids = [c.strip() for c in str(cn).split(',') if c.strip()]
+                bal_container_ids_after_calc.extend(ids)
+        st.write(f"- **Actual container IDs in Container Numbers: {len(bal_container_ids_after_calc)}**")
+        st.write(f"- **Unique container IDs: {len(set(bal_container_ids_after_calc))}**")
+        
+        if len(bal_wk47_after) > 0:
+            st.dataframe(bal_wk47_after[['Lane', 'Dray SCAC(FL)', 'Week Number', 'Container Count', 'Container Numbers']].head(10))
+        
         # Keep Category column if it exists
         select_cols = ['Discharged Port', 'Dray SCAC(FL)', 'Lane', 'Facility', 
                       'Week Number', 'Container Numbers', 'Container Count', 
@@ -252,7 +315,50 @@ def load_gvt_data(gvt_file):
         if 'Category' in gvt_data.columns:
             select_cols.insert(1, 'Category')  # Add Category after Discharged Port
         
+        bal_before_select = gvt_data[(gvt_data['Week Number'] == 47) & (gvt_data['Lane'].str.startswith('BAL', na=False))]
+        st.write(f"- BAL Week 47 rows before select: {len(bal_before_select)}")
+        st.write(f"- BAL Week 47 Container Count sum: {bal_before_select['Container Count'].sum()}")
+        
+        # Collect container IDs
+        bal_ids_before_select = []
+        for cn in bal_before_select['Container Numbers']:
+            if pd.notna(cn) and str(cn).strip():
+                ids = [c.strip() for c in str(cn).split(',') if c.strip()]
+                bal_ids_before_select.extend(ids)
+        st.write(f"- **Actual container IDs: {len(bal_ids_before_select)}**")
+        
         gvt_data = gvt_data[select_cols]
+        
+        bal_after_select = gvt_data[(gvt_data['Week Number'] == 47) & (gvt_data['Discharged Port'] == 'BAL')]
+        st.write(f"- BAL Week 47 rows after select: {len(bal_after_select)}")
+        st.write(f"- BAL Week 47 Container Count sum: {bal_after_select['Container Count'].sum()}")
+        st.write(f"- Total rows after column selection: {len(gvt_data)}")
+        
+        # Collect container IDs
+        bal_ids_after_select = []
+        for cn in bal_after_select['Container Numbers']:
+            if pd.notna(cn) and str(cn).strip():
+                ids = [c.strip() for c in str(cn).split(',') if c.strip()]
+                bal_ids_after_select.extend(ids)
+        st.write(f"- **Actual container IDs: {len(bal_ids_after_select)}**")
+        st.write(f"- **Container IDs lost in column selection: {len(bal_ids_before_select) - len(bal_ids_after_select)}**")
+        
+        if len(bal_after_select) > 0:
+            st.write("Sample data:")
+            st.dataframe(bal_after_select[['Discharged Port', 'Lane', 'Dray SCAC(FL)', 'Week Number', 'Container Count', 'Container Numbers']].head(5))
+        
+        bal_wk47_final = gvt_data[(gvt_data['Week Number'] == 47) & (gvt_data['Discharged Port'] == 'BAL')]
+        st.write(f"- BAL Week 47 rows: {len(bal_wk47_final)}")
+        st.write(f"- BAL Week 47 total Container Count: {bal_wk47_final['Container Count'].sum()}")
+        
+        # Collect final container IDs
+        bal_ids_final = []
+        for cn in bal_wk47_final['Container Numbers']:
+            if pd.notna(cn) and str(cn).strip():
+                ids = [c.strip() for c in str(cn).split(',') if c.strip()]
+                bal_ids_final.extend(ids)
+        st.write(f"- **Actual container IDs being returned: {len(bal_ids_final)}**")
+        st.write(f"- **Unique container IDs: {len(set(bal_ids_final))}**")
         
         return gvt_data
         
@@ -283,12 +389,20 @@ def load_performance_data(performance_file):
 def create_comprehensive_data(gvt_data, performance_data):
     """Merge GVT and Performance data"""
     try:
+        bal_wk47_input = gvt_data[(gvt_data['Week Number'] == 47) & (gvt_data['Discharged Port'] == 'BAL')]
+        st.write(f"- BAL Week 47 rows in input: {len(bal_wk47_input)}")
+        st.write(f"- BAL Week 47 total Container Count in input: {bal_wk47_input['Container Count'].sum()}")
+        
         # Merge on carrier (SCAC)
         comprehensive_data = gvt_data.merge(
             performance_data, 
             on='Dray SCAC(FL)', 
             how='left'
         )
+        
+        bal_wk47_merged = comprehensive_data[(comprehensive_data['Week Number'] == 47) & (comprehensive_data['Discharged Port'] == 'BAL')]
+        st.write(f"- BAL Week 47 rows after merge: {len(bal_wk47_merged)}")
+        st.write(f"- BAL Week 47 total Container Count after merge: {bal_wk47_merged['Container Count'].sum()}")
         
         # Fill missing performance scores with 0
         comprehensive_data['Performance_Score'] = comprehensive_data['Performance_Score'].fillna(0)
@@ -313,6 +427,12 @@ def create_comprehensive_data(gvt_data, performance_data):
         
         comprehensive_data = comprehensive_data.groupby(group_cols, as_index=False).agg(agg_dict)
         
+        bal_wk47_grouped = comprehensive_data[(comprehensive_data['Week Number'] == 47) & (comprehensive_data['Discharged Port'] == 'BAL')]
+        st.write(f"- BAL Week 47 rows after groupby: {len(bal_wk47_grouped)}")
+        st.write(f"- BAL Week 47 total Container Count (summed): {bal_wk47_grouped['Container Count'].sum()}")
+        if len(bal_wk47_grouped) > 0:
+            st.dataframe(bal_wk47_grouped[['Discharged Port', 'Lane', 'Dray SCAC(FL)', 'Week Number', 'Container Count', 'Container Numbers']].head(10))
+        
         # CRITICAL: Now that Container Numbers are concatenated, recalculate Container Count
         # This is done AFTER aggregation to ensure Container Count matches Container Numbers
         def recount_containers(container_str):
@@ -325,6 +445,12 @@ def create_comprehensive_data(gvt_data, performance_data):
         
         # This line ensures Container Count is ALWAYS calculated FROM Container Numbers
         comprehensive_data['Container Count'] = comprehensive_data['Container Numbers'].apply(recount_containers)
+        
+        bal_wk47_final = comprehensive_data[(comprehensive_data['Week Number'] == 47) & (comprehensive_data['Discharged Port'] == 'BAL')]
+        st.write(f"- BAL Week 47 rows final: {len(bal_wk47_final)}")
+        st.write(f"- BAL Week 47 total Container Count (recalculated): {bal_wk47_final['Container Count'].sum()}")
+        if len(bal_wk47_final) > 0:
+            st.dataframe(bal_wk47_final[['Discharged Port', 'Lane', 'Dray SCAC(FL)', 'Week Number', 'Container Count', 'Container Numbers']].head(10))
         
         return comprehensive_data
         

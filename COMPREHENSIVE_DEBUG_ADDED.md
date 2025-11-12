@@ -227,4 +227,261 @@ The system now catches and fixes mismatches at EVERY stage, ensuring your scenar
 
 ## Date Applied
 
-November 10, 2025
+November 10, 2025 (Initial Debug System)
+November 12, 2025 (Comprehensive Data Flow Debug Added)
+
+---
+
+# Updated Debug System - November 12, 2025
+
+## New Comprehensive Data Flow Debug
+
+Added 15 comprehensive debug checkpoints to trace BAL Week 47 containers through the entire data pipeline, from Excel load to final scenario display.
+
+## Purpose
+
+After removing rate filtering, we need to verify that all 49 BAL Week 47 containers are visible and tracked correctly through every transformation stage.
+
+## Debug Checkpoints (15 Total)
+
+### Data Loading Stage (components/data_loader.py)
+
+#### DEBUG 1: GVT Initial Load
+
+- **Location:** `load_gvt_data()` after Excel read
+- **Tracks:** Raw data from Excel, BAL Week 47 rows, container ID list
+
+#### DEBUG 2: After Container Count Calculation
+
+- **Location:** `load_gvt_data()` after calculating from Container Numbers
+- **Tracks:** Container Count sum, verifies calculation accuracy
+
+#### DEBUG 3: GVT Final Before Return
+
+- **Location:** `load_gvt_data()` final checkpoint
+- **Tracks:** Final row count, ensures no data loss
+
+#### DEBUG 4: Input to create_comprehensive_data
+
+- **Location:** `create_comprehensive_data()` entry point
+- **Tracks:** Baseline before aggregation
+
+#### DEBUG 5: After Merge with Performance
+
+- **Location:** `create_comprehensive_data()` after performance merge
+- **Tracks:** Verifies no loss during merge
+
+#### DEBUG 6: After Groupby Aggregation
+
+- **Location:** `create_comprehensive_data()` after groupby
+- **Tracks:** Critical checkpoint for groupby data loss
+- **Displays:** Sample dataframe with aggregated data
+
+#### DEBUG 7: After Container Count Recalculation
+
+- **Location:** `create_comprehensive_data()` final step
+- **Tracks:** Container Count consistency with Container Numbers
+- **Displays:** Sample data with key columns
+
+### Data Merging Stage (dashboard.py)
+
+#### DEBUG 8: After merge_all_data
+
+- **Location:** `main()` after merging GVT, Rates, Performance
+- **Tracks:** Total merged rows, BAL Week 47 after merge
+- **Verifies:** No loss during rate merge
+
+#### DEBUG 9: After create_comprehensive_data (Final)
+
+- **Location:** `main()` after final comprehensive data creation
+- **Tracks:** Final aggregated data
+- **Establishes:** Baseline before filtering
+- **Displays:** Sample data
+
+### Filtering Stage (dashboard.py)
+
+#### DEBUG 10: After apply_filters_to_data
+
+- **Location:** `main()` after user filter selections
+- **Tracks:** final_filtered_data after all filters
+- **Critical:** Identifies filter-related data loss
+- **Displays:** Sample filtered data
+
+### Constraint Processing Stage (dashboard.py)
+
+#### DEBUG 11: After apply_constraints_to_data
+
+- **Location:** `main()` after splitting constrained/unconstrained
+- **Tracks:** Both datasets separately
+- **Verifies:** Split maintains all containers
+- **Shows:** Total = constrained + unconstrained
+
+### Metrics Calculation Stage (components/metrics.py)
+
+#### DEBUG 12: Input to calculate_enhanced_metrics
+
+- **Location:** `calculate_enhanced_metrics()` entry
+- **Tracks:** Input data before metrics calculations
+- **Establishes:** Baseline for metrics
+
+#### DEBUG 13: Input to show_detailed_analysis_table
+
+- **Location:** `show_detailed_analysis_table()` entry
+- **Tracks:** All three datasets (final, constrained, unconstrained)
+- **Shows:** BAL Week 47 in each dataset
+- **Establishes:** Baseline for scenario processing
+
+#### DEBUG 14: Source data for scenario processing
+
+- **Location:** `show_detailed_analysis_table()` before scenario logic
+- **Tracks:** Which dataset is used (constrained vs unconstrained)
+- **Shows:** Source data for selected scenario
+
+#### DEBUG 15: Final display_data before table
+
+- **Location:** `show_detailed_analysis_table()` before rendering
+- **Tracks:** Final processed scenario data
+- **Shows:** BAL Week 47 rows in final table
+- **Displays:** Sample of final data
+- **Critical:** Last checkpoint before user sees table
+
+## Complete Data Flow Map
+
+```
+Excel File (GVT)
+    ↓
+🔍 DEBUG 1: Initial load (49 containers expected)
+    ↓
+Container Count Calculation
+    ↓
+🔍 DEBUG 2: After calculation (verify 49)
+    ↓
+🔍 DEBUG 3: Final GVT processing (verify 49)
+    ↓
+merge_all_data()
+    ↓
+🔍 DEBUG 8: After merge (verify 49)
+    ↓
+create_comprehensive_data() entry
+    ↓
+🔍 DEBUG 4: Input (verify 49)
+    ↓
+Merge with performance
+    ↓
+🔍 DEBUG 5: After performance merge (verify 49)
+    ↓
+Groupby aggregation
+    ↓
+🔍 DEBUG 6: After groupby (verify 49)
+    ↓
+Container Count recalculation
+    ↓
+🔍 DEBUG 7: After recalculation (verify 49)
+    ↓
+🔍 DEBUG 9: Final comprehensive data (verify 49)
+    ↓
+apply_filters_to_data()
+    ↓
+🔍 DEBUG 10: After filtering (verify 49 if BAL WK47 selected)
+    ↓
+apply_constraints_to_data()
+    ↓
+🔍 DEBUG 11: Split into constrained/unconstrained (verify sum = 49)
+    ↓
+calculate_enhanced_metrics()
+    ↓
+🔍 DEBUG 12: Metrics input (verify 49)
+    ↓
+show_detailed_analysis_table()
+    ↓
+🔍 DEBUG 13: Scenario display input (verify 49 in source)
+    ↓
+🔍 DEBUG 14: Scenario source data (verify 49)
+    ↓
+Scenario Logic (Current/Performance/Cheapest/Optimized)
+    ↓
+🔍 DEBUG 15: Final display data (verify 49 in table)
+    ↓
+User sees table with 49 containers
+```
+
+## How Each Debug Looks
+
+Each checkpoint displays:
+
+```
+🔍 **DEBUG X: Description**
+- Total data rows: XXX
+- BAL Week 47 rows: XX
+- BAL Week 47 total Container Count: 49
+- BAL Week 47 unique Container Numbers: 49
+Sample BAL Week 47 data:
+[Dataframe with 3 sample rows]
+```
+
+## Expected Results for BAL Week 47
+
+If working correctly:
+
+- ✅ DEBUG 1-3: 49 containers from Excel
+- ✅ DEBUG 4-7: 49 containers maintained through aggregation
+- ✅ DEBUG 8-9: 49 containers maintained through merge
+- ✅ DEBUG 10: 49 containers after filters (when BAL WK47 selected)
+- ✅ DEBUG 11: 49 total (constrained + unconstrained)
+- ✅ DEBUG 12: 49 containers in metrics
+- ✅ DEBUG 13-15: 49 containers in final scenario tables
+
+## Testing Procedure
+
+1. **Start Application:**
+
+   ```powershell
+   streamlit run streamlit_app.py
+   ```
+
+2. **Upload Files:** GVT, Rates, Performance
+
+3. **Apply Filters:**
+
+   - Port of Loading: BAL
+   - Week Number: 47
+
+4. **Review Debug Output:**
+
+   - Scroll through and check all 15 debug checkpoints
+   - Look for container count consistency
+   - Note any drops in container count
+
+5. **Identify Issues:**
+   - If count drops between DEBUG X and DEBUG X+1
+   - That's where the problem occurs
+   - Check the code between those two points
+
+## Files Modified (November 12)
+
+1. ✅ `components/data_loader.py` - Added DEBUG 1-7
+2. ✅ `dashboard.py` - Added DEBUG 8-11
+3. ✅ `components/metrics.py` - Added DEBUG 12-15
+
+## Removal After Testing
+
+Once verified:
+
+1. Search for "🔍 DEBUG" in all files
+2. Remove all debug statements
+3. Test application runs normally
+4. Commit clean code
+
+## Success Criteria
+
+- ✅ All 49 BAL Week 47 containers visible at every checkpoint
+- ✅ No unexplained drops in container count
+- ✅ Container Count matches Container Numbers at all stages
+- ✅ All 49 containers appear in final scenario tables
+- ✅ Constrained + Unconstrained = Total containers
+
+---
+
+**Status:** Comprehensive debug system active
+**Next Step:** Run application, filter to BAL Week 47, review all 15 checkpoints
+**Goal:** Verify complete data flow and identify any discrepancies

@@ -96,6 +96,16 @@ def calculate_enhanced_metrics(data):
     if data is None or len(data) == 0:
         return None
     
+    bal_wk47_metrics_input = data[
+        (data['Discharged Port'] == 'BAL') & 
+        (data['Week Number'] == 47)
+    ]
+    st.write(f"- Total input data rows: {len(data)}")
+    st.write(f"- BAL Week 47 rows: {len(bal_wk47_metrics_input)}")
+    st.write(f"- BAL Week 47 total Container Count: {bal_wk47_metrics_input['Container Count'].sum()}")
+    if 'Container Numbers' in bal_wk47_metrics_input.columns:
+        st.write(f"- BAL Week 47 unique Container Numbers: {bal_wk47_metrics_input['Container Numbers'].str.split(', ').apply(lambda x: len(x) if isinstance(x, list) else 0).sum()}")
+    
     # Get rate columns based on selected rate type - cache this
     rate_cols = get_rate_columns()
     
@@ -432,6 +442,26 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     """Show detailed analysis table - uses same data source as Cost Analysis Dashboard"""
     section_header("📋 Detailed Analysis Table")
     
+    bal_wk47_final = final_filtered_data[
+        (final_filtered_data['Discharged Port'] == 'BAL') & 
+        (final_filtered_data['Week Number'] == 47)
+    ]
+    bal_wk47_uncon = unconstrained_data[
+        (unconstrained_data['Discharged Port'] == 'BAL') & 
+        (unconstrained_data['Week Number'] == 47)
+    ] if len(unconstrained_data) > 0 else pd.DataFrame()
+    bal_wk47_con = constrained_data[
+        (constrained_data['Discharged Port'] == 'BAL') & 
+        (constrained_data['Week Number'] == 47)
+    ] if len(constrained_data) > 0 else pd.DataFrame()
+    
+    st.write(f"- final_filtered_data total rows: {len(final_filtered_data)}")
+    st.write(f"- unconstrained_data total rows: {len(unconstrained_data)}")
+    st.write(f"- constrained_data total rows: {len(constrained_data)}")
+    st.write(f"- BAL Week 47 in final_filtered_data: {len(bal_wk47_final)} rows, {bal_wk47_final['Container Count'].sum()} containers")
+    st.write(f"- BAL Week 47 in unconstrained_data: {len(bal_wk47_uncon)} rows, {bal_wk47_uncon['Container Count'].sum() if len(bal_wk47_uncon) > 0 else 0} containers")
+    st.write(f"- BAL Week 47 in constrained_data: {len(bal_wk47_con)} rows, {bal_wk47_con['Container Count'].sum() if len(bal_wk47_con) > 0 else 0} containers")
+    
     # Get metrics if not provided
     if metrics is None:
         metrics = calculate_enhanced_metrics(final_filtered_data)
@@ -542,6 +572,17 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     
     # Use unconstrained data for scenarios when constraints are active
     display_data = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
+    
+    bal_wk47_scenario_source = display_data[
+        (display_data['Discharged Port'] == 'BAL') & 
+        (display_data['Week Number'] == 47)
+    ]
+    st.write(f"- Using {'unconstrained_data' if has_constraints else 'final_filtered_data'} as source")
+    st.write(f"- Total source data rows: {len(display_data)}")
+    st.write(f"- BAL Week 47 rows: {len(bal_wk47_scenario_source)}")
+    st.write(f"- BAL Week 47 total Container Count: {bal_wk47_scenario_source['Container Count'].sum()}")
+    if 'Container Numbers' in bal_wk47_scenario_source.columns:
+        st.write(f"- BAL Week 47 unique Container Numbers: {bal_wk47_scenario_source['Container Numbers'].str.split(', ').apply(lambda x: len(x) if isinstance(x, list) else 0).sum()}")
     
     # Use ALL data regardless of rate availability - no filtering
     display_data_with_rates = display_data.copy()
@@ -1075,6 +1116,19 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         
     st.info(desc)
     
+    bal_wk47_final_display = display_data[
+        (display_data['Discharged Port'] == 'BAL') & 
+        (display_data['Week Number'] == 47)
+    ] if 'Discharged Port' in display_data.columns else pd.DataFrame()
+    st.write(f"- Total display_data rows: {len(display_data)}")
+    st.write(f"- BAL Week 47 rows in final table: {len(bal_wk47_final_display)}")
+    if len(bal_wk47_final_display) > 0:
+        st.write(f"- BAL Week 47 total Container Count: {bal_wk47_final_display['Container Count'].sum()}")
+        if 'Container Numbers' in bal_wk47_final_display.columns:
+            st.write(f"- BAL Week 47 unique Container Numbers: {bal_wk47_final_display['Container Numbers'].str.split(', ').apply(lambda x: len(x) if isinstance(x, list) else 0).sum()}")
+        st.write("Sample BAL Week 47 final display:")
+        st.dataframe(bal_wk47_final_display.head(3))
+    
     # Format columns for display - use dynamic rate columns
     rate_cols = get_rate_columns()
     display_formatted = display_data.copy()
@@ -1163,9 +1217,6 @@ def show_top_savings_opportunities(final_filtered_data):
 def show_complete_data_export(final_filtered_data):
     """Complete data export section"""
     section_header("📄 Complete Data Export")
-    
-    if st.checkbox("🔍 Show All Data"):
-        st.dataframe(final_filtered_data, use_container_width=True)
     
     if len(final_filtered_data) > 0:
         csv = final_filtered_data.to_csv(index=False)
