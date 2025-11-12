@@ -479,8 +479,29 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     
     # Show constraint info if applicable
     if has_constraints:
-        constrained_containers = constrained_data['Container Count'].sum()
-        unconstrained_containers = unconstrained_data['Container Count'].sum()
+        # Recalculate constrained container count from Container Numbers for accuracy
+        if 'Container Numbers' in constrained_data.columns:
+            def count_containers_from_string(container_str):
+                """Count actual container IDs in a comma-separated string"""
+                if pd.isna(container_str) or not str(container_str).strip():
+                    return 0
+                return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+            
+            constrained_containers = constrained_data['Container Numbers'].apply(count_containers_from_string).sum()
+        else:
+            constrained_containers = constrained_data['Container Count'].sum()
+        
+        # Recalculate unconstrained container count from Container Numbers for accuracy
+        if 'Container Numbers' in unconstrained_data.columns:
+            def count_containers_from_string(container_str):
+                """Count actual container IDs in a comma-separated string"""
+                if pd.isna(container_str) or not str(container_str).strip():
+                    return 0
+                return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+            
+            unconstrained_containers = unconstrained_data['Container Numbers'].apply(count_containers_from_string).sum()
+        else:
+            unconstrained_containers = unconstrained_data['Container Count'].sum()
         
         st.info(f"""
         🔒 **Constraints Active:** 
@@ -502,6 +523,17 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         rate_cols = get_rate_columns()
         
         constrained_display = constrained_data.copy()
+        
+        # CRITICAL: Recalculate Container Count from Container Numbers to ensure accuracy
+        # This ensures container counts match the actual concatenated container IDs
+        if 'Container Numbers' in constrained_display.columns:
+            def count_containers_from_string(container_str):
+                """Count actual container IDs in a comma-separated string"""
+                if pd.isna(container_str) or not str(container_str).strip():
+                    return 0
+                return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+            
+            constrained_display['Container Count'] = constrained_display['Container Numbers'].apply(count_containers_from_string)
         
         # Prepare constrained data for display
         carrier_col_c = 'Carrier' if 'Carrier' in constrained_display.columns else 'Dray SCAC(FL)'

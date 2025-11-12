@@ -1,6 +1,7 @@
 # Scenario Logic Verification
 
 ## Summary
+
 Both Performance and Cheapest Cost scenarios correctly assign **100% of container volume** to the best carrier for each lane/category/week combination.
 
 ## Performance Scenario
@@ -8,8 +9,9 @@ Both Performance and Cheapest Cost scenarios correctly assign **100% of containe
 **Location**: `optimization/performance_logic.py` → `allocate_to_highest_performance()`
 
 **Logic**:
+
 1. **Group by**: Category, Week Number, Lane, Discharged Port, Facility
-2. **Sort by** (descending): 
+2. **Sort by** (descending):
    - Performance_Score (highest first)
    - Then Total Rate/CPC (lowest - tie breaker)
    - Then Carrier name (alphabetical - tie breaker)
@@ -17,6 +19,7 @@ Both Performance and Cheapest Cost scenarios correctly assign **100% of containe
 4. **Allocate**: Sum ALL containers in the group → assign 100% to selected carrier
 
 **Code Reference** (lines 109-124):
+
 ```python
 # Get the best carrier per group (highest performance)
 best_carriers = working.groupby(group_cols).head(1).copy()
@@ -40,9 +43,10 @@ best_carriers[container_column] = best_carriers["__total_containers"].fillna(0)
 
 ## Cheapest Cost Scenario
 
-**Location**: `components/metrics.py` → `show_detailed_analysis_table()` 
+**Location**: `components/metrics.py` → `show_detailed_analysis_table()`
 
 **Logic**:
+
 1. **Group by**: Category, Week Number, Lane, Discharged Port, Facility
 2. **Sort by** (ascending):
    - Base Rate or CPC (lowest first)
@@ -51,6 +55,7 @@ best_carriers[container_column] = best_carriers["__total_containers"].fillna(0)
 4. **Allocate**: Sum ALL containers in the group → assign 100% to selected carrier
 
 **Code Reference** (lines 981-1026):
+
 ```python
 # Sort by rate (cheapest first)
 working['_rate_sort'] = working[rate_cols['rate']].fillna(float('inf'))
@@ -79,25 +84,28 @@ cheapest_per_group['Container Count'] = cheapest_per_group['_total_containers'].
 ## Example
 
 ### Input Data:
-| Lane | Category | Week | Carrier | Containers | Performance | Rate |
-|------|----------|------|---------|------------|-------------|------|
-| USBAL-HIA1 | FBA FCL | 47 | ARVY | 5 | 0.85 | $500 |
-| USBAL-HIA1 | FBA FCL | 47 | FRQT | 3 | 0.90 | $600 |
-| USBAL-HIA1 | FBA FCL | 47 | HDDR | 2 | 0.75 | $450 |
+
+| Lane       | Category | Week | Carrier | Containers | Performance | Rate |
+| ---------- | -------- | ---- | ------- | ---------- | ----------- | ---- |
+| USBAL-HIA1 | FBA FCL  | 47   | ARVY    | 5          | 0.85        | $500 |
+| USBAL-HIA1 | FBA FCL  | 47   | FRQT    | 3          | 0.90        | $600 |
+| USBAL-HIA1 | FBA FCL  | 47   | HDDR    | 2          | 0.75        | $450 |
 
 **Total Containers in Group**: 5 + 3 + 2 = **10 containers**
 
 ### Performance Scenario Output:
-| Lane | Category | Week | Carrier | Containers | Performance | Rate |
-|------|----------|------|---------|------------|-------------|------|
-| USBAL-HIA1 | FBA FCL | 47 | **FRQT** | **10** | 0.90 | $600 |
+
+| Lane       | Category | Week | Carrier  | Containers | Performance | Rate |
+| ---------- | -------- | ---- | -------- | ---------- | ----------- | ---- |
+| USBAL-HIA1 | FBA FCL  | 47   | **FRQT** | **10**     | 0.90        | $600 |
 
 **Result**: FRQT (highest performance 0.90) gets ALL 10 containers
 
 ### Cheapest Cost Scenario Output:
-| Lane | Category | Week | Carrier | Containers | Performance | Rate |
-|------|----------|------|---------|------------|-------------|------|
-| USBAL-HIA1 | FBA FCL | 47 | **HDDR** | **10** | 0.75 | $450 |
+
+| Lane       | Category | Week | Carrier  | Containers | Performance | Rate |
+| ---------- | -------- | ---- | -------- | ---------- | ----------- | ---- |
+| USBAL-HIA1 | FBA FCL  | 47   | **HDDR** | **10**     | 0.75        | $450 |
 
 **Result**: HDDR (cheapest rate $450) gets ALL 10 containers
 
@@ -111,4 +119,5 @@ cheapest_per_group['Container Count'] = cheapest_per_group['_total_containers'].
 - ✅ **Tie-Breaking**: Both have proper tie-breaking logic for deterministic results
 
 ## Date
+
 November 12, 2025
