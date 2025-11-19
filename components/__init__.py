@@ -32,7 +32,8 @@ from .metrics import (
     show_top_savings_opportunities,
     show_complete_data_export,
     show_performance_score_analysis,
-    show_carrier_performance_matrix
+    show_carrier_performance_matrix,
+    show_container_movement_summary
 )
 
 # Summary tables
@@ -80,7 +81,7 @@ __all__ = [
     # Metrics
     'calculate_enhanced_metrics', 'display_current_metrics', 'show_detailed_analysis_table',
     'show_top_savings_opportunities', 'show_complete_data_export', 'show_performance_score_analysis',
-    'show_carrier_performance_matrix',
+    'show_carrier_performance_matrix', 'show_container_movement_summary',
     
     # Tables and analysis
     'show_summary_tables',

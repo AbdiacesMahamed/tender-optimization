@@ -9,6 +9,19 @@ import math
 
 # ==================== HELPER FUNCTIONS FOR CONTAINER-LEVEL TRACKING ====================
 
+def normalize_facility_code(facility_str):
+    """
+    Normalize facility code to first 4 characters for comparison
+    Examples: 'HGR6-5' -> 'HGR6', 'IUSF' -> 'IUSF', 'GBPT-3' -> 'GBPT'
+    """
+    if pd.isna(facility_str) or not str(facility_str).strip():
+        return ''
+    # Convert to string and strip whitespace
+    fc = str(facility_str).strip().upper()
+    # Take first 4 characters
+    return fc[:4] if len(fc) >= 4 else fc
+
+
 def split_container_numbers(container_str):
     """Split container numbers string into list of container IDs"""
     if pd.isna(container_str) or not str(container_str).strip():
@@ -71,9 +84,11 @@ def process_constraints_file(constraints_file):
     - Lane
     - Port (Discharged Port)
     - Week Number
+    - Terminal
     - Maximum container number / Maximum Container Count
     - minimum container number / Minimum Container Count
     - Percent Allocation
+    - Excluded FC (Excluded Facility) - Carrier cannot receive volume at this facility
     - Priority Score / Priority Sc (required)
     
     Returns:
@@ -118,15 +133,23 @@ def process_constraints_file(constraints_file):
             # Map Percent Allocation
             elif 'percent' in col_lower and 'allocation' in col_lower:
                 column_mapping[col] = 'Percent Allocation'
+            # Map Excluded FC (Excluded Facility)
+            elif 'excluded' in col_lower and 'fc' in col_lower:
+                column_mapping[col] = 'Excluded FC'
+            elif 'excluded' in col_lower and 'facility' in col_lower:
+                column_mapping[col] = 'Excluded FC'
+            # Map Terminal
+            elif col_lower == 'terminal':
+                column_mapping[col] = 'Terminal'
         
         # Apply column mapping
         constraints_df = constraints_df.rename(columns=column_mapping)
         
         # Define expected columns
         expected_cols = [
-            'Category', 'Carrier', 'Lane', 'Port', 'Week Number',
+            'Category', 'Carrier', 'Lane', 'Port', 'Week Number', 'Terminal',
             'Maximum Container Count', 'Minimum Container Count',
-            'Percent Allocation', 'Priority Score'
+            'Percent Allocation', 'Excluded FC', 'Priority Score'
         ]
         
         # Check if Priority Score exists (required)
@@ -141,7 +164,7 @@ def process_constraints_file(constraints_file):
                 constraints_df[col] = None
         
         # Clean up text fields - convert empty strings to None
-        for col in ['Category', 'Lane', 'Carrier', 'Port']:
+        for col in ['Category', 'Lane', 'Carrier', 'Port', 'Terminal', 'Excluded FC']:
             if col in constraints_df.columns:
                 # Replace empty strings with None
                 constraints_df[col] = constraints_df[col].apply(
@@ -228,6 +251,56 @@ def apply_constraints_to_data(data, constraints_df):
         constraint_summary: List of applied constraints with details
         max_constrained_carriers: Set of carriers that have Maximum Container Count constraints
                                    (these carriers should NOT receive additional volume in optimization)
+    
+    Maximum Constraint Logic:
+        When a carrier has a Maximum Container Count constraint:
+        1. Allocate specified amount to constrained table (assigned to target carrier)
+        2. Add carrier to max_constrained_carriers exclusion set
+        3. Containers remain in unconstrained table (not deleted)
+        4. Optimization will exclude this carrier, making containers available to other carriers
+        
+        IMPORTANT: Maximum constraints only REQUIRE a Carrier field.
+        - Carrier (REQUIRED): The carrier to cap
+        - Filters (OPTIONAL): Category, Lane, Port, Week Number
+        - Containers are NOT removed from unconstrained table
+        - Container count is preserved: Original = Constrained + Unconstrained
+        - Optimization excludes the carrier, allowing other carriers to use the volume
+    
+    Excluded FC (Excluded Facility) Logic:
+        When a constraint specifies Excluded FC:
+        1. REQUIRES a Carrier to be specified
+        2. Carrier CANNOT receive containers at that facility in EITHER table
+        3. During allocation, containers at excluded facility are skipped
+        4. If carrier has containers at excluded facility, they must be reallocated
+        5. If reallocation is not possible, the constraint FAILS
+        
+        Example:
+            Carrier=ABC, Excluded FC=IUSF, Maximum=100
+            - ABC gets up to 100 containers from facilities OTHER than IUSF
+            - ABC cannot receive ANY containers at IUSF (in constrained OR unconstrained)
+            - If ABC already has containers at IUSF, they must go to another carrier
+    
+    Examples:
+        Example 1 - Carrier-only maximum:
+            Carrier=ABC, Maximum=100
+            - Constrained: 100 containers assigned to ABC
+            - Unconstrained: ALL containers remain (including ABC's)
+            - Optimization: ABC excluded, other carriers can use ABC's containers
+            - Container count: Original = Constrained + Unconstrained ✅
+        
+        Example 2 - Maximum with filters:
+            Carrier=ABC, Category=Import, Lane=LAX-CHI, Maximum=100
+            - Constrained: 100 containers from Import/LAX-CHI assigned to ABC
+            - Unconstrained: ALL containers remain (including ABC's Import/LAX-CHI)
+            - Optimization: ABC excluded from Import/LAX-CHI only
+            - ABC can still receive containers in OTHER categories/lanes
+            - Container count: Original = Constrained + Unconstrained ✅
+        
+        Example 3 - With Excluded FC:
+            Carrier=ABC, Excluded FC=IUSF, Maximum=50
+            - Constrained: 50 containers (NOT at IUSF) assigned to ABC
+            - Unconstrained: ABC cannot receive containers at IUSF
+            - Optimization: ABC blocked, IUSF containers go to other carriers
     """
     
     if constraints_df is None or len(constraints_df) == 0:
@@ -266,6 +339,20 @@ def apply_constraints_to_data(data, constraints_df):
         # Store target carrier (this is who we're assigning TO, not filtering BY)
         target_carrier = constraint['Carrier'] if is_valid_value(constraint['Carrier']) else None
         
+        # Store excluded facility if specified
+        excluded_facility = constraint['Excluded FC'] if is_valid_value(constraint.get('Excluded FC')) else None
+        
+        # If Excluded FC is specified, we MUST have a carrier
+        if excluded_facility and not target_carrier:
+            st.error(f"❌ Excluded FC requires a Carrier to be specified!")
+            constraint_summary.append({
+                'priority': constraint['Priority Score'],
+                'description': f"Priority {constraint['Priority Score']}: Excluded FC without Carrier",
+                'status': 'Error: Excluded FC requires Carrier',
+                'containers_allocated': 0
+            })
+            continue
+        
         # Apply Category filter if specified
         if is_valid_value(constraint['Category']):
             if 'Category' in remaining_data.columns:
@@ -290,6 +377,34 @@ def apply_constraints_to_data(data, constraints_df):
         if is_valid_value(constraint['Week Number']):
             mask &= remaining_data['Week Number'] == constraint['Week Number']
             filters_applied.append(f"Week={int(constraint['Week Number'])}")
+        
+        # Apply Terminal filter if specified
+        if is_valid_value(constraint.get('Terminal')):
+            if 'Terminal' in remaining_data.columns:
+                mask &= remaining_data['Terminal'] == constraint['Terminal']
+                filters_applied.append(f"Terminal={constraint['Terminal']}")
+        
+        # CRITICAL: If Excluded FC is specified, we need to filter OUT rows at that facility
+        # This prevents the carrier from being allocated containers at that facility
+        # Normalize facility codes to first 4 characters for comparison (e.g., HGR6-5 -> HGR6)
+        excluded_facility_mask = None
+        if excluded_facility and 'Facility' in remaining_data.columns:
+            # Normalize the excluded facility to first 4 characters
+            normalized_excluded_fc = normalize_facility_code(excluded_facility)
+            
+            # Find rows at the excluded facility (comparing normalized codes)
+            excluded_facility_mask = remaining_data['Facility'].apply(normalize_facility_code) == normalized_excluded_fc
+            
+            # Remove those rows from eligible data
+            mask &= ~excluded_facility_mask
+            filters_applied.append(f"Excluding Facility={excluded_facility}")
+            
+            # Count how many rows are being excluded
+            excluded_count = excluded_facility_mask.sum()
+            if excluded_count > 0:
+                st.write(f"   🚫 Excluding {excluded_count} rows at facility {excluded_facility} (normalized: {normalized_excluded_fc}) for {target_carrier if target_carrier else 'carrier'}")
+            else:
+                st.write(f"   ℹ️ No rows found at facility {excluded_facility} (normalized: {normalized_excluded_fc})")
 
         
         # Add target carrier to description
@@ -312,17 +427,30 @@ def apply_constraints_to_data(data, constraints_df):
         eligible_data['_available_containers'] = available_container_counts
         eligible_data = eligible_data[eligible_data['_available_containers'] > 0].copy()
         
-        if len(eligible_data) == 0:
-            st.warning(f"⚠️ No eligible data for constraint: {constraint_desc}")
-            constraint_summary.append({
-                'priority': constraint['Priority Score'],
-                'description': constraint_desc,
-                'status': 'No matching data',
-                'containers_allocated': 0
-            })
-            continue
+        # Check if this is a maximum constraint - if so, validate we have a carrier
+        is_potential_max_constraint = (
+            pd.notna(constraint.get('Maximum Container Count')) and 
+            constraint['Maximum Container Count'] > 0
+        )
         
-        total_eligible_containers = eligible_data['_available_containers'].sum()
+        if len(eligible_data) == 0:
+            # For maximum constraints with carrier only, this might be OK if we're removing all carrier data
+            if is_potential_max_constraint and target_carrier:
+                st.info(f"ℹ️ No containers matching filters for constraint: {constraint_desc}")
+                st.info(f"   Will proceed to remove ANY existing {target_carrier} containers from unconstrained table")
+                # Continue to process the constraint to remove carrier from unconstrained table
+                total_eligible_containers = 0
+            else:
+                st.warning(f"⚠️ No eligible data for constraint: {constraint_desc}")
+                constraint_summary.append({
+                    'priority': constraint['Priority Score'],
+                    'description': constraint_desc,
+                    'status': 'No matching data',
+                    'containers_allocated': 0
+                })
+                continue
+        else:
+            total_eligible_containers = eligible_data['_available_containers'].sum()
         
         # Determine how many containers to allocate
         target_containers = None
@@ -331,13 +459,35 @@ def apply_constraints_to_data(data, constraints_df):
         
         # Priority: Max Count > Min Count > Percent Allocation
         if pd.notna(constraint['Maximum Container Count']) and constraint['Maximum Container Count'] > 0:
-            target_containers = min(int(constraint['Maximum Container Count']), total_eligible_containers)
+            # VALIDATION: Maximum constraints MUST have a carrier specified
+            if not target_carrier:
+                st.error(f"❌ Maximum Container Count constraint requires a Carrier to be specified!")
+                constraint_summary.append({
+                    'priority': constraint['Priority Score'],
+                    'description': constraint_desc,
+                    'status': 'Error: No carrier specified for maximum constraint',
+                    'containers_allocated': 0
+                })
+                continue
+            
+            # For MAXIMUM constraints: Allocate specified amount to constrained table
+            # AND remove ALL other containers matching this filter for this carrier from unconstrained table
+            # For carrier-only constraints (no filters), this removes the carrier entirely
+            if total_eligible_containers > 0:
+                target_containers = min(int(constraint['Maximum Container Count']), total_eligible_containers)
+            else:
+                # No eligible containers to allocate, but we'll still remove carrier from unconstrained
+                target_containers = 0
+            
             allocation_method = f"Max {int(constraint['Maximum Container Count'])} containers"
             is_maximum_constraint = True  # This is a hard cap - carrier should not get more
             
             # Track this carrier as having a maximum constraint (hard cap)
-            if target_carrier:
-                max_constrained_carriers.add(target_carrier)
+            max_constrained_carriers.add(target_carrier)
+            
+            # CRITICAL: For maximum constraints, we need to remove ALL containers for this carrier
+            # that match the filter criteria from the unconstrained pool
+            # This ensures the carrier doesn't appear in unconstrained table for this segment
         
         elif pd.notna(constraint['Minimum Container Count']) and constraint['Minimum Container Count'] > 0:
             target_containers = min(int(constraint['Minimum Container Count']), total_eligible_containers)
@@ -373,56 +523,127 @@ def apply_constraints_to_data(data, constraints_df):
         # Allocate containers at the CONTAINER ID level (not just counts)
         allocated_containers_count = 0
         
-        # Sort by week for consistency
-        allocation_data = eligible_data.sort_values('Week Number')
-        
-        for row_idx, row in allocation_data.iterrows():
-            if allocated_containers_count >= target_containers:
-                break
+        # Only process allocation if we have containers to allocate
+        if target_containers > 0 and len(eligible_data) > 0:
+            # Sort by week for consistency
+            allocation_data = eligible_data.sort_values('Week Number')
             
-            # How many MORE containers do we need?
-            containers_needed = target_containers - allocated_containers_count
-            
-            # Allocate specific container IDs from this row
-            week_num = row.get('Week Number', None)
-            allocated_ids, remaining_ids = allocate_specific_containers(
-                row, containers_needed, allocated_containers_tracker, target_carrier, week_num
-            )
-            
-            if len(allocated_ids) > 0:
-                # Create constrained record with ONLY the allocated container IDs
-                constrained_record = row.copy()
-                constrained_record['Container Numbers'] = join_container_numbers(allocated_ids)
-                constrained_record['Container Count'] = len(allocated_ids)
+            for row_idx, row in allocation_data.iterrows():
+                if allocated_containers_count >= target_containers:
+                    # We've allocated enough - stop processing
+                    break
                 
-                # ASSIGN to target carrier (override existing carrier)
-                if target_carrier:
-                    # Check which carrier columns exist
-                    has_carrier = 'Carrier' in constrained_record.index
-                    has_dray_scac = 'Dray SCAC(FL)' in constrained_record.index
+                # How many MORE containers do we need?
+                containers_needed = target_containers - allocated_containers_count
+                
+                # Allocate specific container IDs from this row
+                week_num = row.get('Week Number', None)
+                allocated_ids, remaining_ids = allocate_specific_containers(
+                    row, containers_needed, allocated_containers_tracker, target_carrier, week_num
+                )
+                
+                if len(allocated_ids) > 0:
+                    # Create constrained record with ONLY the allocated container IDs
+                    constrained_record = row.copy()
+                    constrained_record['Container Numbers'] = join_container_numbers(allocated_ids)
+                    constrained_record['Container Count'] = len(allocated_ids)
                     
-                    # Set BOTH carrier columns if they exist
-                    if has_dray_scac:
-                        constrained_record['Dray SCAC(FL)'] = target_carrier
-                    if has_carrier:
-                        constrained_record['Carrier'] = target_carrier
+                    # ASSIGN to target carrier (override existing carrier)
+                    if target_carrier:
+                        # Check which carrier columns exist
+                        has_carrier = 'Carrier' in constrained_record.index
+                        has_dray_scac = 'Dray SCAC(FL)' in constrained_record.index
+                        
+                        # Set BOTH carrier columns if they exist
+                        if has_dray_scac:
+                            constrained_record['Dray SCAC(FL)'] = target_carrier
+                        if has_carrier:
+                            constrained_record['Carrier'] = target_carrier
+                    
+                    constrained_record['Constraint_Priority'] = constraint['Priority Score']
+                    constrained_record['Constraint_Method'] = allocation_method
+                    constrained_record['Constraint_Description'] = constraint_desc
+                    
+                    constrained_records.append(constrained_record)
+                    allocated_containers_count += len(allocated_ids)
+                    
+                    # Update remaining_data: Remove allocated containers from this row
+                    if len(remaining_ids) > 0:
+                        # Partial allocation - update with remaining containers
+                        remaining_data.loc[row_idx, 'Container Numbers'] = join_container_numbers(remaining_ids)
+                        remaining_data.loc[row_idx, 'Container Count'] = len(remaining_ids)
+                    else:
+                        # Full allocation - mark row for removal (set container count to 0)
+                        remaining_data.loc[row_idx, 'Container Count'] = 0
+                        remaining_data.loc[row_idx, 'Container Numbers'] = ''
+        
+        # For maximum constraints, we DON'T remove containers from unconstrained table
+        # Instead, we rely on the max_constrained_carriers exclusion list in optimization
+        # This preserves container count while ensuring the carrier cannot receive volume
+        if is_maximum_constraint and target_carrier:
+            # Log that carrier is blocked but containers remain available for other carriers
+            st.write(f"   🔒 {target_carrier} added to exclusion list for optimization")
+            st.write(f"   ⚠️ {target_carrier} will NOT be able to receive ANY containers in optimization")
+            st.write(f"   ℹ️ Containers remain in unconstrained table for other carriers to use")
+        
+        # CRITICAL: Handle Excluded FC for this constraint
+        # If Excluded FC is specified, ensure carrier CANNOT have containers at that facility
+        # in BOTH constrained and unconstrained tables
+        if excluded_facility and target_carrier:
+            # Normalize the excluded facility for comparison
+            normalized_excluded_fc = normalize_facility_code(excluded_facility)
+            
+            # Check constrained records we just added
+            facility_violation_in_constrained = False
+            if constrained_records:
+                for record in constrained_records:
+                    if (record.get('Carrier') == target_carrier or record.get('Dray SCAC(FL)') == target_carrier):
+                        # Compare normalized facility codes
+                        record_facility_normalized = normalize_facility_code(record.get('Facility', ''))
+                        if record_facility_normalized == normalized_excluded_fc:
+                            facility_violation_in_constrained = True
+                            st.error(f"   ❌ Violation found: {record.get('Facility')} matches excluded {excluded_facility}")
+                            break
+            
+            if facility_violation_in_constrained:
+                st.error(f"❌ CONSTRAINT FAILED: Cannot allocate {target_carrier} containers to excluded facility {excluded_facility}")
+                st.error(f"   No alternative carrier available for containers at {excluded_facility}")
+                # Remove the invalid constrained records (using normalized comparison)
+                constrained_records = [r for r in constrained_records 
+                                     if not ((r.get('Carrier') == target_carrier or r.get('Dray SCAC(FL)') == target_carrier) 
+                                            and normalize_facility_code(r.get('Facility', '')) == normalized_excluded_fc)]
+                constraint_summary.append({
+                    'priority': constraint['Priority Score'],
+                    'description': constraint_desc,
+                    'status': 'FAILED: Carrier allocated to excluded facility',
+                    'containers_allocated': 0,
+                    'target_containers': target_containers,
+                    'method': allocation_method
+                })
+                continue
+            
+            # For unconstrained table: Check if carrier has containers at excluded facility
+            # These should be reallocated to other carriers (marked for reallocation)
+            if 'Facility' in remaining_data.columns:
+                carrier_cols = []
+                if 'Dray SCAC(FL)' in remaining_data.columns:
+                    carrier_cols.append('Dray SCAC(FL)')
+                if 'Carrier' in remaining_data.columns:
+                    carrier_cols.append('Carrier')
                 
-                constrained_record['Constraint_Priority'] = constraint['Priority Score']
-                constrained_record['Constraint_Method'] = allocation_method
-                constrained_record['Constraint_Description'] = constraint_desc
+                excluded_mask = pd.Series([False] * len(remaining_data), index=remaining_data.index)
+                for col in carrier_cols:
+                    # Use normalized facility code comparison
+                    excluded_mask |= (
+                        (remaining_data[col] == target_carrier) & 
+                        (remaining_data['Facility'].apply(normalize_facility_code) == normalized_excluded_fc)
+                    )
                 
-                constrained_records.append(constrained_record)
-                allocated_containers_count += len(allocated_ids)
-                
-                # Update remaining_data: Remove allocated containers from this row
-                if len(remaining_ids) > 0:
-                    # Partial allocation - update with remaining containers
-                    remaining_data.loc[row_idx, 'Container Numbers'] = join_container_numbers(remaining_ids)
-                    remaining_data.loc[row_idx, 'Container Count'] = len(remaining_ids)
-                else:
-                    # Full allocation - mark row for removal (set container count to 0)
-                    remaining_data.loc[row_idx, 'Container Count'] = 0
-                    remaining_data.loc[row_idx, 'Container Numbers'] = ''
+                if excluded_mask.any():
+                    excluded_containers = remaining_data.loc[excluded_mask, 'Container Count'].sum()
+                    st.warning(f"   ⚠️ Found {excluded_containers} containers for {target_carrier} at excluded facility {excluded_facility} (normalized: {normalized_excluded_fc})")
+                    st.warning(f"   These containers must be reallocated to other carriers or constraint will fail")
+                    # Mark carrier for exclusion at this facility (handled by optimization)
         
         constraint_summary.append({
             'priority': constraint['Priority Score'],

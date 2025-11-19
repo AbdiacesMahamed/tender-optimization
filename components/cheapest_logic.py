@@ -42,6 +42,7 @@ DEFAULT_GROUP_COLUMNS: List[str] = [
     "Category",
     "Lane",
     "Facility",
+    "Terminal",
     "Week Number",
 ]
 

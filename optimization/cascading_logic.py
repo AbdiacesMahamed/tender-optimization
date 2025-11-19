@@ -120,6 +120,8 @@ def cascading_allocate_with_constraints(
     group_columns = [lane_column]
     if category_column in data.columns:
         group_columns.insert(0, category_column)
+    if 'Terminal' in data.columns:
+        group_columns.append('Terminal')
     if week_column in data.columns and week_column not in group_columns:
         group_columns.append(week_column)
     

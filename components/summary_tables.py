@@ -28,7 +28,13 @@ def show_summary_tables(final_filtered_data):
     
     section_header(f"📊 Summary Tables{rate_type_label}")
     
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🚢 By Port", "🚛 By SCAC", "🛣️ By Lane", "🏭 By Facility", "📅 By Week"])
+    # Check if Terminal column exists in the data
+    has_terminal = 'Terminal' in final_filtered_data.columns
+    
+    if has_terminal:
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🚢 By Port", "🚛 By SCAC", "🛣️ By Lane", "🏭 By Facility", "🖥️ By Terminal", "📅 By Week"])
+    else:
+        tab1, tab2, tab3, tab4, tab6 = st.tabs(["🚢 By Port", "🚛 By SCAC", "🛣️ By Lane", "🏭 By Facility", "📅 By Week"])
     
     with tab1:
         show_port_summary(final_filtered_data)
@@ -42,7 +48,11 @@ def show_summary_tables(final_filtered_data):
     with tab4:
         show_facility_summary(final_filtered_data)
     
-    with tab5:
+    if has_terminal:
+        with tab5:
+            show_terminal_summary(final_filtered_data)
+    
+    with tab6:
         show_week_summary(final_filtered_data)
 
 def create_aggregation_dict():
@@ -109,6 +119,20 @@ def show_facility_summary(final_filtered_data):
     facility_summary = finalize_summary_table(facility_summary)
         
     st.dataframe(facility_summary, use_container_width=True)
+
+def show_terminal_summary(final_filtered_data):
+    """Show summary by terminal"""
+    if 'Terminal' not in final_filtered_data.columns:
+        st.info("Terminal data not available")
+        return
+    
+    terminal_agg = create_aggregation_dict()
+    terminal_agg = add_performance_to_aggregation(terminal_agg, final_filtered_data)
+        
+    terminal_summary = final_filtered_data.groupby('Terminal').agg(terminal_agg).round(2)
+    terminal_summary = finalize_summary_table(terminal_summary)
+        
+    st.dataframe(terminal_summary, use_container_width=True)
 
 def show_week_summary(final_filtered_data):
     """Show summary by week"""

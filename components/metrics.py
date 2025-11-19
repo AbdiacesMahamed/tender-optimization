@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from .config_styling import section_header
 from optimization.performance_logic import allocate_to_highest_performance
+from .container_tracer import add_detailed_carrier_flips_column, get_container_movement_summary
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -48,7 +49,114 @@ def format_percentage(value):
 
 def get_grouping_columns(data, base_cols=['Discharged Port', 'Lane', 'Facility', 'Week Number']):
     """Get grouping columns including Category if it exists"""
+def get_grouping_columns(data, base_cols=['Discharged Port', 'Lane', 'Facility', 'Week Number']):
+    """Get grouping columns including Category if it exists"""
     cols = base_cols.copy()
+    if 'Category' in data.columns and 'Category' not in cols:
+        cols.insert(0, 'Category')
+    if 'Terminal' in data.columns and 'Terminal' not in cols:
+        cols.append('Terminal')
+    return [c for c in cols if c in data.columns]
+
+def add_carrier_flips_column(current_data, original_data, carrier_col='Dray SCAC(FL)'):
+    """
+    Add 'Carrier Flips' column showing allocation changes per carrier in each group.
+    
+    For each group (Port+Category+Lane+Facility+Terminal+Week):
+    - Shows what THIS carrier had originally vs now
+    - We CANNOT trace which specific containers moved between which carriers
+    - We can only show before/after totals for THIS carrier
+    
+    Display formats:
+    - "✓ Had X, now Y (+Z)" - Carrier gained containers  
+    - "✓ Had X, now Y (-Z)" - Carrier lost containers
+    - "✓ Kept X" - No change
+    - "🔄 New: Y (was: [carriers])" - Carrier wasn't in group, now has containers
+    - "🆕 New group" - Group didn't exist originally
+    
+    Parameters:
+    -----------
+    current_data : pd.DataFrame
+        Current scenario data
+    original_data : pd.DataFrame  
+        Original "Current Selection" data
+    carrier_col : str
+        Column name for carrier identification
+        
+    Returns:
+    --------
+    pd.DataFrame
+        Data with added 'Carrier Flips' column
+    """
+    if original_data is None or original_data.empty:
+        current_data['Carrier Flips'] = 'No baseline'
+        return current_data
+    
+    # Get grouping columns
+    group_cols = get_grouping_columns(
+        current_data, 
+        base_cols=['Discharged Port', 'Lane', 'Facility', 'Week Number']
+    )
+    
+    if not group_cols:
+        current_data['Carrier Flips'] = 'No groups'
+        return current_data
+    
+    # Build original state: {group_key: {carrier: count}}
+    original_state = {}
+    for _, row in original_data.iterrows():
+        key = tuple(row.get(col, '') for col in group_cols)
+        carrier = row.get(carrier_col, 'Unknown')
+        count = row.get('Container Count', 0)
+        
+        if key not in original_state:
+            original_state[key] = {}
+        original_state[key][carrier] = original_state[key].get(carrier, 0) + count
+    
+    # Process each current row
+    flips = []
+    for _, row in current_data.iterrows():
+        key = tuple(row.get(col, '') for col in group_cols)
+        curr_carrier = row.get(carrier_col, 'Unknown')
+        curr_count = row.get('Container Count', 0)
+        
+        # Check if this group existed originally
+        if key not in original_state:
+            flips.append("🆕 New group")
+            continue
+        
+        orig_group = original_state[key]
+        orig_own_count = orig_group.get(curr_carrier, 0)
+        
+        # Case 1: Current carrier had ZERO in this group originally
+        if orig_own_count == 0:
+            # This carrier is NEW to this group - show who had it before
+            orig_carriers = [c for c, cnt in orig_group.items() if cnt > 0]
+            if len(orig_carriers) == 0:
+                flips.append(f"🔄 New: {curr_count:.0f}")
+            elif len(orig_carriers) == 1:
+                flips.append(f"🔄 New: {curr_count:.0f} (was {orig_carriers[0]})")
+            elif len(orig_carriers) <= 3:
+                carriers_str = ', '.join(orig_carriers)
+                flips.append(f"🔄 New: {curr_count:.0f} (was {carriers_str})")
+            else:
+                flips.append(f"🔄 New: {curr_count:.0f} (was {len(orig_carriers)} carriers)")
+        
+        # Case 2: Current carrier had SOME in this group originally  
+        else:
+            diff = curr_count - orig_own_count
+            if abs(diff) < 0.5:
+                # No change
+                flips.append(f"✓ Kept {orig_own_count:.0f}")
+            elif diff > 0:
+                # Gained containers
+                flips.append(f"✓ Had {orig_own_count:.0f}, now {curr_count:.0f} (+{diff:.0f})")
+            else:
+                # Lost containers
+                flips.append(f"✓ Had {orig_own_count:.0f}, now {curr_count:.0f} ({diff:.0f})")
+    
+    current_data['Carrier Flips'] = flips
+    return current_data
     if 'Category' in data.columns and 'Category' not in cols:
         cols.insert(1, 'Category')  # Add Category after first column
     return cols
@@ -559,7 +667,10 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         cols_c = ['Discharged Port']
         if 'Category' in constrained_display.columns:
             cols_c.append('Category')
-        cols_c.extend([carrier_col_c, 'Lane', 'Facility', 'Week Number'])
+        cols_c.extend([carrier_col_c, 'Lane', 'Facility'])
+        if 'Terminal' in constrained_display.columns:
+            cols_c.append('Terminal')
+        cols_c.append('Week Number')
         if 'Container Numbers' in constrained_display.columns:
             cols_c.append('Container Numbers')
         
@@ -627,6 +738,10 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     # Use ALL data regardless of rate availability - no filtering
     display_data_with_rates = display_data.copy()
     missing_rate_rows = pd.DataFrame()  # Empty dataframe - not needed anymore
+    
+    # CAPTURE BASELINE DATA for Carrier Flips comparison
+    # This represents the "Current Selection" before any scenario transformations
+    baseline_data = display_data_with_rates.copy()
     
     # Select and rename columns based on strategy
     if selected in ('Current Selection', 'Performance', 'Optimized'):
@@ -761,7 +876,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                 display_data = performance_source
             else:
                 group_cols = [
-                    col for col in ['Discharged Port', 'Category', 'Lane', 'Facility', 'Week Number']
+                    col for col in ['Discharged Port', 'Category', 'Lane', 'Facility', 'Terminal', 'Week Number']
                     if col in performance_source.columns
                 ]
 
@@ -847,12 +962,28 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                 ):
                     display_data['Carrier Change'] = display_data[carrier_col].astype(str) + ' ← ' + display_data['Original Primary Carrier'].fillna('N/A').astype(str)
 
+        # ADD CARRIER FLIPS COLUMN for all scenarios
+        # This shows original carrier allocation vs current carrier after scenario transformation
+        # Using detailed container-level tracing (exact container movements with original counts)
+        display_data = add_detailed_carrier_flips_column(display_data, baseline_data, carrier_col=carrier_col)
+        
+        # Rename column to just "Carrier Flips" for cleaner display
+        if 'Carrier Flips (Detailed)' in display_data.columns:
+            display_data.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
+
         cols = ['Discharged Port']
         if 'Category' in display_data.columns:
             cols.append('Category')
-        cols.extend([carrier_col, 'Lane', 'Facility', 'Week Number'])
+        cols.extend([carrier_col, 'Lane', 'Facility'])
+        if 'Terminal' in display_data.columns:
+            cols.append('Terminal')
+        cols.append('Week Number')
         if 'Container Numbers' in display_data.columns:
             cols.append('Container Numbers')
+        
+        # Add Carrier Flips column (shows original count and movements)
+        if 'Carrier Flips' in display_data.columns:
+            cols.append('Carrier Flips')
 
         # Add container count and selected rate columns
         cols.append('Container Count')
@@ -1351,3 +1482,153 @@ def show_carrier_performance_matrix(final_filtered_data):
     
     st.subheader("Average Rate Matrix (by Carrier & Lane)")
     st.dataframe(rate_matrix.applymap(lambda x: f"${x:,.2f}" if pd.notna(x) else "-"), use_container_width=True)
+
+
+def show_container_movement_summary(current_data, baseline_data, carrier_col='Dray SCAC(FL)'):
+    """
+    Display comprehensive summary of container movements between carriers.
+    
+    Shows:
+    - Total containers kept vs flipped
+    - Top carrier-to-carrier flows
+    - Visual breakdown of movements
+    
+    Parameters:
+    -----------
+    current_data : pd.DataFrame
+        Current scenario data
+    baseline_data : pd.DataFrame
+        Original baseline data
+    carrier_col : str
+        Column name for carrier identification
+    """
+    if baseline_data is None or baseline_data.empty:
+        return
+    
+    if 'Container Numbers' not in baseline_data.columns:
+        st.info("ℹ️ Container-level tracking not available. Upload data with 'Container Numbers' column for detailed tracing.")
+        return
+    
+    section_header("🔄 Container Movement Analysis")
+    
+    # Get movement summary
+    summary = get_container_movement_summary(current_data, baseline_data, carrier_col)
+    
+    if 'error' in summary:
+        st.warning(f"⚠️ {summary['error']}")
+        return
+    
+    # Display overview metrics
+    st.subheader("📊 Movement Overview")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "Total Containers",
+            f"{summary['total_containers']:,}",
+            help="Total unique containers tracked"
+        )
+    
+    with col2:
+        st.metric(
+            "✓ Kept with Original",
+            f"{summary['total_kept']:,}",
+            f"{summary['kept_percentage']:.1f}%",
+            help="Containers that stayed with their original carrier"
+        )
+    
+    with col3:
+        st.metric(
+            "🔄 Flipped to New Carrier",
+            f"{summary['total_flipped']:,}",
+            f"{summary['flipped_percentage']:.1f}%",
+            help="Containers that moved to a different carrier"
+        )
+    
+    with col4:
+        st.metric(
+            "🆕 Unknown/New",
+            f"{summary['total_unknown']:,}",
+            help="Containers not found in baseline"
+        )
+    
+    # Display top flows
+    if summary['top_flows']:
+        st.subheader("🔝 Top Container Flows (Carrier → Carrier)")
+        
+        flows_df = pd.DataFrame(
+            summary['top_flows'],
+            columns=['From Carrier', 'To Carrier', 'Container Count']
+        )
+        
+        # Add percentage of total flipped
+        flows_df['% of Flipped'] = (flows_df['Container Count'] / summary['total_flipped'] * 100).round(1)
+        flows_df['% of Total'] = (flows_df['Container Count'] / summary['total_containers'] * 100).round(1)
+        
+        # Format display
+        flows_display = flows_df.copy()
+        flows_display['Flow'] = flows_display.apply(
+            lambda row: f"{row['From Carrier']} → {row['To Carrier']}", 
+            axis=1
+        )
+        flows_display['Containers'] = flows_display['Container Count'].apply(lambda x: f"{x:,}")
+        flows_display['% Flipped'] = flows_display['% of Flipped'].apply(lambda x: f"{x:.1f}%")
+        flows_display['% Total'] = flows_display['% of Total'].apply(lambda x: f"{x:.1f}%")
+        
+        st.dataframe(
+            flows_display[['Flow', 'Containers', '% Flipped', '% Total']],
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Visual representation
+        st.subheader("📈 Flow Visualization")
+        
+        # Create bar chart of top flows
+        chart_data = flows_df.head(10).copy()
+        chart_data['Flow Label'] = chart_data.apply(
+            lambda row: f"{row['From Carrier']} → {row['To Carrier']}", 
+            axis=1
+        )
+        
+        import plotly.express as px
+        
+        fig = px.bar(
+            chart_data,
+            x='Container Count',
+            y='Flow Label',
+            orientation='h',
+            title='Top 10 Container Flows',
+            labels={'Container Count': 'Number of Containers', 'Flow Label': 'Carrier Flow'},
+            color='Container Count',
+            color_continuous_scale='Blues'
+        )
+        
+        fig.update_layout(
+            height=400,
+            showlegend=False,
+            yaxis={'categoryorder': 'total ascending'}
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Summary insights
+    st.subheader("💡 Insights")
+    
+    insights = []
+    
+    if summary['kept_percentage'] > 75:
+        insights.append(f"✅ **High Stability**: {summary['kept_percentage']:.1f}% of containers remained with their original carrier.")
+    elif summary['kept_percentage'] < 25:
+        insights.append(f"🔄 **Major Reallocation**: {summary['flipped_percentage']:.1f}% of containers were reassigned to different carriers.")
+    else:
+        insights.append(f"⚖️ **Balanced Changes**: {summary['kept_percentage']:.1f}% kept, {summary['flipped_percentage']:.1f}% flipped.")
+    
+    if summary['top_flows']:
+        top_flow = summary['top_flows'][0]
+        insights.append(f"🎯 **Largest Flow**: {top_flow[2]:,} containers moved from **{top_flow[0]}** to **{top_flow[1]}**.")
+    
+    insights.append(f"🏢 **Carrier Participation**: {summary['unique_source_carriers']} carriers lost containers, {summary['unique_destination_carriers']} carriers gained containers.")
+    
+    for insight in insights:
+        st.markdown(insight)
