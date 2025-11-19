@@ -1,6 +1,7 @@
 """
 Constraints Processing Module
 Handles operational constraints uploaded via Excel file
+Version: 2025-11-19 - Fixed excluded facility logic to apply across all constraints
 """
 import pandas as pd
 import streamlit as st
