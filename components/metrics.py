@@ -730,6 +730,19 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     # Use unconstrained data for scenarios when constraints are active
     display_data = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
     
+    # SAFETY CHECK: Ensure Container Count column exists
+    # If Container Numbers exists but Container Count doesn't, calculate it
+    if 'Container Numbers' in display_data.columns and 'Container Count' not in display_data.columns:
+        def count_containers_from_string(container_str):
+            """Count actual container IDs in a comma-separated string"""
+            if pd.isna(container_str) or not str(container_str).strip():
+                return 0
+            return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+        display_data['Container Count'] = display_data['Container Numbers'].apply(count_containers_from_string)
+    elif 'Container Count' not in display_data.columns:
+        # If neither exists, set to 0 as fallback
+        display_data['Container Count'] = 0
+
     bal_wk47_scenario_source = display_data[
         (display_data['Discharged Port'] == 'BAL') & 
         (display_data['Week Number'] == 47)
