@@ -143,14 +143,21 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
         group_cols.insert(len(group_cols) - 1, 'Terminal')  # Insert before 'Lookup'
     
     if container_col:
-        # Combine aggregation operations
+        # Combine aggregation operations - use unique() to remove duplicates
         agg_dict = {container_col: lambda x: ', '.join(x.astype(str).unique())}
         
         lane_count = GVTdata.groupby(group_cols).agg(agg_dict).reset_index()
         lane_count = lane_count.rename(columns={container_col: 'Container Numbers'})
         
-        # Add container count using size() which is faster than len()
-        lane_count['Container Count'] = GVTdata.groupby(group_cols).size().values
+        # CRITICAL: Calculate Container Count from actual unique container IDs, not row count
+        # This ensures the count matches the actual containers in the Container Numbers column
+        def count_containers_from_string(container_str):
+            """Count actual container IDs in comma-separated string"""
+            if pd.isna(container_str) or not str(container_str).strip():
+                return 0
+            return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+        
+        lane_count['Container Count'] = lane_count['Container Numbers'].apply(count_containers_from_string)
     else:
         # Fallback if no Container column
         lane_count = GVTdata.groupby(group_cols).size().reset_index(name='Container Count')
