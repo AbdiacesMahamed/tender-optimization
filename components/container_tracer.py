@@ -62,11 +62,12 @@ def build_container_origin_map(original_data, carrier_col='Dray SCAC(FL)', week_
     container_map = {}
     
     context_cols = {
-        'port': 'Discharged Port',
+        'discharged_port': 'Discharged Port',
         'lane': 'Lane',
         'facility': 'Facility',
         'terminal': 'Terminal',
-        'category': 'Category'
+        'category': 'Category',
+        'week_number': 'Week Number'
     }
     
     for _, row in original_data.iterrows():
@@ -83,7 +84,7 @@ def build_container_origin_map(original_data, carrier_col='Dray SCAC(FL)', week_
             'week': int(week) if pd.notna(week) else 0
         }
         
-        # Add location context
+        # Add location context with standardized keys
         for key, col_name in context_cols.items():
             if col_name in row.index:
                 context[key] = row[col_name] if pd.notna(row[col_name]) else ''
@@ -106,7 +107,7 @@ def build_container_origin_map(original_data, carrier_col='Dray SCAC(FL)', week_
     return container_map
 
 
-def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(FL)'):
+def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(FL)', group_cols=None):
     """
     Trace which containers moved from which carriers.
     
@@ -114,7 +115,7 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
     - Which containers came from the same carrier (kept)
     - Which containers came from different carriers (flipped)
     - Details of source carriers for flipped containers
-    - Original count for this carrier (for display)
+    - Original count for this carrier IN THIS SPECIFIC GROUP (for display)
     
     Parameters:
     -----------
@@ -124,6 +125,8 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
         Container origin map from build_container_origin_map()
     carrier_col : str
         Column name for carrier identification
+    group_cols : list
+        Grouping columns to determine per-group original counts
         
     Returns:
     --------
@@ -133,21 +136,66 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
             'flipped_containers': [(container_id, from_carrier), ...],
             'unknown_containers': [container_id, ...],
             'flip_summary': {from_carrier: count, ...},
-            'original_count': int (how many this carrier had originally)
+            'original_count': int (how many this carrier had originally IN THIS GROUP)
         }
     """
     trace_results = []
     
-    # First pass: count how many containers each carrier had originally
-    original_carrier_counts = {}
+    # Default group columns if not provided
+    if group_cols is None:
+        group_cols = ['Discharged Port', 'Lane', 'Facility', 'Week Number']
+        if 'Category' in current_data.columns:
+            group_cols.insert(0, 'Category')
+        if 'Terminal' in current_data.columns:
+            group_cols.append('Terminal')
+        group_cols = [col for col in group_cols if col in current_data.columns]
+    
+    # Build original state PER GROUP: {group_key: {carrier: [container_ids]}}
+    original_group_state = {}
+    
+    # Map column names to standardized keys
+    col_to_key = {
+        'Discharged Port': 'discharged_port',
+        'Lane': 'lane',
+        'Facility': 'facility',
+        'Terminal': 'terminal',
+        'Category': 'category',
+        'Week Number': 'week_number'
+    }
+    
     for container_id, info in origin_map.items():
+        # Build group key from container's origin info using standardized keys
+        group_key_values = []
+        for col in group_cols:
+            key = col_to_key.get(col, col.lower().replace(' ', '_'))
+            value = info.get(key, '')
+            # Handle week number specially
+            if col == 'Week Number' and key == 'week':
+                value = info.get('week', '')
+            group_key_values.append(value)
+        
+        group_key = tuple(group_key_values)
         orig_carrier = info['original_carrier']
-        original_carrier_counts[orig_carrier] = original_carrier_counts.get(orig_carrier, 0) + 1
+        
+        if group_key not in original_group_state:
+            original_group_state[group_key] = {}
+        if orig_carrier not in original_group_state[group_key]:
+            original_group_state[group_key][orig_carrier] = []
+        
+        original_group_state[group_key][orig_carrier].append(container_id)
     
     for _, row in current_data.iterrows():
         current_carrier = row.get(carrier_col, 'Unknown')
         container_str = row.get('Container Numbers', '')
         container_ids = parse_container_ids(container_str)
+        
+        # Build group key for this row
+        group_key = tuple(row.get(col, '') for col in group_cols)
+        
+        # Get original count for THIS carrier IN THIS GROUP
+        original_count_in_group = 0
+        if group_key in original_group_state and current_carrier in original_group_state[group_key]:
+            original_count_in_group = len(original_group_state[group_key][current_carrier])
         
         kept = []
         flipped = []
@@ -175,35 +223,37 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
             'flipped_containers': flipped,
             'unknown_containers': unknown,
             'flip_summary': flip_summary,
+            'flip_containers_by_source': {carrier: [cid for cid, c in flipped if c == carrier] for carrier in flip_summary.keys()},  # NEW: containers grouped by source carrier
             'total_kept': len(kept),
             'total_flipped': len(flipped),
             'total_unknown': len(unknown),
-            'original_count': original_carrier_counts.get(current_carrier, 0),
-            'current_count': len(container_ids)
+            'original_count': original_count_in_group,  # PER-GROUP count
+            'current_count': len(container_ids),
+            'all_original_containers': original_group_state.get(group_key, {}).get(current_carrier, []) if group_key in original_group_state else []  # NEW: original container IDs
         })
     
     return trace_results
 
 
-def format_flip_details(trace_result, show_container_ids=False, max_carriers=5):
+def format_flip_details(trace_result, show_container_ids=True, max_carriers=5):
     """
-    Format traced container movements into readable text.
+    Format traced container movements into readable text with container IDs.
     
-    Always shows: "Had X" (original count) + gains/losses
+    Format: Had X [container IDs] → From CARRIER (+Y) [container IDs], Lost Z [container IDs] → Now Total
     
     Parameters:
     -----------
     trace_result : dict
         Single trace result from trace_container_movements()
     show_container_ids : bool
-        Whether to include actual container IDs in output
+        Whether to include actual container IDs in output (default True)
     max_carriers : int
         Maximum number of source carriers to show individually
         
     Returns:
     --------
     str
-        Formatted flip description
+        Formatted flip description with container IDs
     """
     kept_count = trace_result['total_kept']
     flipped_count = trace_result['total_flipped']
@@ -212,47 +262,103 @@ def format_flip_details(trace_result, show_container_ids=False, max_carriers=5):
     original_count = trace_result.get('original_count', 0)
     current_count = trace_result.get('current_count', kept_count + flipped_count + unknown_count)
     
+    # Container ID lists
+    kept_containers = trace_result.get('kept_containers', [])
+    all_original_containers = trace_result.get('all_original_containers', [])
+    flip_containers_by_source = trace_result.get('flip_containers_by_source', {})
+    flipped_containers = trace_result.get('flipped_containers', [])
+    
+    # Calculate lost containers (originally had but not in kept)
+    lost_containers = []
+    if all_original_containers:
+        lost_containers = [cid for cid in all_original_containers if cid not in kept_containers]
+    lost_count = len(lost_containers)
+    
     # Build the display string
     parts = []
     
-    # ALWAYS show what carrier started with
+    # Part 1: Show what carrier started with (Had X)
     if original_count > 0:
-        parts.append(f"Had {original_count}")
+        if show_container_ids and all_original_containers:
+            container_list = ', '.join(all_original_containers[:3])
+            if len(all_original_containers) > 3:
+                container_list += f"... ({original_count} total)"
+            parts.append(f"Had {original_count} [{container_list}]")
+        else:
+            parts.append(f"Had {original_count}")
     else:
         parts.append("Had 0")
     
-    # Show what happened
-    if kept_count == current_count and flipped_count == 0 and unknown_count == 0:
+    # Part 2: Show changes
+    # "kept all" means: original_count == current_count AND all current are kept (no flips/unknown)
+    if original_count > 0 and original_count == current_count and kept_count == current_count and flipped_count == 0 and unknown_count == 0:
         # Kept everything, no changes
         parts.append("(kept all)")
     else:
-        # Show details of changes
         changes = []
         
         # Gains from other carriers
         if flipped_count > 0:
             sorted_flips = sorted(flip_summary.items(), key=lambda x: x[1], reverse=True)
             
-            if len(sorted_flips) == 1:
-                carrier, count = sorted_flips[0]
-                changes.append(f"From {carrier} (+{count})")
-            elif len(sorted_flips) <= max_carriers:
-                flip_strs = [f"{carrier} (+{count})" for carrier, count in sorted_flips]
-                changes.append(f"From {' + '.join(flip_strs)}")
+            if show_container_ids:
+                # Show with container IDs
+                if len(sorted_flips) == 1:
+                    carrier, count = sorted_flips[0]
+                    containers = flip_containers_by_source.get(carrier, [])
+                    container_list = ', '.join(containers[:2])
+                    if len(containers) > 2:
+                        container_list += f"... ({count} total)"
+                    changes.append(f"From {carrier} (+{count}) [{container_list}]")
+                elif len(sorted_flips) <= max_carriers:
+                    flip_parts = []
+                    for carrier, count in sorted_flips:
+                        containers = flip_containers_by_source.get(carrier, [])
+                        container_list = ', '.join(containers[:2])
+                        if len(containers) > 2:
+                            container_list += f"..."
+                        flip_parts.append(f"{carrier} (+{count}) [{container_list}]")
+                    changes.append(f"From {' + '.join(flip_parts)}")
+                else:
+                    # Too many carriers - show top ones
+                    flip_parts = []
+                    for carrier, count in sorted_flips[:max_carriers]:
+                        containers = flip_containers_by_source.get(carrier, [])
+                        container_list = ', '.join(containers[:2])
+                        if len(containers) > 2:
+                            container_list += f"..."
+                        flip_parts.append(f"{carrier} (+{count}) [{container_list}]")
+                    
+                    remaining_count = sum(count for _, count in sorted_flips[max_carriers:])
+                    remaining_carriers = len(sorted_flips) - max_carriers
+                    flip_parts.append(f"{remaining_carriers} others (+{remaining_count})")
+                    changes.append(f"From {' + '.join(flip_parts)}")
             else:
-                # Too many carriers - show top ones + "others"
-                top_flips = sorted_flips[:max_carriers]
-                remaining_count = sum(count for _, count in sorted_flips[max_carriers:])
-                remaining_carriers = len(sorted_flips) - max_carriers
-                
-                flip_strs = [f"{carrier} (+{count})" for carrier, count in top_flips]
-                flip_strs.append(f"{remaining_carriers} others (+{remaining_count})")
-                changes.append(f"From {' + '.join(flip_strs)}")
+                # Show without container IDs
+                if len(sorted_flips) == 1:
+                    carrier, count = sorted_flips[0]
+                    changes.append(f"From {carrier} (+{count})")
+                elif len(sorted_flips) <= max_carriers:
+                    flip_strs = [f"{carrier} (+{count})" for carrier, count in sorted_flips]
+                    changes.append(f"From {' + '.join(flip_strs)}")
+                else:
+                    top_flips = sorted_flips[:max_carriers]
+                    remaining_count = sum(count for _, count in sorted_flips[max_carriers:])
+                    remaining_carriers = len(sorted_flips) - max_carriers
+                    
+                    flip_strs = [f"{carrier} (+{count})" for carrier, count in top_flips]
+                    flip_strs.append(f"{remaining_carriers} others (+{remaining_count})")
+                    changes.append(f"From {' + '.join(flip_strs)}")
         
         # Losses (if original > kept)
-        if original_count > kept_count:
-            lost_count = original_count - kept_count
-            changes.append(f"Lost {lost_count}")
+        if lost_count > 0:
+            if show_container_ids and lost_containers:
+                container_list = ', '.join(lost_containers[:2])
+                if len(lost_containers) > 2:
+                    container_list += f"... ({lost_count} total)"
+                changes.append(f"Lost {lost_count} [{container_list}]")
+            else:
+                changes.append(f"Lost {lost_count}")
         
         # Unknown/new containers
         if unknown_count > 0:
@@ -261,36 +367,15 @@ def format_flip_details(trace_result, show_container_ids=False, max_carriers=5):
         if changes:
             parts.append(" → " + ", ".join(changes))
     
-    # Show final count
+    # Part 3: Show final count (no container IDs for "Now" as requested)
     parts.append(f"→ Now {current_count}")
     
-    result = " ".join(parts)
-    
-    # Optionally add container IDs
-    if show_container_ids and (kept_count > 0 or flipped_count > 0):
-        details = []
-        if kept_count > 0:
-            kept_ids = ', '.join(trace_result['kept_containers'][:5])
-            if kept_count > 5:
-                kept_ids += f", ... ({kept_count - 5} more)"
-            details.append(f"Kept: {kept_ids}")
-        
-        if flipped_count > 0:
-            flipped_samples = trace_result['flipped_containers'][:5]
-            flipped_ids = ', '.join([f"{cid} (from {carrier})" for cid, carrier in flipped_samples])
-            if flipped_count > 5:
-                flipped_ids += f", ... ({flipped_count - 5} more)"
-            details.append(f"Gained: {flipped_ids}")
-        
-        if details:
-            result += "\n  " + "\n  ".join(details)
-    
-    return result
+    return " ".join(parts)
 
 
 def add_detailed_carrier_flips_column(current_data, original_data, 
                                      carrier_col='Dray SCAC(FL)',
-                                     show_container_ids=False):
+                                     show_container_ids=True):
     """
     Add detailed carrier flips column with exact container tracing.
     
