@@ -387,24 +387,53 @@ def apply_constraints_to_data(data, constraints_df):
         # CRITICAL: If Excluded FC is specified, we need to filter OUT rows at that facility
         # This prevents the carrier from being allocated containers at that facility
         # Normalize facility codes to first 4 characters for comparison (e.g., HGR6-5 -> HGR6)
+        
+        # IMPORTANT: Collect ALL excluded facilities for this carrier from ALL constraints
+        # This ensures exclusions apply across all constraints for the same carrier
+        all_excluded_facilities = []
+        if excluded_facility:
+            all_excluded_facilities.append(excluded_facility)
+        
+        # Look for other constraints for the same carrier with Excluded FC
+        if target_carrier and 'Excluded FC' in constraints_df.columns:
+            other_exclusions = constraints_df[
+                (constraints_df['Carrier'] == target_carrier) &
+                (constraints_df['Excluded FC'].notna()) &
+                (constraints_df['Excluded FC'] != '')
+            ]['Excluded FC'].unique()
+            for exc_fc in other_exclusions:
+                exc_fc_str = str(exc_fc).strip()
+                if exc_fc_str and exc_fc_str not in all_excluded_facilities:
+                    all_excluded_facilities.append(exc_fc_str)
+                    if exc_fc_str != excluded_facility:
+                        st.write(f"   🔗 Also applying exclusion from another constraint: Excluding Facility={exc_fc_str}")
+        
+        # Apply all excluded facilities to the mask
         excluded_facility_mask = None
-        if excluded_facility and 'Facility' in remaining_data.columns:
-            # Normalize the excluded facility to first 4 characters
-            normalized_excluded_fc = normalize_facility_code(excluded_facility)
-            
-            # Find rows at the excluded facility (comparing normalized codes)
-            excluded_facility_mask = remaining_data['Facility'].apply(normalize_facility_code) == normalized_excluded_fc
-            
-            # Remove those rows from eligible data
-            mask &= ~excluded_facility_mask
-            filters_applied.append(f"Excluding Facility={excluded_facility}")
-            
-            # Count how many rows are being excluded
-            excluded_count = excluded_facility_mask.sum()
-            if excluded_count > 0:
-                st.write(f"   🚫 Excluding {excluded_count} rows at facility {excluded_facility} (normalized: {normalized_excluded_fc}) for {target_carrier if target_carrier else 'carrier'}")
-            else:
-                st.write(f"   ℹ️ No rows found at facility {excluded_facility} (normalized: {normalized_excluded_fc})")
+        if all_excluded_facilities and 'Facility' in remaining_data.columns:
+            for exc_fc in all_excluded_facilities:
+                # Normalize the excluded facility to first 4 characters
+                normalized_excluded_fc = normalize_facility_code(exc_fc)
+                
+                # Find rows at the excluded facility (comparing normalized codes)
+                current_exclusion_mask = remaining_data['Facility'].apply(normalize_facility_code) == normalized_excluded_fc
+                
+                # Remove those rows from eligible data
+                mask &= ~current_exclusion_mask
+                filters_applied.append(f"Excluding Facility={exc_fc}")
+                
+                # Count how many rows are being excluded
+                excluded_count = current_exclusion_mask.sum()
+                if excluded_count > 0:
+                    st.write(f"   🚫 Excluding {excluded_count} rows at facility {exc_fc} (normalized: {normalized_excluded_fc}) for {target_carrier if target_carrier else 'carrier'}")
+                else:
+                    st.write(f"   ℹ️ No rows found at facility {exc_fc} (normalized: {normalized_excluded_fc})")
+                
+                # Combine with overall exclusion mask
+                if excluded_facility_mask is None:
+                    excluded_facility_mask = current_exclusion_mask
+                else:
+                    excluded_facility_mask |= current_exclusion_mask
 
         
         # Add target carrier to description
