@@ -143,10 +143,72 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
         group_cols.insert(len(group_cols) - 1, 'Terminal')  # Insert before 'Lookup'
     
     if container_col:
-        # Combine aggregation operations - use unique() to remove duplicates
-        agg_dict = {container_col: lambda x: ', '.join(x.astype(str).unique())}
+        # DEBUG: Count containers BEFORE any processing - FOCUS ON WEEK 47
+        debug_all_containers_before = []
+        debug_wk47_containers_before = []
+        debug_container_counts_by_group = {}
+        debug_wk47_groups = {}
         
-        lane_count = GVTdata.groupby(group_cols).agg(agg_dict).reset_index()
+        for _, row in GVTdata.iterrows():
+            container_str = row.get(container_col, '')
+            week_num = row.get('Week Number', None)
+            
+            if pd.notna(container_str) and str(container_str).strip():
+                # Build group key
+                group_key_parts = [str(row.get(col, '')) for col in group_cols]
+                group_key = '|'.join(group_key_parts)
+                
+                # Parse containers
+                containers_in_row = [c.strip() for c in str(container_str).split(',') if c.strip() and c.strip().lower() != 'nan']
+                debug_all_containers_before.extend(containers_in_row)
+                
+                if group_key not in debug_container_counts_by_group:
+                    debug_container_counts_by_group[group_key] = []
+                debug_container_counts_by_group[group_key].extend(containers_in_row)
+                
+                # Track Week 47 specifically
+                if week_num == 47:
+                    debug_wk47_containers_before.extend(containers_in_row)
+                    if group_key not in debug_wk47_groups:
+                        debug_wk47_groups[group_key] = []
+                    debug_wk47_groups[group_key].extend(containers_in_row)
+        
+        print(f"\n{'='*80}")
+        print(f"🔍 DEBUG - WEEK 47 ANALYSIS - BEFORE GROUPING")
+        print(f"{'='*80}")
+        print(f"  📦 WEEK 47 Container entries in raw data: {len(debug_wk47_containers_before)}")
+        print(f"  📦 WEEK 47 Unique containers: {len(set(debug_wk47_containers_before))}")
+        print(f"  📦 WEEK 47 Number of groups: {len(debug_wk47_groups)}")
+        print(f"\n  First 10 WK47 containers: {debug_wk47_containers_before[:10]}")
+        print(f"  Last 10 WK47 containers: {debug_wk47_containers_before[-10:]}")
+        
+        print(f"\n  ALL DATA:")
+        print(f"  Total container entries in raw data: {len(debug_all_containers_before)}")
+        print(f"  Unique containers in raw data: {len(set(debug_all_containers_before))}")
+        print(f"  Number of groups: {len(debug_container_counts_by_group)}")
+        
+        # Combine containers - keep all instances but remove duplicates WITHIN each group
+        # This allows same container in different weeks, but not duplicated within same week/group
+        def combine_containers_unique_per_group(x):
+            """Join containers, removing duplicates only within this specific group"""
+            containers = []
+            for v in x.astype(str):
+                v_str = str(v).strip()
+                if v_str and v_str.lower() != 'nan':
+                    containers.append(v_str)
+            # Remove duplicates within this group only (same container can exist in other groups/weeks)
+            unique_containers = []
+            seen = set()
+            for c in containers:
+                if c not in seen:
+                    unique_containers.append(c)
+                    seen.add(c)
+            return ', '.join(unique_containers)
+        
+        agg_dict = {container_col: combine_containers_unique_per_group}
+        
+        # Use dropna=False to include rows with blank Terminal or other NaN values in grouping columns
+        lane_count = GVTdata.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
         lane_count = lane_count.rename(columns={container_col: 'Container Numbers'})
         
         # CRITICAL: Calculate Container Count from actual unique container IDs, not row count
@@ -155,12 +217,104 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
             """Count actual container IDs in comma-separated string"""
             if pd.isna(container_str) or not str(container_str).strip():
                 return 0
-            return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+            # Split by comma, strip whitespace, and filter out empty strings and 'nan'
+            containers = [c.strip() for c in str(container_str).split(',') if c.strip() and c.strip().lower() != 'nan']
+            return len(containers)
         
         lane_count['Container Count'] = lane_count['Container Numbers'].apply(count_containers_from_string)
+        
+        # DEBUG: Count containers AFTER grouping and aggregation - FOCUS ON WEEK 47
+        debug_all_containers_after = []
+        debug_wk47_containers_after = []
+        debug_duplicates_removed_per_group = []
+        debug_wk47_duplicates_removed = []
+        
+        for _, row in lane_count.iterrows():
+            container_str = row.get('Container Numbers', '')
+            week_num = row.get('Week Number', None)
+            
+            if pd.notna(container_str) and str(container_str).strip():
+                containers_in_row = [c.strip() for c in str(container_str).split(',') if c.strip() and c.strip().lower() != 'nan']
+                debug_all_containers_after.extend(containers_in_row)
+                
+                # Check how many were in this group before
+                group_key_parts = [str(row.get(col, '')) for col in group_cols]
+                group_key = '|'.join(group_key_parts)
+                
+                if group_key in debug_container_counts_by_group:
+                    original_count = len(debug_container_counts_by_group[group_key])
+                    after_count = len(containers_in_row)
+                    if original_count != after_count:
+                        duplicates_removed = original_count - after_count
+                        dup_info = {
+                            'group': group_key,
+                            'original': original_count,
+                            'after': after_count,
+                            'removed': duplicates_removed
+                        }
+                        debug_duplicates_removed_per_group.append(dup_info)
+                        if week_num == 47:
+                            debug_wk47_duplicates_removed.append(dup_info)
+                
+                # Track Week 47 specifically
+                if week_num == 47:
+                    debug_wk47_containers_after.extend(containers_in_row)
+        
+        print(f"\n{'='*80}")
+        print(f"🔍 DEBUG - WEEK 47 ANALYSIS - AFTER GROUPING")
+        print(f"{'='*80}")
+        print(f"  📦 WEEK 47 Containers after aggregation: {len(debug_wk47_containers_after)}")
+        print(f"  📦 WEEK 47 Unique containers: {len(set(debug_wk47_containers_after))}")
+        
+        wk47_rows = lane_count[lane_count['Week Number'] == 47]
+        print(f"  📦 WEEK 47 Container Count (sum): {wk47_rows['Container Count'].sum()}")
+        print(f"  📦 WEEK 47 Number of rows after grouping: {len(wk47_rows)}")
+        
+        if debug_wk47_duplicates_removed:
+            print(f"\n  ⚠️ WEEK 47 Duplicates removed within groups:")
+            for dup_info in debug_wk47_duplicates_removed:
+                print(f"    Group: {dup_info['group'][:100]}")
+                print(f"      Before: {dup_info['original']}, After: {dup_info['after']}, Removed: {dup_info['removed']}")
+        
+        # Check for missing containers in Week 47
+        wk47_before_set = set(debug_wk47_containers_before)
+        wk47_after_set = set(debug_wk47_containers_after)
+        missing_wk47_containers = wk47_before_set - wk47_after_set
+        
+        if missing_wk47_containers:
+            print(f"\n  ❌ WEEK 47 MISSING CONTAINERS ({len(missing_wk47_containers)}):")
+            for container in sorted(missing_wk47_containers):
+                print(f"    - {container}")
+                # Find which group this container was in
+                for group_key, containers in debug_wk47_groups.items():
+                    if container in containers:
+                        print(f"      Was in group: {group_key[:100]}")
+        else:
+            print(f"\n  ✅ No Week 47 containers missing during aggregation")
+        
+        print(f"\n  ALL DATA:")
+        print(f"  Total containers after aggregation: {len(debug_all_containers_after)}")
+        print(f"  Unique containers after aggregation: {len(set(debug_all_containers_after))}")
+        print(f"  Total Container Count (sum): {lane_count['Container Count'].sum()}")
+        
+        # Check for missing containers overall
+        containers_before_set = set(debug_all_containers_before)
+        containers_after_set = set(debug_all_containers_after)
+        missing_containers = containers_before_set - containers_after_set
+        
+        if missing_containers:
+            print(f"\n  ❌ ALL DATA MISSING CONTAINERS ({len(missing_containers)}):")
+            for container in sorted(missing_containers):
+                print(f"    - {container}")
+        else:
+            print(f"\n  ✅ No containers missing during aggregation")
+        
+        print(f"{'='*80}\n")
+        
     else:
         # Fallback if no Container column
-        lane_count = GVTdata.groupby(group_cols).size().reset_index(name='Container Count')
+        # Use dropna=False to include rows with blank Terminal or other NaN values
+        lane_count = GVTdata.groupby(group_cols, dropna=False).size().reset_index(name='Container Count')
 
     # Merge with rate data first
     merged_data = pd.merge(lane_count, Ratedata, how='left', on='Lookup', suffixes=('', '_rate'))
