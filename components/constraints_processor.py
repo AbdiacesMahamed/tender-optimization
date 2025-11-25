@@ -252,6 +252,8 @@ def apply_constraints_to_data(data, constraints_df):
         constraint_summary: List of applied constraints with details
         max_constrained_carriers: Set of carriers that have Maximum Container Count constraints
                                    (these carriers should NOT receive additional volume in optimization)
+        carrier_facility_exclusions: Dict mapping carrier -> set of excluded facility codes
+                                      (carriers cannot receive containers at these facilities)
     
     Maximum Constraint Logic:
         When a carrier has a Maximum Container Count constraint:
@@ -305,7 +307,7 @@ def apply_constraints_to_data(data, constraints_df):
     """
     
     if constraints_df is None or len(constraints_df) == 0:
-        return pd.DataFrame(), data.copy(), [], set()
+        return pd.DataFrame(), data.copy(), [], set(), {}
     
     constrained_records = []
     remaining_data = data.copy().reset_index(drop=True)
@@ -318,6 +320,111 @@ def apply_constraints_to_data(data, constraints_df):
     # Track carriers with MAXIMUM constraints (hard caps)
     # These carriers should NOT receive additional volume in optimization scenarios
     max_constrained_carriers = set()
+    
+    # ========== PRE-COLLECT ALL CARRIER+FACILITY EXCLUSIONS ==========
+    # This ensures exclusions from ALL constraint rows are applied, even exclusion-only rows
+    # Key: carrier, Value: set of normalized facility codes
+    carrier_facility_exclusions = {}
+    
+    if 'Excluded FC' in constraints_df.columns and 'Carrier' in constraints_df.columns:
+        st.write("📋 **Pre-collecting facility exclusions from all constraints...**")
+        for _, row in constraints_df.iterrows():
+            carrier = row.get('Carrier')
+            excluded_fc = row.get('Excluded FC')
+            
+            if pd.notna(carrier) and carrier and pd.notna(excluded_fc) and str(excluded_fc).strip():
+                carrier_str = str(carrier).strip()
+                normalized_fc = normalize_facility_code(str(excluded_fc).strip())
+                
+                if carrier_str not in carrier_facility_exclusions:
+                    carrier_facility_exclusions[carrier_str] = set()
+                
+                if normalized_fc not in carrier_facility_exclusions[carrier_str]:
+                    carrier_facility_exclusions[carrier_str].add(normalized_fc)
+        
+        # Show summary of exclusions found
+        if carrier_facility_exclusions:
+            for carrier, facilities in carrier_facility_exclusions.items():
+                st.write(f"   🚫 {carrier}: Excluded from facilities: {', '.join(sorted(facilities))}")
+    
+    # ========== APPLY EXCLUSIONS TO REMAINING DATA ==========
+    # Remove carrier assignments where carrier is excluded from facility
+    # AND reallocate to an available carrier that can serve the lane
+    if carrier_facility_exclusions and 'Facility' in remaining_data.columns:
+        st.write("🔄 **Applying facility exclusions and reallocating containers...**")
+        
+        # Find carrier columns
+        carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in remaining_data.columns else 'Carrier'
+        
+        # Build a map of lane -> available carriers (carriers serving that lane without exclusions)
+        # Lane is typically Port + Facility (e.g., USBALHGR6)
+        lane_col = 'Lane' if 'Lane' in remaining_data.columns else None
+        
+        containers_reallocated = 0
+        containers_failed = 0
+        
+        for carrier, excluded_facilities in carrier_facility_exclusions.items():
+            # Find rows where this carrier is at an excluded facility
+            carrier_match = remaining_data[carrier_col] == carrier
+            facility_normalized = remaining_data['Facility'].apply(normalize_facility_code)
+            facility_excluded = facility_normalized.isin(excluded_facilities)
+            
+            violation_mask = carrier_match & facility_excluded
+            violation_indices = remaining_data[violation_mask].index.tolist()
+            
+            if len(violation_indices) > 0:
+                st.write(f"   🔍 Found {len(violation_indices)} rows with {carrier} at excluded facilities")
+                
+                for idx in violation_indices:
+                    row = remaining_data.loc[idx]
+                    facility = row.get('Facility', '')
+                    facility_norm = normalize_facility_code(facility)
+                    lane = row.get('Lane', '') if lane_col else ''
+                    container_count = row.get('Container Count', 1)
+                    
+                    # Find other carriers serving the same lane that don't have this facility excluded
+                    if lane:
+                        # Get all carriers serving this lane
+                        same_lane_mask = remaining_data['Lane'] == lane
+                        carriers_on_lane = remaining_data.loc[same_lane_mask, carrier_col].unique()
+                        
+                        # Filter out carriers that have exclusions for this facility
+                        available_carriers = []
+                        for alt_carrier in carriers_on_lane:
+                            if alt_carrier and alt_carrier != '' and alt_carrier != carrier:
+                                # Check if this carrier has an exclusion for this facility
+                                alt_excluded = carrier_facility_exclusions.get(alt_carrier, set())
+                                if facility_norm not in alt_excluded:
+                                    available_carriers.append(alt_carrier)
+                        
+                        if available_carriers:
+                            # Pick the first available carrier (could be enhanced to pick by rate/performance)
+                            new_carrier = available_carriers[0]
+                            remaining_data.loc[idx, carrier_col] = new_carrier
+                            if 'Carrier' in remaining_data.columns and carrier_col != 'Carrier':
+                                remaining_data.loc[idx, 'Carrier'] = new_carrier
+                            containers_reallocated += container_count
+                            st.write(f"      ✅ Reallocated {container_count} container(s) at {facility} from {carrier} → {new_carrier}")
+                        else:
+                            # No available carrier found - mark as needing manual reallocation
+                            remaining_data.loc[idx, carrier_col] = ''
+                            if 'Carrier' in remaining_data.columns and carrier_col != 'Carrier':
+                                remaining_data.loc[idx, 'Carrier'] = ''
+                            containers_failed += container_count
+                            st.warning(f"      ⚠️ No available carrier for {container_count} container(s) at {facility} (lane: {lane})")
+                    else:
+                        # No lane info - just clear the carrier
+                        remaining_data.loc[idx, carrier_col] = ''
+                        if 'Carrier' in remaining_data.columns and carrier_col != 'Carrier':
+                            remaining_data.loc[idx, 'Carrier'] = ''
+                        containers_failed += container_count
+                        st.warning(f"      ⚠️ No lane info for container at {facility} - cleared carrier")
+        
+        if containers_reallocated > 0:
+            st.success(f"   ✅ Successfully reallocated {containers_reallocated} containers to available carriers")
+        if containers_failed > 0:
+            st.warning(f"   ⚠️ {containers_failed} containers could not be reallocated (no available carrier)")
+            st.info("   ℹ️ These containers will need to be handled by optimization scenarios")
     
     st.write(f"🔍 Applying {len(constraints_df)} constraints...")
     
@@ -389,35 +496,31 @@ def apply_constraints_to_data(data, constraints_df):
         # This prevents the carrier from being allocated containers at that facility
         # Normalize facility codes to first 4 characters for comparison (e.g., HGR6-5 -> HGR6)
         
-        # IMPORTANT: Collect ALL excluded facilities for this carrier from ALL constraints
-        # This ensures exclusions apply across all constraints for the same carrier
+        # IMPORTANT: Use the pre-collected carrier_facility_exclusions dict
+        # This ensures ALL exclusions for this carrier are applied, including from exclusion-only rows
         all_excluded_facilities = []
-        if excluded_facility:
-            all_excluded_facilities.append(excluded_facility)
         
-        # Look for other constraints for the same carrier with Excluded FC
-        if target_carrier and 'Excluded FC' in constraints_df.columns:
-            other_exclusions = constraints_df[
-                (constraints_df['Carrier'] == target_carrier) &
-                (constraints_df['Excluded FC'].notna()) &
-                (constraints_df['Excluded FC'] != '')
-            ]['Excluded FC'].unique()
-            for exc_fc in other_exclusions:
-                exc_fc_str = str(exc_fc).strip()
-                if exc_fc_str and exc_fc_str not in all_excluded_facilities:
-                    all_excluded_facilities.append(exc_fc_str)
-                    if exc_fc_str != excluded_facility:
-                        st.write(f"   🔗 Also applying exclusion from another constraint: Excluding Facility={exc_fc_str}")
+        # First, add the current constraint's excluded facility if specified
+        if excluded_facility:
+            all_excluded_facilities.append(normalize_facility_code(excluded_facility))
+        
+        # Then, add ALL pre-collected exclusions for this carrier
+        # This ensures exclusions from exclusion-only rows (no allocation amount) are still applied
+        if target_carrier and target_carrier in carrier_facility_exclusions:
+            for exc_fc in carrier_facility_exclusions[target_carrier]:
+                if exc_fc not in all_excluded_facilities:
+                    all_excluded_facilities.append(exc_fc)
+            
+            if len(all_excluded_facilities) > 0:
+                st.write(f"   🔍 Applying {len(all_excluded_facilities)} facility exclusion(s) for {target_carrier}: {', '.join(sorted(all_excluded_facilities))}")
         
         # Apply all excluded facilities to the mask
         excluded_facility_mask = None
         if all_excluded_facilities and 'Facility' in remaining_data.columns:
             for exc_fc in all_excluded_facilities:
-                # Normalize the excluded facility to first 4 characters
-                normalized_excluded_fc = normalize_facility_code(exc_fc)
-                
+                # exc_fc is already normalized (from carrier_facility_exclusions)
                 # Find rows at the excluded facility (comparing normalized codes)
-                current_exclusion_mask = remaining_data['Facility'].apply(normalize_facility_code) == normalized_excluded_fc
+                current_exclusion_mask = remaining_data['Facility'].apply(normalize_facility_code) == exc_fc
                 
                 # Remove those rows from eligible data
                 mask &= ~current_exclusion_mask
@@ -426,9 +529,7 @@ def apply_constraints_to_data(data, constraints_df):
                 # Count how many rows are being excluded
                 excluded_count = current_exclusion_mask.sum()
                 if excluded_count > 0:
-                    st.write(f"   🚫 Excluding {excluded_count} rows at facility {exc_fc} (normalized: {normalized_excluded_fc}) for {target_carrier if target_carrier else 'carrier'}")
-                else:
-                    st.write(f"   ℹ️ No rows found at facility {exc_fc} (normalized: {normalized_excluded_fc})")
+                    st.write(f"   🚫 Excluding {excluded_count} rows at facility {exc_fc} for {target_carrier if target_carrier else 'carrier'}")
                 
                 # Combine with overall exclusion mask
                 if excluded_facility_mask is None:
@@ -540,15 +641,31 @@ def apply_constraints_to_data(data, constraints_df):
             allocation_method = f"{constraint['Percent Allocation']}% allocation ({target_containers:,} containers)"
         
         else:
-            # No allocation amount specified - skip this constraint
-            st.warning(f"⚠️ No allocation amount specified for constraint: {constraint_desc}")
-            constraint_summary.append({
-                'priority': constraint['Priority Score'],
-                'description': constraint_desc,
-                'status': 'No allocation amount',
-                'containers_allocated': 0
-            })
-            continue
+            # No allocation amount specified
+            # Check if this is an exclusion-only constraint (has Excluded FC but no allocation)
+            # Exclusion-only constraints are considered "Applied" because the exclusion is enforced
+            # via the pre-collection mechanism at the start of this function
+            if excluded_facility and target_carrier:
+                # This is an exclusion-only constraint - it's valid and applied via pre-collection
+                st.info(f"ℹ️ Exclusion-only constraint: {constraint_desc}")
+                constraint_summary.append({
+                    'priority': constraint['Priority Score'],
+                    'description': constraint_desc,
+                    'status': 'Applied (Exclusion Rule)',
+                    'containers_allocated': 0,
+                    'method': f"Exclusion: {target_carrier} blocked from {excluded_facility}"
+                })
+                continue
+            else:
+                # Truly no allocation amount and no exclusion - skip
+                st.warning(f"⚠️ No allocation amount specified for constraint: {constraint_desc}")
+                constraint_summary.append({
+                    'priority': constraint['Priority Score'],
+                    'description': constraint_desc,
+                    'status': 'No allocation amount',
+                    'containers_allocated': 0
+                })
+                continue
         
         # Allocate containers at the CONTAINER ID level (not just counts)
         allocated_containers_count = 0
@@ -712,7 +829,14 @@ def apply_constraints_to_data(data, constraints_df):
         st.info(f"🔒 **Carriers with Maximum Constraints (Hard Caps):** {', '.join(sorted(max_constrained_carriers))}\n\n"
                 f"These carriers will NOT receive additional volume in optimization scenarios.")
     
-    return constrained_data, remaining_data, constraint_summary, max_constrained_carriers
+    # Show carrier+facility exclusions summary
+    if carrier_facility_exclusions:
+        exclusion_summary = []
+        for carrier, facilities in carrier_facility_exclusions.items():
+            exclusion_summary.append(f"{carrier}: {', '.join(sorted(facilities))}")
+        st.info(f"🚫 **Carrier+Facility Exclusions Applied:**\n" + "\n".join(exclusion_summary))
+    
+    return constrained_data, remaining_data, constraint_summary, max_constrained_carriers, carrier_facility_exclusions
 
 
 def show_constraints_summary(constraint_summary):
@@ -741,7 +865,8 @@ def show_constraints_summary(constraint_summary):
     # Summary metrics
     col1, col2, col3 = st.columns(3)
     total_allocated = sum(item['containers_allocated'] for item in constraint_summary)
-    successful = sum(1 for item in constraint_summary if item['status'] == 'Applied')
+    # Count constraints as successful if status starts with 'Applied' (includes 'Applied', 'Applied (Exclusion Rule)', etc.)
+    successful = sum(1 for item in constraint_summary if item['status'].startswith('Applied'))
     
     col1.metric("🔒 Total Constrained Containers", f"{total_allocated:,}")
     col2.metric("✅ Successful Constraints", successful)
