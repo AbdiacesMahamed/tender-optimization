@@ -1,7 +1,7 @@
 """
 Constraints Processing Module
 Handles operational constraints uploaded via Excel file
-Version: 2025-11-19 - Fixed excluded facility logic to apply across all constraints
+Version: 2025-11-25 - Moved constraint processing messages to downloadable CSV sheet
 """
 import pandas as pd
 import streamlit as st
