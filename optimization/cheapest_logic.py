@@ -140,12 +140,12 @@ def allocate_to_cheapest_carrier(
     working = working.sort_values(["__rate_sort", "__carrier_sort"], ascending=[True, True])
 
     # Get the first (cheapest) carrier for each group
-    cheapest_carriers = working.groupby(group_columns, as_index=False).first().copy()
+    cheapest_carriers = working.groupby(group_columns, as_index=False, dropna=False).first().copy()
 
     # Sum all containers in each group and assign 100% to the selected carrier row.
     container_totals = (
         working
-        .groupby(group_columns, as_index=False)[container_column]
+        .groupby(group_columns, as_index=False, dropna=False)[container_column]
         .sum()
         .rename(columns={container_column: "__total_containers"})
     )
@@ -154,7 +154,7 @@ def allocate_to_cheapest_carrier(
 
     if container_numbers_column in working.columns:
         container_number_map = (
-            working.groupby(group_columns)[container_numbers_column]
+            working.groupby(group_columns, dropna=False)[container_numbers_column]
             .apply(lambda values: ", ".join(str(v) for v in values if str(v).strip()))
             .reset_index(name="__container_numbers")
         )

@@ -127,12 +127,12 @@ def allocate_to_highest_performance(
     working = working.sort_values(sort_columns, ascending=ascending_flags)
 
     # Identify the best carrier per lane/week/category (with tie-breaking applied above).
-    best_carriers = working.groupby(_prepare_group_columns(data), as_index=False).head(1).copy()
+    best_carriers = working.groupby(_prepare_group_columns(data), as_index=False, dropna=False).head(1).copy()
 
     # Sum all containers in each group and assign 100% to the selected carrier row.
     container_totals = (
         working
-        .groupby(_prepare_group_columns(data), as_index=False)[container_column]
+        .groupby(_prepare_group_columns(data), as_index=False, dropna=False)[container_column]
         .sum()
         .rename(columns={container_column: "__total_containers"})
     )
@@ -144,7 +144,7 @@ def allocate_to_highest_performance(
         best_carriers["__original_summed_count"] = best_carriers[container_column].copy()
         
         container_number_map = (
-            working.groupby(_prepare_group_columns(data))[container_numbers_column]
+            working.groupby(_prepare_group_columns(data), dropna=False)[container_numbers_column]
             .apply(lambda values: ", ".join(str(v) for v in values if str(v).strip()))
             .reset_index(name="__container_numbers")
         )

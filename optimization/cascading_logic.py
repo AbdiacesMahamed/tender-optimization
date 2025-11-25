@@ -158,7 +158,7 @@ def cascading_allocate_with_constraints(
     result_rows = []
     unallocatable_rows = []
     
-    for group_key, group_data in data.groupby(group_columns):
+    for group_key, group_data in data.groupby(group_columns, dropna=False):
         # Check if there are excluded carrier containers for this group
         excluded_group_data = pd.DataFrame()
         if not excluded_data.empty:

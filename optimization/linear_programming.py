@@ -164,7 +164,7 @@ def optimize_carrier_allocation(
     optimized_allocations = []
     
     # Group by lane/week/category and optimize each group
-    for group_key, group_data in working.groupby(group_columns):
+    for group_key, group_data in working.groupby(group_columns, dropna=False):
         optimized_group = _optimize_single_group(
             group_data=group_data,
             group_key=group_key,
