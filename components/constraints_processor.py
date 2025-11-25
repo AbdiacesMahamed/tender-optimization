@@ -307,11 +307,18 @@ def apply_constraints_to_data(data, constraints_df):
     """
     
     if constraints_df is None or len(constraints_df) == 0:
-        return pd.DataFrame(), data.copy(), [], set(), {}
+        return pd.DataFrame(), data.copy(), [], set(), {}, []
     
     constrained_records = []
     remaining_data = data.copy().reset_index(drop=True)
     constraint_summary = []
+    
+    # Collect explanation logs for downloadable report (not displayed in UI)
+    explanation_logs = []
+    
+    def log_explanation(message, level='info'):
+        """Add a message to the explanation log for downloadable report"""
+        explanation_logs.append({'Level': level.upper(), 'Message': message})
     
     # Track which INDIVIDUAL container IDs have been allocated
     # Key: container_id, Value: dict with {carrier, week, row_idx}
@@ -327,7 +334,7 @@ def apply_constraints_to_data(data, constraints_df):
     carrier_facility_exclusions = {}
     
     if 'Excluded FC' in constraints_df.columns and 'Carrier' in constraints_df.columns:
-        st.write("📋 **Pre-collecting facility exclusions from all constraints...**")
+        log_explanation("Pre-collecting facility exclusions from all constraints...", 'info')
         for _, row in constraints_df.iterrows():
             carrier = row.get('Carrier')
             excluded_fc = row.get('Excluded FC')
@@ -342,16 +349,16 @@ def apply_constraints_to_data(data, constraints_df):
                 if normalized_fc not in carrier_facility_exclusions[carrier_str]:
                     carrier_facility_exclusions[carrier_str].add(normalized_fc)
         
-        # Show summary of exclusions found
+        # Log summary of exclusions found
         if carrier_facility_exclusions:
             for carrier, facilities in carrier_facility_exclusions.items():
-                st.write(f"   🚫 {carrier}: Excluded from facilities: {', '.join(sorted(facilities))}")
+                log_explanation(f"{carrier}: Excluded from facilities: {', '.join(sorted(facilities))}", 'exclusion')
     
     # ========== APPLY EXCLUSIONS TO REMAINING DATA ==========
     # Remove carrier assignments where carrier is excluded from facility
     # AND reallocate to an available carrier that can serve the lane
     if carrier_facility_exclusions and 'Facility' in remaining_data.columns:
-        st.write("🔄 **Applying facility exclusions and reallocating containers...**")
+        log_explanation("Applying facility exclusions and reallocating containers...", 'info')
         
         # Find carrier columns
         carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in remaining_data.columns else 'Carrier'
@@ -373,7 +380,7 @@ def apply_constraints_to_data(data, constraints_df):
             violation_indices = remaining_data[violation_mask].index.tolist()
             
             if len(violation_indices) > 0:
-                st.write(f"   🔍 Found {len(violation_indices)} rows with {carrier} at excluded facilities")
+                log_explanation(f"Found {len(violation_indices)} rows with {carrier} at excluded facilities", 'info')
                 
                 for idx in violation_indices:
                     row = remaining_data.loc[idx]
@@ -404,29 +411,29 @@ def apply_constraints_to_data(data, constraints_df):
                             if 'Carrier' in remaining_data.columns and carrier_col != 'Carrier':
                                 remaining_data.loc[idx, 'Carrier'] = new_carrier
                             containers_reallocated += container_count
-                            st.write(f"      ✅ Reallocated {container_count} container(s) at {facility} from {carrier} → {new_carrier}")
+                            log_explanation(f"Reallocated {container_count} container(s) at {facility} from {carrier} → {new_carrier}", 'reallocation')
                         else:
                             # No available carrier found - mark as needing manual reallocation
                             remaining_data.loc[idx, carrier_col] = ''
                             if 'Carrier' in remaining_data.columns and carrier_col != 'Carrier':
                                 remaining_data.loc[idx, 'Carrier'] = ''
                             containers_failed += container_count
-                            st.warning(f"      ⚠️ No available carrier for {container_count} container(s) at {facility} (lane: {lane})")
+                            log_explanation(f"No available carrier for {container_count} container(s) at {facility} (lane: {lane})", 'warning')
                     else:
                         # No lane info - just clear the carrier
                         remaining_data.loc[idx, carrier_col] = ''
                         if 'Carrier' in remaining_data.columns and carrier_col != 'Carrier':
                             remaining_data.loc[idx, 'Carrier'] = ''
                         containers_failed += container_count
-                        st.warning(f"      ⚠️ No lane info for container at {facility} - cleared carrier")
+                        log_explanation(f"No lane info for container at {facility} - cleared carrier", 'warning')
         
         if containers_reallocated > 0:
-            st.success(f"   ✅ Successfully reallocated {containers_reallocated} containers to available carriers")
+            log_explanation(f"Successfully reallocated {containers_reallocated} containers to available carriers", 'success')
         if containers_failed > 0:
-            st.warning(f"   ⚠️ {containers_failed} containers could not be reallocated (no available carrier)")
-            st.info("   ℹ️ These containers will need to be handled by optimization scenarios")
+            log_explanation(f"{containers_failed} containers could not be reallocated (no available carrier)", 'warning')
+            log_explanation("These containers will need to be handled by optimization scenarios", 'info')
     
-    st.write(f"🔍 Applying {len(constraints_df)} constraints...")
+    log_explanation(f"Applying {len(constraints_df)} constraints...", 'info')
     
     for idx, constraint in constraints_df.iterrows():
         # Build filter mask based on provided constraint fields
@@ -452,7 +459,7 @@ def apply_constraints_to_data(data, constraints_df):
         
         # If Excluded FC is specified, we MUST have a carrier
         if excluded_facility and not target_carrier:
-            st.error(f"❌ Excluded FC requires a Carrier to be specified!")
+            log_explanation(f"ERROR: Excluded FC requires a Carrier to be specified!", 'error')
             constraint_summary.append({
                 'priority': constraint['Priority Score'],
                 'description': f"Priority {constraint['Priority Score']}: Excluded FC without Carrier",
@@ -512,7 +519,7 @@ def apply_constraints_to_data(data, constraints_df):
                     all_excluded_facilities.append(exc_fc)
             
             if len(all_excluded_facilities) > 0:
-                st.write(f"   🔍 Applying {len(all_excluded_facilities)} facility exclusion(s) for {target_carrier}: {', '.join(sorted(all_excluded_facilities))}")
+                log_explanation(f"Applying {len(all_excluded_facilities)} facility exclusion(s) for {target_carrier}: {', '.join(sorted(all_excluded_facilities))}", 'info')
         
         # Apply all excluded facilities to the mask
         excluded_facility_mask = None
@@ -529,7 +536,7 @@ def apply_constraints_to_data(data, constraints_df):
                 # Count how many rows are being excluded
                 excluded_count = current_exclusion_mask.sum()
                 if excluded_count > 0:
-                    st.write(f"   🚫 Excluding {excluded_count} rows at facility {exc_fc} for {target_carrier if target_carrier else 'carrier'}")
+                    log_explanation(f"Excluding {excluded_count} rows at facility {exc_fc} for {target_carrier if target_carrier else 'carrier'}", 'exclusion')
                 
                 # Combine with overall exclusion mask
                 if excluded_facility_mask is None:
@@ -567,12 +574,12 @@ def apply_constraints_to_data(data, constraints_df):
         if len(eligible_data) == 0:
             # For maximum constraints with carrier only, this might be OK if we're removing all carrier data
             if is_potential_max_constraint and target_carrier:
-                st.info(f"ℹ️ No containers matching filters for constraint: {constraint_desc}")
-                st.info(f"   Will proceed to remove ANY existing {target_carrier} containers from unconstrained table")
+                log_explanation(f"No containers matching filters for constraint: {constraint_desc}", 'info')
+                log_explanation(f"Will proceed to remove ANY existing {target_carrier} containers from unconstrained table", 'info')
                 # Continue to process the constraint to remove carrier from unconstrained table
                 total_eligible_containers = 0
             else:
-                st.warning(f"⚠️ No eligible data for constraint: {constraint_desc}")
+                log_explanation(f"No eligible data for constraint: {constraint_desc}", 'warning')
                 constraint_summary.append({
                     'priority': constraint['Priority Score'],
                     'description': constraint_desc,
@@ -592,7 +599,7 @@ def apply_constraints_to_data(data, constraints_df):
         if pd.notna(constraint['Maximum Container Count']) and constraint['Maximum Container Count'] > 0:
             # VALIDATION: Maximum constraints MUST have a carrier specified
             if not target_carrier:
-                st.error(f"❌ Maximum Container Count constraint requires a Carrier to be specified!")
+                log_explanation(f"ERROR: Maximum Container Count constraint requires a Carrier to be specified!", 'error')
                 constraint_summary.append({
                     'priority': constraint['Priority Score'],
                     'description': constraint_desc,
@@ -647,7 +654,7 @@ def apply_constraints_to_data(data, constraints_df):
             # via the pre-collection mechanism at the start of this function
             if excluded_facility and target_carrier:
                 # This is an exclusion-only constraint - it's valid and applied via pre-collection
-                st.info(f"ℹ️ Exclusion-only constraint: {constraint_desc}")
+                log_explanation(f"Exclusion-only constraint: {constraint_desc}", 'info')
                 constraint_summary.append({
                     'priority': constraint['Priority Score'],
                     'description': constraint_desc,
@@ -658,7 +665,7 @@ def apply_constraints_to_data(data, constraints_df):
                 continue
             else:
                 # Truly no allocation amount and no exclusion - skip
-                st.warning(f"⚠️ No allocation amount specified for constraint: {constraint_desc}")
+                log_explanation(f"No allocation amount specified for constraint: {constraint_desc}", 'warning')
                 constraint_summary.append({
                     'priority': constraint['Priority Score'],
                     'description': constraint_desc,
@@ -729,9 +736,9 @@ def apply_constraints_to_data(data, constraints_df):
         # This preserves container count while ensuring the carrier cannot receive volume
         if is_maximum_constraint and target_carrier:
             # Log that carrier is blocked but containers remain available for other carriers
-            st.write(f"   🔒 {target_carrier} added to exclusion list for optimization")
-            st.write(f"   ⚠️ {target_carrier} will NOT be able to receive ANY containers in optimization")
-            st.write(f"   ℹ️ Containers remain in unconstrained table for other carriers to use")
+            log_explanation(f"{target_carrier} added to exclusion list for optimization", 'info')
+            log_explanation(f"{target_carrier} will NOT be able to receive ANY containers in optimization", 'warning')
+            log_explanation(f"Containers remain in unconstrained table for other carriers to use", 'info')
         
         # CRITICAL: Handle Excluded FC for this constraint
         # If Excluded FC is specified, ensure carrier CANNOT have containers at that facility
@@ -749,12 +756,12 @@ def apply_constraints_to_data(data, constraints_df):
                         record_facility_normalized = normalize_facility_code(record.get('Facility', ''))
                         if record_facility_normalized == normalized_excluded_fc:
                             facility_violation_in_constrained = True
-                            st.error(f"   ❌ Violation found: {record.get('Facility')} matches excluded {excluded_facility}")
+                            log_explanation(f"Violation found: {record.get('Facility')} matches excluded {excluded_facility}", 'error')
                             break
             
             if facility_violation_in_constrained:
-                st.error(f"❌ CONSTRAINT FAILED: Cannot allocate {target_carrier} containers to excluded facility {excluded_facility}")
-                st.error(f"   No alternative carrier available for containers at {excluded_facility}")
+                log_explanation(f"CONSTRAINT FAILED: Cannot allocate {target_carrier} containers to excluded facility {excluded_facility}", 'error')
+                log_explanation(f"No alternative carrier available for containers at {excluded_facility}", 'error')
                 # Remove the invalid constrained records (using normalized comparison)
                 constrained_records = [r for r in constrained_records 
                                      if not ((r.get('Carrier') == target_carrier or r.get('Dray SCAC(FL)') == target_carrier) 
@@ -788,8 +795,8 @@ def apply_constraints_to_data(data, constraints_df):
                 
                 if excluded_mask.any():
                     excluded_containers = remaining_data.loc[excluded_mask, 'Container Count'].sum()
-                    st.warning(f"   ⚠️ Found {excluded_containers} containers for {target_carrier} at excluded facility {excluded_facility} (normalized: {normalized_excluded_fc})")
-                    st.warning(f"   These containers must be reallocated to other carriers or constraint will fail")
+                    log_explanation(f"Found {excluded_containers} containers for {target_carrier} at excluded facility {excluded_facility} (normalized: {normalized_excluded_fc})", 'warning')
+                    log_explanation(f"These containers must be reallocated to other carriers or constraint will fail", 'warning')
                     # Mark carrier for exclusion at this facility (handled by optimization)
         
         constraint_summary.append({
@@ -810,37 +817,35 @@ def apply_constraints_to_data(data, constraints_df):
     else:
         constrained_data = pd.DataFrame()
     
-    # Summary
+    # Summary - log to explanation sheet instead of UI
     total_constrained = constrained_data['Container Count'].sum() if len(constrained_data) > 0 else 0
     total_unconstrained = remaining_data['Container Count'].sum()
     total_original = data['Container Count'].sum()
     
-    st.write("📊 **Constraint Application Summary:**")
-    st.write(f"- Original containers: {total_original:,}")
-    st.write(f"- Constrained containers: {total_constrained:,}")
-    st.write(f"- Unconstrained containers: {total_unconstrained:,}")
-    st.write(f"- Total after split: {total_constrained + total_unconstrained:,}")
+    log_explanation(f"Constraint Application Summary:", 'summary')
+    log_explanation(f"Original containers: {total_original:,}", 'summary')
+    log_explanation(f"Constrained containers: {total_constrained:,}", 'summary')
+    log_explanation(f"Unconstrained containers: {total_unconstrained:,}", 'summary')
+    log_explanation(f"Total after split: {total_constrained + total_unconstrained:,}", 'summary')
     
     if abs(total_original - (total_constrained + total_unconstrained)) > 0.01:
-        st.error(f"⚠️ Container mismatch! Lost {total_original - (total_constrained + total_unconstrained):,.0f} containers")
+        log_explanation(f"Container mismatch! Lost {total_original - (total_constrained + total_unconstrained):,.0f} containers", 'error')
     
-    # Show carriers with maximum constraints (hard caps)
+    # Log carriers with maximum constraints (hard caps)
     if max_constrained_carriers:
-        st.info(f"🔒 **Carriers with Maximum Constraints (Hard Caps):** {', '.join(sorted(max_constrained_carriers))}\n\n"
-                f"These carriers will NOT receive additional volume in optimization scenarios.")
+        log_explanation(f"Carriers with Maximum Constraints (Hard Caps): {', '.join(sorted(max_constrained_carriers))}", 'info')
+        log_explanation(f"These carriers will NOT receive additional volume in optimization scenarios.", 'info')
     
-    # Show carrier+facility exclusions summary
+    # Log carrier+facility exclusions summary
     if carrier_facility_exclusions:
-        exclusion_summary = []
         for carrier, facilities in carrier_facility_exclusions.items():
-            exclusion_summary.append(f"{carrier}: {', '.join(sorted(facilities))}")
-        st.info(f"🚫 **Carrier+Facility Exclusions Applied:**\n" + "\n".join(exclusion_summary))
+            log_explanation(f"Carrier+Facility Exclusion: {carrier} excluded from {', '.join(sorted(facilities))}", 'exclusion')
     
-    return constrained_data, remaining_data, constraint_summary, max_constrained_carriers, carrier_facility_exclusions
+    return constrained_data, remaining_data, constraint_summary, max_constrained_carriers, carrier_facility_exclusions, explanation_logs
 
 
-def show_constraints_summary(constraint_summary):
-    """Display summary of applied constraints"""
+def show_constraints_summary(constraint_summary, explanation_logs=None):
+    """Display summary of applied constraints with downloadable explanations"""
     if not constraint_summary:
         return
     
@@ -871,3 +876,17 @@ def show_constraints_summary(constraint_summary):
     col1.metric("🔒 Total Constrained Containers", f"{total_allocated:,}")
     col2.metric("✅ Successful Constraints", successful)
     col3.metric("⚠️ Failed/Skipped Constraints", len(constraint_summary) - successful)
+    
+    # Downloadable constraint explanations sheet
+    if explanation_logs:
+        st.markdown("---")
+        explanation_df = pd.DataFrame(explanation_logs)
+        csv = explanation_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Constraint Explanations",
+            data=csv,
+            file_name="constraint_explanations.csv",
+            mime="text/csv",
+            use_container_width=True,
+            help="Download detailed log of all constraint processing actions, exclusions, and reallocations"
+        )

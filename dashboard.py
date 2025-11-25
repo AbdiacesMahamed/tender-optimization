@@ -103,19 +103,21 @@ def main():
         max_constrained_carriers = set()  # Carriers with maximum constraints (hard caps)
         carrier_facility_exclusions = {}  # Carrier+facility exclusions
         
+        explanation_logs = []  # For downloadable constraint explanations
+        
         if constraints_file is not None:
             st.markdown("---")
             constraints_df = process_constraints_file(constraints_file)
             
             if constraints_df is not None:
                 # Apply constraints to filtered data
-                constrained_data, unconstrained_data, constraint_summary, max_constrained_carriers, carrier_facility_exclusions = apply_constraints_to_data(
+                constrained_data, unconstrained_data, constraint_summary, max_constrained_carriers, carrier_facility_exclusions, explanation_logs = apply_constraints_to_data(
                     final_filtered_data, constraints_df
                 )
                 
                 # Show constraint summary
                 if len(constraint_summary) > 0:
-                    show_constraints_summary(constraint_summary)
+                    show_constraints_summary(constraint_summary, explanation_logs)
             else:
                 st.warning("⚠️ Constraints file could not be processed")
         else:
