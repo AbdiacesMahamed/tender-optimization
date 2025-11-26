@@ -268,6 +268,14 @@ def _cascading_allocate_single_group(
     # Add excluded container numbers to the pool
     all_container_numbers.extend(excluded_container_numbers)
     
+    # CRITICAL: Use actual container ID count as the source of truth
+    # This ensures allocations are based on real container IDs, not potentially mismatched Container Count values
+    if all_container_numbers:
+        actual_container_count = len(all_container_numbers)
+        if actual_container_count != total_containers_to_allocate:
+            # Use the actual count from Container Numbers as the source of truth
+            total_containers_to_allocate = actual_container_count
+    
     # Build carrier lookup
     carrier_data = {}
     for idx, row in group_data.iterrows():

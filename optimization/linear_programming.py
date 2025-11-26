@@ -232,6 +232,20 @@ def _optimize_single_group(
     if len(carriers) == 0:
         return None
     
+    # Collect all container numbers for this group
+    all_container_numbers = []
+    if container_numbers_column in group_data.columns:
+        for containers_str in group_data[container_numbers_column]:
+            if pd.notna(containers_str) and str(containers_str).strip():
+                all_container_numbers.extend([c.strip() for c in str(containers_str).split(',') if c.strip()])
+    
+    # CRITICAL: Use actual container ID count as the source of truth
+    # This ensures allocations are based on real container IDs, not potentially mismatched Container Count values
+    if all_container_numbers:
+        actual_container_count = len(all_container_numbers)
+        if actual_container_count != total_containers:
+            total_containers = actual_container_count
+    
     # If only one carrier, assign all containers to it
     if len(carriers) == 1:
         result = group_data.copy()
@@ -328,12 +342,8 @@ def _optimize_single_group(
     # Build result DataFrame
     result_rows = []
     
-    # Get all container numbers for redistribution
-    all_container_numbers = []
-    if container_numbers_column in group_data.columns:
-        for containers_str in group_data[container_numbers_column]:
-            if pd.notna(containers_str) and str(containers_str).strip():
-                all_container_numbers.extend([c.strip() for c in str(containers_str).split(',')])
+    # Use the container numbers we already collected at the start of the function
+    # (all_container_numbers was collected when we validated total_containers)
     
     for carrier, allocated_count in significant_allocations.items():
         # Round to nearest integer
