@@ -348,10 +348,11 @@ def _optimize_single_group(
         # Calculate total cost
         row["Total Rate"] = carrier_data[carrier]['rate'] * allocated_count
         
-        # Distribute container numbers proportionally
+        # Assign Container Numbers based on allocated_count (not proportion)
+        # allocated_count is already the exact number of containers this carrier should receive
         if all_container_numbers:
-            proportion = allocated_count / total_containers
-            num_to_assign = max(1, round(len(all_container_numbers) * proportion))
+            # Assign exactly allocated_count container IDs (or all remaining if less available)
+            num_to_assign = min(int(allocated_count), len(all_container_numbers))
             assigned_containers = all_container_numbers[:num_to_assign]
             all_container_numbers = all_container_numbers[num_to_assign:]
             row[container_numbers_column] = ", ".join(assigned_containers)

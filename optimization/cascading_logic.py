@@ -320,10 +320,11 @@ def _cascading_allocate_single_group(
         row = carrier_data[carrier].copy()
         row[container_column] = allocated_count
         
-        # Assign Container Numbers proportionally if available
+        # Assign Container Numbers based on allocated_count (not proportion)
+        # allocated_count is already the exact number of containers this carrier should receive
         if remaining_container_numbers:
-            proportion = allocated_count / total_containers_to_allocate
-            num_to_assign = max(1, round(len(all_container_numbers) * proportion))
+            # Assign exactly allocated_count container IDs (or all remaining if less available)
+            num_to_assign = min(int(allocated_count), len(remaining_container_numbers))
             assigned_containers = remaining_container_numbers[:num_to_assign]
             remaining_container_numbers = remaining_container_numbers[num_to_assign:]
             row[container_numbers_column] = ", ".join(assigned_containers)
