@@ -329,16 +329,82 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
 
     # Merge with performance data (only if available)
     if has_performance and len(performance_clean) > 0:
+        # DEBUG: Print carrier names from both datasets to identify mismatches
+        gvt_carriers = set(merged_data['Dray SCAC(FL)'].dropna().unique())
+        perf_carriers = set(performance_clean['Carrier'].dropna().unique())
+        
+        print(f"\n=== PERFORMANCE DATA MERGE DEBUG ===")
+        print(f"GVT carriers count: {len(gvt_carriers)}")
+        print(f"Performance carriers count: {len(perf_carriers)}")
+        print(f"GVT carriers sample: {sorted(list(gvt_carriers))[:10]}")
+        print(f"Performance carriers sample: {sorted(list(perf_carriers))[:10]}")
+        
+        # Check for exact matches
+        matching_carriers = gvt_carriers.intersection(perf_carriers)
+        print(f"Matching carriers (exact): {len(matching_carriers)}")
+        
+        # Check for case-insensitive matches
+        gvt_carriers_lower = {c.strip().upper() for c in gvt_carriers if isinstance(c, str)}
+        perf_carriers_lower = {c.strip().upper() for c in perf_carriers if isinstance(c, str)}
+        matching_case_insensitive = gvt_carriers_lower.intersection(perf_carriers_lower)
+        print(f"Matching carriers (case-insensitive): {len(matching_case_insensitive)}")
+        
+        # Show non-matching carriers
+        gvt_only = gvt_carriers - perf_carriers
+        perf_only = perf_carriers - gvt_carriers
+        if gvt_only:
+            print(f"Carriers in GVT but NOT in Performance: {sorted(list(gvt_only))[:10]}")
+        if perf_only:
+            print(f"Carriers in Performance but NOT in GVT: {sorted(list(perf_only))[:10]}")
+        
+        # Normalize carrier names before merge to handle case/whitespace differences
+        # Create normalized versions for matching
+        merged_data['_carrier_normalized'] = merged_data['Dray SCAC(FL)'].astype(str).str.strip().str.upper()
+        performance_clean = performance_clean.copy()  # Avoid modifying cached data
+        performance_clean['_carrier_normalized'] = performance_clean['Carrier'].astype(str).str.strip().str.upper()
+        
+        # Ensure Week Number types match
+        merged_data['Week Number'] = pd.to_numeric(merged_data['Week Number'], errors='coerce')
+        performance_clean['Week Number'] = pd.to_numeric(performance_clean['Week Number'], errors='coerce')
+        
+        print(f"Week Number range in GVT: {merged_data['Week Number'].min()} - {merged_data['Week Number'].max()}")
+        print(f"Week Number range in Performance: {performance_clean['Week Number'].min()} - {performance_clean['Week Number'].max()}")
+        
+        # Check for week number overlap
+        gvt_weeks = set(merged_data['Week Number'].dropna().unique())
+        perf_weeks = set(performance_clean['Week Number'].dropna().unique())
+        overlapping_weeks = gvt_weeks.intersection(perf_weeks)
+        print(f"GVT weeks: {sorted(gvt_weeks)}")
+        print(f"Performance weeks: {sorted(perf_weeks)}")
+        print(f"Overlapping weeks: {sorted(overlapping_weeks)}")
+        
+        if not overlapping_weeks:
+            print("⚠️ WARNING: No overlapping weeks between GVT and Performance data!")
+            print("   This means no performance scores can be matched to any containers.")
+        
+        # Perform the merge using normalized carrier names
         merged_data = pd.merge(
             merged_data, 
-            performance_clean, 
-            left_on=['Dray SCAC(FL)', 'Week Number'], 
-            right_on=['Carrier', 'Week Number'], 
+            performance_clean[['_carrier_normalized', 'Week Number', 'Performance_Score']], 
+            left_on=['_carrier_normalized', 'Week Number'], 
+            right_on=['_carrier_normalized', 'Week Number'], 
             how='left'
         )
         
+        # Drop the helper column
+        merged_data = merged_data.drop(columns=['_carrier_normalized'], errors='ignore')
+        
         # Ensure Performance_Score is numeric after merge
         merged_data['Performance_Score'] = pd.to_numeric(merged_data['Performance_Score'], errors='coerce')
+        
+        # DEBUG: Check merge results
+        non_null_scores = merged_data['Performance_Score'].notna().sum()
+        total_rows = len(merged_data)
+        print(f"After merge: {non_null_scores}/{total_rows} rows have performance scores ({non_null_scores/total_rows*100:.1f}%)")
+        if non_null_scores > 0:
+            print(f"Performance score range: {merged_data['Performance_Score'].min():.3f} - {merged_data['Performance_Score'].max():.3f}")
+            print(f"Unique performance scores: {merged_data['Performance_Score'].dropna().nunique()}")
+        print(f"=====================================\n")
         
     # NOW CALCULATE PROPER VOLUME-WEIGHTED PERFORMANCE SCORES
     merged_data = apply_volume_weighted_performance(merged_data)
@@ -381,23 +447,48 @@ def apply_volume_weighted_performance(merged_data):
     
     # Only process if we have performance data
     if 'Performance_Score' not in merged_data.columns:
+        print("⚠️ No Performance_Score column found in merged data - skipping performance calculations")
         return merged_data
     
     # Count missing before processing
     missing_before = merged_data['Performance_Score'].isna().sum()
     total_records = len(merged_data)
     
-    # Check if all performance scores are identical (indicating default fill)
-    unique_scores = merged_data['Performance_Score'].dropna().nunique()
-    all_scores_same = unique_scores == 1
+    # DEBUG: Show distribution of performance scores
+    print(f"\n=== APPLY VOLUME WEIGHTED PERFORMANCE DEBUG ===")
+    print(f"Total records: {total_records}")
+    print(f"Missing Performance_Score: {missing_before} ({missing_before/total_records*100:.1f}%)")
+    print(f"Non-missing Performance_Score: {total_records - missing_before}")
     
-    if all_scores_same and missing_before == 0:
-        # Mark all as missing to force recalculation with volume-weighted averages
-        merged_data['Performance_Score'] = None
-        missing_before = total_records
+    # Check if ALL performance scores are missing - this indicates a merge problem
+    if missing_before == total_records:
+        print("❌ CRITICAL: ALL performance scores are NULL/NaN!")
+        print("   This indicates the performance data merge completely failed.")
+        print("   Likely causes:")
+        print("   1. Carrier names don't match between GVT and Performance data")
+        print("   2. Week numbers don't match between datasets")
+        print("   3. Performance data was not loaded correctly")
+        print("   Returning data without filling - check merge debug output above.")
+        print(f"=============================================\n")
+        return merged_data
     
-    # If no missing scores and they vary by carrier, nothing to do
+    if total_records - missing_before > 0:
+        non_null_scores = merged_data['Performance_Score'].dropna()
+        print(f"Score range: {non_null_scores.min():.3f} - {non_null_scores.max():.3f}")
+        print(f"Unique scores: {non_null_scores.nunique()}")
+        
+        # Show which carriers have data
+        carriers_with_scores = merged_data[merged_data['Performance_Score'].notna()]['Dray SCAC(FL)'].unique()
+        print(f"Carriers with performance data: {len(carriers_with_scores)}")
+        print(f"Carriers with data: {sorted(list(carriers_with_scores))[:10]}...")
+        
+        print(f"Score distribution:\n{non_null_scores.value_counts().head(10)}")
+    print(f"=============================================\n")
+    
+    # If no missing scores, nothing to do - keep existing performance data as-is
+    # Do NOT reset scores just because they're all the same value
     if missing_before == 0:
+        print("✓ All records have performance scores - no filling needed")
         return merged_data
     
     track_processing_step("Initial Assessment", f"Found {missing_before} missing performance scores")
@@ -451,13 +542,6 @@ def apply_volume_weighted_performance(merged_data):
             assignment_type = "Global Average (No Data)" if carrier in carriers_with_no_data else "Volume-Weighted Average"
             track_performance_assignment(carrier, assignment_type, weighted_avg, records_affected)
 
-    
-    # Verify all missing scores were filled
-    missing_after = merged_data['Performance_Score'].isna().sum()
-    
-    track_processing_step("Final Result", f"Filled {filled_count} missing values, {missing_after} remaining")
-    
-    return merged_data
     
     # Verify all missing scores were filled
     missing_after = merged_data['Performance_Score'].isna().sum()

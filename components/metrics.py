@@ -344,10 +344,20 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
                     
                     # If Container Numbers exists, concatenate them and recalculate Container Count
                     if 'Container Numbers' in working.columns:
-                        # Concatenate all Container Numbers for each group
+                        # Concatenate all Container Numbers for each group with deduplication
+                        def concat_and_dedupe_containers(values):
+                            """Concatenate container numbers and remove duplicates."""
+                            all_containers = []
+                            for v in values:
+                                if pd.notna(v) and str(v).strip():
+                                    all_containers.extend([c.strip() for c in str(v).split(',') if c.strip()])
+                            # CRITICAL FIX: Deduplicate to prevent same container appearing multiple times
+                            unique_containers = list(dict.fromkeys(all_containers))
+                            return ', '.join(unique_containers)
+                        
                         container_numbers_concat = (
                             working.groupby(group_cols_cheap)['Container Numbers']
-                            .apply(lambda x: ', '.join(str(v) for v in x if pd.notna(v) and str(v).strip()))
+                            .apply(concat_and_dedupe_containers)
                             .reset_index(name='_container_numbers_all')
                         )
                         
@@ -1333,9 +1343,19 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             # Concatenate all container numbers in each group
             # Concatenate all container numbers if present
             if 'Container Numbers' in working.columns:
+                def concat_and_dedupe_containers(values):
+                    """Concatenate container numbers and remove duplicates."""
+                    all_containers = []
+                    for v in values:
+                        if pd.notna(v) and str(v).strip():
+                            all_containers.extend([c.strip() for c in str(v).split(',') if c.strip()])
+                    # CRITICAL FIX: Deduplicate to prevent same container appearing multiple times
+                    unique_containers = list(dict.fromkeys(all_containers))
+                    return ', '.join(unique_containers)
+                
                 container_numbers = (
                     working.groupby(group_cols)['Container Numbers']
-                    .apply(lambda x: ', '.join(str(v) for v in x if pd.notna(v) and str(v).strip()))
+                    .apply(concat_and_dedupe_containers)
                     .reset_index(name='_container_numbers')
                 )
                 cheapest_per_group = cheapest_per_group.merge(container_numbers, on=group_cols, how='left')

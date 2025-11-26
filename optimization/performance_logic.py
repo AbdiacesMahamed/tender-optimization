@@ -143,9 +143,19 @@ def allocate_to_highest_performance(
         # Store original summed count for debugging
         best_carriers["__original_summed_count"] = best_carriers[container_column].copy()
         
+        def concatenate_and_deduplicate(values):
+            """Concatenate container numbers and remove duplicates to prevent same container appearing multiple times."""
+            all_containers = []
+            for v in values:
+                if pd.notna(v) and str(v).strip():
+                    all_containers.extend([c.strip() for c in str(v).split(',') if c.strip()])
+            # CRITICAL FIX: Deduplicate to prevent same container from being counted/assigned multiple times
+            unique_containers = list(dict.fromkeys(all_containers))  # Preserve order while deduplicating
+            return ", ".join(unique_containers)
+        
         container_number_map = (
             working.groupby(_prepare_group_columns(data), dropna=False)[container_numbers_column]
-            .apply(lambda values: ", ".join(str(v) for v in values if str(v).strip()))
+            .apply(concatenate_and_deduplicate)
             .reset_index(name="__container_numbers")
         )
         best_carriers = best_carriers.merge(

@@ -70,11 +70,8 @@ def main():
         GVTdata = validate_and_process_gvt_data(GVTdata)
         Ratedata = validate_and_process_rate_data(Ratedata)
         
-        # Merge all data
+        # Merge all data (this already calls apply_volume_weighted_performance internally)
         merged_data = merge_all_data(GVTdata, Ratedata, performance_clean, has_performance)
-        
-        # Apply volume-weighted performance calculations to fill missing data
-        merged_data = apply_volume_weighted_performance(merged_data)
     
     # Show performance assignments table
     show_performance_assignments_table()

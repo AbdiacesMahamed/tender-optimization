@@ -192,6 +192,20 @@ def process_performance_data(Performancedata, has_performance):
         # Remove the temporary Week_Column
         performance_clean = performance_melted.drop('Week_Column', axis=1)
         
+        # DEBUG: Print summary of processed performance data
+        print(f"\n=== PERFORMANCE DATA PROCESSING DEBUG ===")
+        print(f"Total performance records after processing: {len(performance_clean)}")
+        print(f"Unique carriers in performance data: {performance_clean['Carrier'].nunique()}")
+        print(f"Carrier names sample: {sorted(performance_clean['Carrier'].unique())[:10]}")
+        print(f"Week numbers in performance data: {sorted(performance_clean['Week Number'].unique())}")
+        non_null = performance_clean['Performance_Score'].notna().sum()
+        print(f"Non-null performance scores: {non_null}/{len(performance_clean)} ({non_null/len(performance_clean)*100:.1f}%)")
+        if non_null > 0:
+            scores = performance_clean['Performance_Score'].dropna()
+            print(f"Performance score range: {scores.min():.3f} - {scores.max():.3f}")
+            print(f"Unique performance scores: {scores.nunique()}")
+        print(f"==========================================\n")
+        
         # ONLY CLEAN DATA - NO BUSINESS LOGIC CALCULATIONS
         # All performance calculations (volume-weighted averages, missing value filling)
         # are handled by performance_calculator.py after merging with container data

@@ -116,10 +116,13 @@ def cascading_allocate_with_constraints(
             print(f"🔒 Found {len(excluded_data)} rows ({excluded_containers:.0f} containers) from {len(excluded_carriers)} carriers with maximum constraints: {', '.join(sorted(excluded_carriers))}")
             print(f"   These containers will be reallocated to available carriers or marked as unallocatable.")
     
-    # Determine grouping columns
+    # Determine grouping columns - must match data_processor.py grouping
+    # to prevent mixing containers from different groups
     group_columns = [lane_column]
     if category_column in data.columns:
         group_columns.insert(0, category_column)
+    if 'Facility' in data.columns:
+        group_columns.append('Facility')
     if 'Terminal' in data.columns:
         group_columns.append('Terminal')
     if week_column in data.columns and week_column not in group_columns:
@@ -268,6 +271,11 @@ def _cascading_allocate_single_group(
     # Add excluded container numbers to the pool
     all_container_numbers.extend(excluded_container_numbers)
     
+    # CRITICAL FIX: Deduplicate container IDs to prevent the same container from being assigned to multiple carriers
+    # This can happen when the same container appears under multiple carriers in the input data
+    # Each physical container should only be allocated once
+    all_container_numbers = list(dict.fromkeys(all_container_numbers))  # Preserve order while deduplicating
+    
     # CRITICAL: Use actual container ID count as the source of truth
     # This ensures allocations are based on real container IDs, not potentially mismatched Container Count values
     if all_container_numbers:
@@ -384,7 +392,23 @@ def _cascading_allocate_single_group(
     
     result = pd.DataFrame(result_rows)
     
-    # CRITICAL: Recalculate Container Count from Container Numbers after assignment
+    # CRITICAL: Deduplicate Container Numbers across all rows before counting
+    # This removes any container that appears in multiple carrier rows
+    if container_numbers_column in result.columns:
+        seen_containers = set()
+        for idx in result.index:
+            container_str = result.at[idx, container_numbers_column]
+            if pd.notna(container_str) and str(container_str).strip():
+                containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
+                # Keep only containers not seen before
+                unique_containers = []
+                for c in containers:
+                    if c not in seen_containers:
+                        seen_containers.add(c)
+                        unique_containers.append(c)
+                result.at[idx, container_numbers_column] = ", ".join(unique_containers) if unique_containers else ""
+    
+    # CRITICAL: Recalculate Container Count from Container Numbers after deduplication
     # This ensures Container Count always matches the actual number of IDs in Container Numbers
     if container_numbers_column in result.columns:
         def count_containers_in_string(container_str):
