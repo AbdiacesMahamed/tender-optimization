@@ -31,11 +31,11 @@ except Exception as e:
     print(f"   ✗ optimization.performance_logic FAILED: {e}")
 
 try:
-    print("\n4. Testing optimization.cheapest_logic import...")
-    from optimization.cheapest_logic import allocate_to_cheapest_carrier
-    print("   ✓ optimization.cheapest_logic OK")
+    print("\n4. Testing utils import...")
+    from components.utils import get_rate_columns, count_containers, parse_container_ids
+    print("   ✓ utils OK")
 except Exception as e:
-    print(f"   ✗ optimization.cheapest_logic FAILED: {e}")
+    print(f"   ✗ utils FAILED: {e}")
 
 try:
     print("\n5. Testing constraints_processor import DIRECTLY...")

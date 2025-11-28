@@ -47,7 +47,10 @@ def filter_historical_weeks(
     """
     Filter data to include only historical (completed) weeks.
     
-    Excludes the current week and any future weeks based on the reference date.
+    Note: This function now returns all data with valid week numbers since
+    week-of-year comparisons don't work across year boundaries. The actual
+    filtering to "last N weeks" is done in get_last_n_weeks by taking the
+    N most recent week numbers from the data.
     
     Parameters
     ----------
@@ -56,12 +59,12 @@ def filter_historical_weeks(
     week_column : str
         Name of the column containing week numbers
     reference_date : datetime, optional
-        Reference date for determining current week. If None, uses today.
+        Reference date (currently unused, kept for API compatibility)
     
     Returns
     -------
     pd.DataFrame
-        Filtered data containing only historical weeks
+        Data with valid week numbers
     """
     if data is None or data.empty:
         return pd.DataFrame()
@@ -69,11 +72,9 @@ def filter_historical_weeks(
     if week_column not in data.columns:
         raise ValueError(f"Column '{week_column}' not found in data")
     
-    # Get current week number
-    current_week = get_current_week_number(reference_date)
-    
-    # Filter to only include weeks before the current week
-    historical_data = data[data[week_column] < current_week].copy()
+    # Return all data with valid week numbers
+    # The get_last_n_weeks function will select the most recent N weeks
+    historical_data = data[data[week_column].notna()].copy()
     
     return historical_data
 
@@ -85,36 +86,39 @@ def get_last_n_weeks(
     reference_date: datetime | None = None,
 ) -> pd.DataFrame:
     """
-    Get data for the last N completed weeks (excluding current and future).
+    Get data for the last N weeks present in the data.
+    
+    Simply takes the N highest week numbers from the available data.
+    This approach works regardless of year boundaries since it doesn't
+    compare against a "current" week.
     
     Parameters
     ----------
     data : pd.DataFrame
         Input data with week numbers
     n_weeks : int, default=5
-        Number of historical weeks to include
+        Number of weeks to include
     week_column : str
         Name of the column containing week numbers
     reference_date : datetime, optional
-        Reference date for determining current week. If None, uses today.
+        Reference date (currently unused, kept for API compatibility)
     
     Returns
     -------
     pd.DataFrame
-        Data for the last N completed weeks
+        Data for the last N weeks in the dataset
     """
-    # First filter to only historical weeks
+    # First filter to only rows with valid week numbers
     historical_data = filter_historical_weeks(data, week_column, reference_date)
     
     if historical_data.empty:
         return pd.DataFrame()
     
-    # Get the last N weeks from historical data
-    historical_data = historical_data.sort_values(week_column, ascending=False)
-    unique_weeks = historical_data[week_column].unique()
+    # Get unique weeks and sort descending to find the most recent N
+    unique_weeks = sorted(historical_data[week_column].dropna().unique(), reverse=True)
     
     # Take the most recent N weeks
-    last_n_weeks = sorted(unique_weeks[:n_weeks])
+    last_n_weeks = unique_weeks[:n_weeks]
     
     # Filter to only those weeks
     result = historical_data[historical_data[week_column].isin(last_n_weeks)].copy()

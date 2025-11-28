@@ -282,7 +282,7 @@ def format_flip_details(trace_result, show_container_ids=True, max_carriers=5):
         if show_container_ids and all_original_containers:
             container_list = ', '.join(all_original_containers[:3])
             if len(all_original_containers) > 3:
-                container_list += f"... ({original_count} total)"
+                container_list += f"... ({original_count})"
             parts.append(f"Had {original_count} [{container_list}]")
         else:
             parts.append(f"Had {original_count}")
@@ -308,7 +308,7 @@ def format_flip_details(trace_result, show_container_ids=True, max_carriers=5):
                     containers = flip_containers_by_source.get(carrier, [])
                     container_list = ', '.join(containers[:2])
                     if len(containers) > 2:
-                        container_list += f"... ({count} total)"
+                        container_list += f"... ({count})"
                     changes.append(f"From {carrier} (+{count}) [{container_list}]")
                 elif len(sorted_flips) <= max_carriers:
                     flip_parts = []
@@ -355,7 +355,7 @@ def format_flip_details(trace_result, show_container_ids=True, max_carriers=5):
             if show_container_ids and lost_containers:
                 container_list = ', '.join(lost_containers[:2])
                 if len(lost_containers) > 2:
-                    container_list += f"... ({lost_count} total)"
+                    container_list += f"... ({lost_count})"
                 changes.append(f"Lost {lost_count} [{container_list}]")
             else:
                 changes.append(f"Lost {lost_count}")

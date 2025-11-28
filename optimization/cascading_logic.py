@@ -36,6 +36,7 @@ def cascading_allocate_with_constraints(
     week_column: str = "Week Number",
     category_column: str = "Category",
     excluded_carriers: set = None,
+    historical_data: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
     Allocate containers using cascading logic with historical volume constraints.
@@ -72,6 +73,10 @@ def cascading_allocate_with_constraints(
     excluded_carriers : set, optional
         Set of carrier names to EXCLUDE from receiving any volume allocation.
         These carriers have maximum constraints and should not get additional volume.
+    historical_data : pd.DataFrame, optional
+        Unfiltered data to use for calculating historical volume shares.
+        If not provided, uses the main data parameter.
+        This ensures historical percentages are stable regardless of UI filters.
     
     Returns
     -------
@@ -86,6 +91,9 @@ def cascading_allocate_with_constraints(
     """
     if data is None or data.empty:
         return pd.DataFrame()
+    
+    # Use historical_data for volume share calculation if provided, otherwise use data
+    hist_data_source = historical_data if historical_data is not None else data
     
     # Default to empty set if not provided
     if excluded_carriers is None:
@@ -128,10 +136,11 @@ def cascading_allocate_with_constraints(
     if week_column in data.columns and week_column not in group_columns:
         group_columns.append(week_column)
     
-    # Get historical allocation percentages
+    # Get historical allocation percentages using unfiltered data source
+    # This ensures historical percentages are stable regardless of UI filters
     try:
         historical_share = calculate_carrier_volume_share(
-            data,
+            hist_data_source,
             n_weeks=n_historical_weeks,
             carrier_column=carrier_column,
             container_column=container_column,

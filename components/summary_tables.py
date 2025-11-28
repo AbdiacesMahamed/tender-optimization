@@ -4,21 +4,8 @@ Summary tables module for the Carrier Tender Optimization Dashboard
 import streamlit as st
 import pandas as pd
 from .config_styling import section_header
+from .utils import get_rate_columns
 
-def get_rate_columns():
-    """Get the appropriate rate column names based on selected rate type"""
-    rate_type = st.session_state.get('rate_type', 'Base Rate')
-    
-    if rate_type == 'CPC':
-        return {
-            'rate': 'CPC',
-            'total_rate': 'Total CPC'
-        }
-    else:
-        return {
-            'rate': 'Base Rate',
-            'total_rate': 'Total Rate'
-        }
 
 def show_summary_tables(final_filtered_data):
     """Display comprehensive summary tables"""

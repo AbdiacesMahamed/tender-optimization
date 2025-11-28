@@ -5,58 +5,13 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from .config_styling import section_header
+from .utils import (
+    get_rate_columns, safe_numeric, format_currency, format_percentage,
+    get_grouping_columns, count_containers, parse_container_ids,
+    concat_and_dedupe_containers, filter_excluded_carrier_facility_rows
+)
 from optimization.performance_logic import allocate_to_highest_performance
 from .container_tracer import add_detailed_carrier_flips_column, get_container_movement_summary
-
-# ==================== HELPER FUNCTIONS ====================
-
-def get_rate_columns():
-    """Get the appropriate rate column names based on selected rate type"""
-    rate_type = st.session_state.get('rate_type', 'Base Rate')
-    
-    if rate_type == 'CPC':
-        return {
-            'rate': 'CPC',
-            'total_rate': 'Total CPC'
-        }
-    else:  # Base Rate (default)
-        return {
-            'rate': 'Base Rate',
-            'total_rate': 'Total Rate'
-        }
-
-def safe_numeric(value):
-    """Convert any value to float, stripping formatting if needed"""
-    if pd.isna(value):
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        cleaned = value.replace('$', '').replace(',', '').replace('%', '').strip()
-        try:
-            return float(cleaned)
-        except ValueError:
-            return 0.0
-    return 0.0
-
-def format_currency(value):
-    """Format as currency"""
-    return f"${value:,.2f}" if pd.notna(value) and value != 0 else "N/A"
-
-def format_percentage(value):
-    """Format as percentage"""
-    return f"{value:.1%}" if pd.notna(value) else "N/A"
-
-def get_grouping_columns(data, base_cols=['Discharged Port', 'Lane', 'Facility', 'Week Number']):
-    """Get grouping columns including Category if it exists"""
-def get_grouping_columns(data, base_cols=['Discharged Port', 'Lane', 'Facility', 'Week Number']):
-    """Get grouping columns including Category if it exists"""
-    cols = base_cols.copy()
-    if 'Category' in data.columns and 'Category' not in cols:
-        cols.insert(0, 'Category')
-    if 'Terminal' in data.columns and 'Terminal' not in cols:
-        cols.append('Terminal')
-    return [c for c in cols if c in data.columns]
 
 def add_carrier_flips_column(current_data, original_data, carrier_col='Dray SCAC(FL)'):
     """
@@ -157,9 +112,7 @@ def add_carrier_flips_column(current_data, original_data, carrier_col='Dray SCAC
     
     current_data['Carrier Flips'] = flips
     return current_data
-    if 'Category' in data.columns and 'Category' not in cols:
-        cols.insert(1, 'Category')  # Add Category after first column
-    return cols
+
 
 def add_missing_rate_rows(display_data, source_data, carrier_col='Dray SCAC(FL)'):
     """Add back rows for missing rate data, preserving carrier information"""
@@ -199,7 +152,7 @@ def add_missing_rate_rows(display_data, source_data, carrier_col='Dray SCAC(FL)'
 
 # ==================== METRICS CALCULATION ====================
 
-def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_carriers=None, carrier_facility_exclusions=None):
+def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_carriers=None, carrier_facility_exclusions=None, full_unfiltered_data=None):
     """Calculate comprehensive metrics for the dashboard
     
     Args:
@@ -211,9 +164,15 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
                                  These carriers should NOT receive additional volume in optimization.
         carrier_facility_exclusions: Optional - dict mapping carrier names to sets of normalized facility codes
                                      where the carrier should NOT receive volume (e.g., {'XPDR': {'HGR6', 'BWI4'}}).
+        full_unfiltered_data: Optional - the complete unfiltered dataset before any UI filters.
+                              Used for calculating historical volume shares so they remain stable
+                              regardless of the current filter view.
     """
     if data is None or len(data) == 0:
         return None
+    
+    # Store full_unfiltered_data for use in optimization
+    historical_data_source = full_unfiltered_data if full_unfiltered_data is not None else data
     
     # Get rate columns based on selected rate type - cache this
     rate_cols = get_rate_columns()
@@ -235,41 +194,6 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
     # Store carrier_facility_exclusions for later use in scenario calculations
     if carrier_facility_exclusions is None:
         carrier_facility_exclusions = {}
-    
-    # Helper function to filter out excluded carrier+facility combinations from scenario data
-    def filter_excluded_carrier_facility_rows(df, exclusions_dict, carrier_col='Dray SCAC(FL)'):
-        """Filter out rows where a carrier is excluded from a specific facility.
-        
-        For scenario calculations, we want to prevent certain carriers from being selected
-        at certain facilities. This function removes those rows so the scenario algorithms
-        don't consider them as valid carrier options.
-        """
-        if not exclusions_dict or df.empty:
-            return df
-        
-        # Create a mask for rows to KEEP (i.e., NOT excluded)
-        keep_mask = pd.Series([True] * len(df), index=df.index)
-        
-        if 'Facility' not in df.columns:
-            return df
-        
-        for carrier, excluded_facilities in exclusions_dict.items():
-            if not excluded_facilities:
-                continue
-            # For each row, check if it matches the excluded carrier AND an excluded facility
-            for excluded_fc in excluded_facilities:
-                carrier_match = df[carrier_col] == carrier
-                # Normalize facility - compare first 4 chars
-                facility_match = df['Facility'].str[:4].str.upper() == excluded_fc.upper()[:4]
-                # Mark these rows to be removed
-                keep_mask &= ~(carrier_match & facility_match)
-        
-        filtered_df = df[keep_mask].copy()
-        removed_count = len(df) - len(filtered_df)
-        if removed_count > 0:
-            print(f"📍 Filtered out {removed_count} rows from scenario data due to carrier+facility exclusions")
-        
-        return filtered_df
 
     # If there are no rows with rates, continue but note rate-based metrics will be zero/defaults
     
@@ -425,6 +349,7 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
                 carrier_column=carrier_col,
                 container_column='Container Count',
                 excluded_carriers=max_constrained_carriers,  # Exclude carriers with maximum constraints
+                historical_data=historical_data_source,  # Use unfiltered data for stable historical percentages
             )
             
             if optimized_allocated is not None and len(optimized_allocated) > 0:
@@ -612,7 +537,7 @@ def display_current_metrics(metrics, constrained_data=None, unconstrained_data=N
     
     st.markdown("---")
 
-def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics=None, max_constrained_carriers=None, carrier_facility_exclusions=None):
+def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics=None, max_constrained_carriers=None, carrier_facility_exclusions=None, full_unfiltered_data=None):
     """Show detailed analysis table - uses same data source as Cost Analysis Dashboard
     
     Args:
@@ -622,8 +547,12 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         metrics: Pre-calculated metrics (optional)
         max_constrained_carriers: Set of carriers with maximum constraints (optional)
         carrier_facility_exclusions: Dict mapping carrier names to sets of excluded facility codes (optional)
+        full_unfiltered_data: Complete unfiltered dataset for stable historical calculations (optional)
     """
     section_header("📋 Detailed Analysis Table")
+    
+    # Use full_unfiltered_data for historical calculations if provided
+    historical_data_source = full_unfiltered_data if full_unfiltered_data is not None else final_filtered_data
     
     # Default to empty set if not provided
     if max_constrained_carriers is None:
@@ -632,41 +561,6 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     # Default to empty dict if not provided
     if carrier_facility_exclusions is None:
         carrier_facility_exclusions = {}
-    
-    # Helper function to filter out excluded carrier+facility combinations from scenario data
-    def filter_excluded_carrier_facility_rows(df, exclusions_dict, carrier_col='Dray SCAC(FL)'):
-        """Filter out rows where a carrier is excluded from a specific facility.
-        
-        For scenario calculations, we want to prevent certain carriers from being selected
-        at certain facilities. This function removes those rows so the scenario algorithms
-        don't consider them as valid carrier options.
-        """
-        if not exclusions_dict or df.empty:
-            return df
-        
-        # Create a mask for rows to KEEP (i.e., NOT excluded)
-        keep_mask = pd.Series([True] * len(df), index=df.index)
-        
-        if 'Facility' not in df.columns:
-            return df
-        
-        for carrier, excluded_facilities in exclusions_dict.items():
-            if not excluded_facilities:
-                continue
-            # For each row, check if it matches the excluded carrier AND an excluded facility
-            for excluded_fc in excluded_facilities:
-                carrier_match = df[carrier_col] == carrier
-                # Normalize facility - compare first 4 chars
-                facility_match = df['Facility'].str[:4].str.upper() == excluded_fc.upper()[:4]
-                # Mark these rows to be removed
-                keep_mask &= ~(carrier_match & facility_match)
-        
-        filtered_df = df[keep_mask].copy()
-        removed_count = len(df) - len(filtered_df)
-        if removed_count > 0:
-            print(f"📍 Filtered out {removed_count} carrier+facility rows from scenario options due to exclusion rules")
-        
-        return filtered_df
     
     bal_wk47_final = final_filtered_data[
         (final_filtered_data['Discharged Port'] == 'BAL') & 
@@ -759,8 +653,16 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             
             constrained_display['Container Count'] = constrained_display['Container Numbers'].apply(count_containers_from_string)
         
-        # Prepare constrained data for display
+        # ADD CARRIER FLIPS COLUMN for constrained data
+        # Compare against original data (final_filtered_data) to show what changed due to constraints
         carrier_col_c = 'Carrier' if 'Carrier' in constrained_display.columns else 'Dray SCAC(FL)'
+        constrained_display = add_detailed_carrier_flips_column(constrained_display, final_filtered_data, carrier_col=carrier_col_c)
+        
+        # Rename column to just "Carrier Flips" for cleaner display
+        if 'Carrier Flips (Detailed)' in constrained_display.columns:
+            constrained_display.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
+        
+        # Prepare constrained data for display
         cols_c = ['Discharged Port']
         if 'Category' in constrained_display.columns:
             cols_c.append('Category')
@@ -770,6 +672,10 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         cols_c.append('Week Number')
         if 'Container Numbers' in constrained_display.columns:
             cols_c.append('Container Numbers')
+        
+        # Add Carrier Flips column (shows original count and movements)
+        if 'Carrier Flips' in constrained_display.columns:
+            cols_c.append('Carrier Flips')
         
         # Add selected rate columns
         cols_c.append('Container Count')
@@ -932,6 +838,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                     carrier_column=carrier_col,
                     container_column='Container Count',
                     excluded_carriers=max_constrained_carriers,  # Exclude carriers with maximum constraints
+                    historical_data=historical_data_source,  # Use unfiltered data for stable historical calculations
                 )
             except (ValueError, ImportError) as exc:
                 st.warning(f"Unable to build optimized scenario: {exc}")

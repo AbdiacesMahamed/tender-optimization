@@ -8,21 +8,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from .config_styling import section_header
+from .utils import get_rate_columns
 
-def get_rate_columns():
-    """Get the appropriate rate column names based on selected rate type"""
-    rate_type = st.session_state.get('rate_type', 'Base Rate')
-    
-    if rate_type == 'CPC':
-        return {
-            'rate': 'CPC',
-            'total_rate': 'Total CPC'
-        }
-    else:
-        return {
-            'rate': 'Base Rate',
-            'total_rate': 'Total Rate'
-        }
 
 def show_interactive_visualizations(final_filtered_data):
     """Display interactive visualizations section"""

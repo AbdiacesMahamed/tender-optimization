@@ -6,33 +6,9 @@ Version: 2025-11-25 - Moved constraint processing messages to downloadable CSV s
 import pandas as pd
 import streamlit as st
 import math
-
-
-# ==================== HELPER FUNCTIONS FOR CONTAINER-LEVEL TRACKING ====================
-
-def normalize_facility_code(facility_str):
-    """
-    Normalize facility code to first 4 characters for comparison
-    Examples: 'HGR6-5' -> 'HGR6', 'IUSF' -> 'IUSF', 'GBPT-3' -> 'GBPT'
-    """
-    if pd.isna(facility_str) or not str(facility_str).strip():
-        return ''
-    # Convert to string and strip whitespace
-    fc = str(facility_str).strip().upper()
-    # Take first 4 characters
-    return fc[:4] if len(fc) >= 4 else fc
-
-
-def split_container_numbers(container_str):
-    """Split container numbers string into list of container IDs"""
-    if pd.isna(container_str) or not str(container_str).strip():
-        return []
-    return [c.strip() for c in str(container_str).split(',') if c.strip()]
-
-
-def join_container_numbers(container_list):
-    """Join list of container IDs into comma-separated string"""
-    return ', '.join(str(c) for c in container_list if c)
+from .utils import (
+    normalize_facility_code, parse_container_ids, join_container_ids
+)
 
 
 def allocate_specific_containers(row, num_containers, allocated_tracker, target_carrier, week_num):
@@ -49,7 +25,7 @@ def allocate_specific_containers(row, num_containers, allocated_tracker, target_
     Returns:
         tuple: (allocated_container_ids, remaining_container_ids)
     """
-    container_ids = split_container_numbers(row.get('Container Numbers', ''))
+    container_ids = parse_container_ids(row.get('Container Numbers', ''))
     
     # Filter out already-allocated containers
     available_ids = [cid for cid in container_ids if cid not in allocated_tracker]
@@ -238,13 +214,14 @@ def process_constraints_file(constraints_file):
         return None
 
 
-def apply_constraints_to_data(data, constraints_df):
+def apply_constraints_to_data(data, constraints_df, rate_data=None):
     """
     Apply constraints to data based on priority score
     
     Args:
         data: DataFrame with comprehensive data
         constraints_df: DataFrame with constraints sorted by priority
+        rate_data: Optional DataFrame with rate data (used to find capable carriers for lanes)
     
     Returns:
         constrained_data: DataFrame with containers locked by constraints
@@ -404,12 +381,42 @@ def apply_constraints_to_data(data, constraints_df):
                                 if facility_norm not in alt_excluded:
                                     available_carriers.append(alt_carrier)
                         
+                        # If no available carriers in current data, check rate data for capable carriers
+                        if not available_carriers and rate_data is not None:
+                            # Look up carriers from rate data that have rates for this lane
+                            if 'Lane' in rate_data.columns and 'Lookup' in rate_data.columns:
+                                rate_carriers_for_lane = rate_data[rate_data['Lane'] == lane]
+                                
+                                if len(rate_carriers_for_lane) > 0:
+                                    # Extract carrier from Lookup column (format: CARRIER + PORT + FC)
+                                    for _, rate_row in rate_carriers_for_lane.iterrows():
+                                        lookup_val = str(rate_row.get('Lookup', ''))
+                                        # The Lookup format is: CARRIER + PORT + FC (e.g., "ATMIUSBALBWI4")
+                                        # Carrier SCAC is typically 4 chars at the start
+                                        if lookup_val and len(lookup_val) >= 4:
+                                            potential_carrier = lookup_val[:4]
+                                            # Check: not the excluded carrier, not already in list
+                                            if (potential_carrier != carrier and 
+                                                potential_carrier not in available_carriers and
+                                                potential_carrier.strip() != ''):
+                                                # Check if this carrier has an FC exclusion for this facility
+                                                carrier_excluded_fcs = carrier_facility_exclusions.get(potential_carrier, set())
+                                                if facility_norm not in carrier_excluded_fcs:
+                                                    # Check if carrier has a maximum constraint that's already met
+                                                    # (We can't fully check this here since we don't know current allocations,
+                                                    # but at least we filter out carriers with FC exclusions)
+                                                    available_carriers.append(potential_carrier)
+                                    
+                                    if available_carriers:
+                                        log_explanation(f"Found {len(available_carriers)} capable carrier(s) from rate data for lane {lane}: {', '.join(available_carriers[:5])}", 'info')
+                        
                         if available_carriers:
                             # Pick the first available carrier (could be enhanced to pick by rate/performance)
                             new_carrier = available_carriers[0]
                             remaining_data.loc[idx, carrier_col] = new_carrier
                             if 'Carrier' in remaining_data.columns and carrier_col != 'Carrier':
                                 remaining_data.loc[idx, 'Carrier'] = new_carrier
+                            
                             containers_reallocated += container_count
                             log_explanation(f"Reallocated {container_count} container(s) at {facility} from {carrier} → {new_carrier}", 'reallocation')
                         else:
@@ -558,7 +565,7 @@ def apply_constraints_to_data(data, constraints_df):
         # For each row, calculate how many containers are available (not already allocated)
         available_container_counts = []
         for idx_val, row in eligible_data.iterrows():
-            container_ids = split_container_numbers(row.get('Container Numbers', ''))
+            container_ids = parse_container_ids(row.get('Container Numbers', ''))
             available_ids = [cid for cid in container_ids if cid not in allocated_containers_tracker]
             available_container_counts.append(len(available_ids))
         
@@ -699,7 +706,7 @@ def apply_constraints_to_data(data, constraints_df):
                 if len(allocated_ids) > 0:
                     # Create constrained record with ONLY the allocated container IDs
                     constrained_record = row.copy()
-                    constrained_record['Container Numbers'] = join_container_numbers(allocated_ids)
+                    constrained_record['Container Numbers'] = join_container_ids(allocated_ids)
                     constrained_record['Container Count'] = len(allocated_ids)
                     
                     # ASSIGN to target carrier (override existing carrier)
@@ -724,7 +731,7 @@ def apply_constraints_to_data(data, constraints_df):
                     # Update remaining_data: Remove allocated containers from this row
                     if len(remaining_ids) > 0:
                         # Partial allocation - update with remaining containers
-                        remaining_data.loc[row_idx, 'Container Numbers'] = join_container_numbers(remaining_ids)
+                        remaining_data.loc[row_idx, 'Container Numbers'] = join_container_ids(remaining_ids)
                         remaining_data.loc[row_idx, 'Container Count'] = len(remaining_ids)
                     else:
                         # Full allocation - mark row for removal (set container count to 0)

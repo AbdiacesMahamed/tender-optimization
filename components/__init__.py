@@ -2,6 +2,22 @@
 Main imports file for all dashboard components
 """
 
+# Shared utilities (import first as other modules depend on these)
+from .utils import (
+    get_rate_columns,
+    count_containers,
+    parse_container_ids,
+    join_container_ids,
+    concat_and_dedupe_containers,
+    get_grouping_columns,
+    normalize_facility_code,
+    safe_numeric,
+    format_currency,
+    format_percentage,
+    format_number,
+    filter_excluded_carrier_facility_rows
+)
+
 # Configuration and styling
 from .config_styling import configure_page, apply_custom_css, show_header, section_header
 
@@ -57,13 +73,17 @@ from .constraints_processor import (
 # Import optimization functions - imported after components to avoid circular dependencies
 try:
     from optimization.performance_logic import allocate_to_highest_performance
-    from optimization.cheapest_logic import allocate_to_cheapest_carrier
 except ImportError:
     # Fallback if optimization module is not available
     allocate_to_highest_performance = None
-    allocate_to_cheapest_carrier = None
 
 __all__ = [
+    # Utilities
+    'get_rate_columns', 'count_containers', 'parse_container_ids', 'join_container_ids',
+    'concat_and_dedupe_containers', 'get_grouping_columns', 'normalize_facility_code',
+    'safe_numeric', 'format_currency', 'format_percentage', 'format_number',
+    'filter_excluded_carrier_facility_rows',
+    
     # Configuration
     'configure_page', 'apply_custom_css', 'show_header', 'section_header',
     
@@ -97,5 +117,3 @@ __all__ = [
 # Add optimization functions if they were successfully imported
 if allocate_to_highest_performance is not None:
     __all__.append('allocate_to_highest_performance')
-if allocate_to_cheapest_carrier is not None:
-    __all__.append('allocate_to_cheapest_carrier')

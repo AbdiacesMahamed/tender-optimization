@@ -4,7 +4,6 @@ Optimization module for Carrier Tender Optimization Dashboard.
 This module contains various optimization strategies for carrier allocation:
 - Linear Programming optimization (cost vs performance trade-off)
 - Cascading allocation (LP + historical volume constraints)
-- Cheapest carrier allocation
 - Highest performance carrier allocation
 - Historic volume analysis (carrier market share based on last 5 weeks)
 
@@ -17,7 +16,6 @@ from .optimization import (
 )
 from .linear_programming import optimize_carrier_allocation
 from .cascading_logic import cascading_allocate_with_constraints
-from .cheapest_logic import allocate_to_cheapest_carrier
 from .performance_logic import allocate_to_highest_performance
 from .historic_volume import (
     calculate_carrier_volume_share,
@@ -36,7 +34,6 @@ __all__ = [
     'calculate_optimization_metrics',
     'optimize_carrier_allocation',
     'cascading_allocate_with_constraints',
-    'allocate_to_cheapest_carrier',
     'allocate_to_highest_performance',
     # Historic volume analysis
     'calculate_carrier_volume_share',

@@ -108,8 +108,9 @@ def main():
             
             if constraints_df is not None:
                 # Apply constraints to filtered data
+                # Pass Ratedata so we can find capable carriers for lanes when reallocation is needed
                 constrained_data, unconstrained_data, constraint_summary, max_constrained_carriers, carrier_facility_exclusions, explanation_logs = apply_constraints_to_data(
-                    final_filtered_data, constraints_df
+                    final_filtered_data, constraints_df, Ratedata
                 )
                 
                 # Show constraint summary
@@ -125,7 +126,8 @@ def main():
     # only run on unconstrained containers when constraints are active
     # Pass max_constrained_carriers so optimization knows which carriers have hard caps
     # Pass carrier_facility_exclusions so scenarios respect facility-level exclusions
-    metrics = calculate_enhanced_metrics(final_filtered_data, unconstrained_data, max_constrained_carriers, carrier_facility_exclusions)
+    # Pass comprehensive_data as full_unfiltered_data so historical calculations are stable
+    metrics = calculate_enhanced_metrics(final_filtered_data, unconstrained_data, max_constrained_carriers, carrier_facility_exclusions, comprehensive_data)
     
     if metrics is None:
         st.warning("⚠️ No data available after applying filters.")
@@ -136,7 +138,8 @@ def main():
     
     # Show detailed analysis table with constrained and unconstrained data
     # Pass carrier_facility_exclusions so scenarios respect facility-level exclusions
-    show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics, max_constrained_carriers, carrier_facility_exclusions)
+    # Pass comprehensive_data as full_unfiltered_data so historical calculations are stable
+    show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics, max_constrained_carriers, carrier_facility_exclusions, comprehensive_data)
     
     # 🔬 DIAGNOSTIC TOOL - Enable to debug container count discrepancies
     
@@ -146,7 +149,7 @@ def main():
     # Show interactive visualizations
     show_interactive_visualizations(final_filtered_data)
     
-    # Show historic volume analysis at the bottom
+    # Show historic volume analysis at the bottom (uses filtered data to match current view)
     st.markdown("---")
     show_historic_volume_analysis(final_filtered_data, n_weeks=5)
     

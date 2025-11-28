@@ -8,21 +8,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
 from .config_styling import section_header
+from .utils import get_rate_columns
 
-def get_rate_columns():
-    """Get the appropriate rate column names based on selected rate type"""
-    rate_type = st.session_state.get('rate_type', 'Base Rate')
-    
-    if rate_type == 'CPC':
-        return {
-            'rate': 'CPC',
-            'total_rate': 'Total CPC'
-        }
-    else:
-        return {
-            'rate': 'Base Rate',
-            'total_rate': 'Total Rate'
-        }
 
 def show_advanced_analytics(final_filtered_data):
     """Display advanced analytics section"""

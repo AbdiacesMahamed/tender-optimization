@@ -3,7 +3,6 @@ Main Optimization Module - Orchestrates all optimization strategies
 
 This module provides a unified interface to all carrier allocation strategies:
 - Linear Programming (weighted cost/performance optimization)
-- Cheapest carrier allocation
 - Highest performance carrier allocation
 
 It serves as the main entry point for optimization operations.
@@ -14,11 +13,10 @@ from typing import Literal
 import pandas as pd
 
 from .linear_programming import optimize_carrier_allocation as lp_optimize
-from .cheapest_logic import allocate_to_cheapest_carrier
 from .performance_logic import allocate_to_highest_performance
 
 
-OptimizationStrategy = Literal["linear_programming", "cheapest", "performance"]
+OptimizationStrategy = Literal["linear_programming", "performance"]
 
 
 def optimize_allocation(
@@ -42,7 +40,6 @@ def optimize_allocation(
     strategy : OptimizationStrategy
         The optimization strategy to use:
         - "linear_programming": Weighted optimization balancing cost and performance
-        - "cheapest": Allocate all containers to the cheapest carrier per lane
         - "performance": Allocate all containers to the highest-performing carrier per lane
     cost_weight : float, default=0.7
         Weight for cost optimization (only used with linear_programming strategy)
@@ -64,9 +61,6 @@ def optimize_allocation(
     >>> result = optimize_allocation(data, strategy="linear_programming", 
     ...                              cost_weight=0.8, performance_weight=0.2)
     
-    # Cheapest carrier allocation
-    >>> result = optimize_allocation(data, strategy="cheapest")
-    
     # Highest performance allocation
     >>> result = optimize_allocation(data, strategy="performance")
     """
@@ -81,16 +75,13 @@ def optimize_allocation(
             **kwargs
         )
     
-    elif strategy == "cheapest":
-        return allocate_to_cheapest_carrier(data, **kwargs)
-    
     elif strategy == "performance":
         return allocate_to_highest_performance(data, **kwargs)
     
     else:
         raise ValueError(
             f"Unknown strategy: {strategy}. "
-            f"Valid options: 'linear_programming', 'cheapest', 'performance'"
+            f"Valid options: 'linear_programming', 'performance'"
         )
 
 

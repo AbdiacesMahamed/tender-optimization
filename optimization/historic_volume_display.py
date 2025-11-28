@@ -14,7 +14,6 @@ from .historic_volume import (
     calculate_carrier_volume_share,
     calculate_carrier_weekly_trends,
     get_carrier_lane_participation,
-    get_current_week_number,
 )
 
 
@@ -37,27 +36,40 @@ def show_historic_volume_analysis(
     """
     st.header("📊 Historic Volume Analysis")
     
-    current_week = get_current_week_number(reference_date)
-    
-    st.info(
-        f"📅 Current Week: **Week {current_week}** | "
-        f"Analyzing last **{n_weeks} completed weeks** (excluding current and future weeks)"
-    )
-    
     if data is None or data.empty:
         st.warning("⚠️ No data available for historic volume analysis.")
         return
+    
+    # Show available weeks in data
+    if 'Week Number' in data.columns:
+        available_weeks = sorted(data['Week Number'].dropna().unique())
+        total_containers_in_data = data['Container Count'].sum() if 'Container Count' in data.columns else 0
+        num_available_weeks = len(available_weeks)
+        st.info(
+            f"📅 Available weeks in data: **{min(available_weeks)} - {max(available_weeks)}** ({num_available_weeks} weeks) | "
+            f"Total containers: **{total_containers_in_data:,.0f}**"
+        )
+    else:
+        num_available_weeks = 5  # Default fallback
     
     # Configuration
     col1, col2 = st.columns([1, 3])
     
     with col1:
-        n_weeks = st.selectbox(
+        # Build options list - include "All" option that uses all available weeks
+        week_options = ["All", 3, 4, 5, 6, 8, 10]
+        n_weeks_selection = st.selectbox(
             "Weeks to Analyze",
-            options=[3, 4, 5, 6, 8, 10],
-            index=2,  # Default to 5
-            help="Number of completed weeks to include in analysis"
+            options=week_options,
+            index=0,  # Default to "All"
+            help="Number of weeks to include in analysis. 'All' uses all available weeks."
         )
+        
+        # Convert selection to actual number
+        if n_weeks_selection == "All":
+            n_weeks = num_available_weeks if 'Week Number' in data.columns else 999
+        else:
+            n_weeks = n_weeks_selection
     
     with col2:
         st.write("")  # Spacing
@@ -114,7 +126,7 @@ def show_historic_volume_analysis(
 def show_market_share_analysis(volume_share: pd.DataFrame, n_weeks: int):
     """Display carrier market share analysis."""
     
-    st.subheader(f"Carrier Market Share (Last {n_weeks} Weeks)")
+    st.subheader(f"Carrier Market Share")
     
     # Summary metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -128,8 +140,17 @@ def show_market_share_analysis(volume_share: pd.DataFrame, n_weeks: int):
         st.metric("Total Lanes", total_lanes)
     
     with col3:
-        total_containers = volume_share['Total_Containers'].sum()
-        st.metric("Total Containers", f"{total_containers:,.0f}")
+        # Calculate actual container total from lane totals (avoid double counting across carriers)
+        # Get unique lane totals - each lane's containers should only be counted once
+        lane_cols = ['Lane']
+        if 'Category' in volume_share.columns:
+            lane_cols.insert(0, 'Category')
+        if 'Terminal' in volume_share.columns:
+            lane_cols.append('Terminal')
+        
+        # Get unique lane totals (one entry per lane/category/terminal combination)
+        unique_lane_totals = volume_share.drop_duplicates(subset=lane_cols)['Lane_Total_Containers'].sum()
+        st.metric("Total Containers", f"{unique_lane_totals:,.0f}")
     
     with col4:
         avg_share = volume_share['Volume_Share_Pct'].mean()
