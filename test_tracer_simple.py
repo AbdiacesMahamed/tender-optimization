@@ -56,7 +56,7 @@ current_data = pd.DataFrame({
     ]
 })
 
-trace_results = trace_container_movements(current_data, origin_map)
+trace_results, container_destinations = trace_container_movements(current_data, origin_map)
 print(f"   Row 0 (ATMI): Kept {trace_results[0]['total_kept']}, Flipped {trace_results[0]['total_flipped']}")
 print(f"   Row 1 (RKNE): Kept {trace_results[1]['total_kept']}, Flipped {trace_results[1]['total_flipped']}")
 print(f"   Row 2 (FROT): Kept {trace_results[2]['total_kept']}, Flipped {trace_results[2]['total_flipped']}")
@@ -64,7 +64,7 @@ print(f"   Row 2 (FROT): Kept {trace_results[2]['total_kept']}, Flipped {trace_r
 # Test 4: Format display
 print("\n4. Testing format_flip_details()...")
 for idx, result in enumerate(trace_results):
-    formatted = format_flip_details(result)
+    formatted = format_flip_details(result, container_destinations=container_destinations)
     print(f"   Row {idx}: {formatted}")
 
 # Test 5: Movement summary

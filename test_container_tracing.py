@@ -102,7 +102,7 @@ def test_movement_tracing(baseline_data, origin_map):
         ]
     })
     
-    trace_results = trace_container_movements(current_data, origin_map)
+    trace_results, container_destinations = trace_container_movements(current_data, origin_map)
     
     print("\nRow 0 (ATMI):")
     result = trace_results[0]
@@ -129,23 +129,23 @@ def test_movement_tracing(baseline_data, origin_map):
     assert trace_results[2]['total_flipped'] == 3, "FROT should have gained 3 total"
     
     print("\n✅ Movement tracing test complete")
-    return current_data, trace_results
+    return current_data, trace_results, container_destinations
 
 
-def test_display_formatting(trace_results):
+def test_display_formatting(trace_results, container_destinations):
     """Test formatting of trace results into display strings"""
     print("\n" + "="*60)
     print("TEST 4: Format Display Strings")
     print("="*60)
     
     for idx, result in enumerate(trace_results):
-        formatted = format_flip_details(result, show_container_ids=False)
+        formatted = format_flip_details(result, show_container_ids=False, container_destinations=container_destinations)
         print(f"\nRow {idx}: {formatted}")
     
     # Test with container IDs shown
     print("\n--- With Container IDs ---")
     for idx, result in enumerate(trace_results):
-        formatted = format_flip_details(result, show_container_ids=True)
+        formatted = format_flip_details(result, show_container_ids=True, container_destinations=container_destinations)
         print(f"\nRow {idx}:\n{formatted}")
     
     print("\n✅ Display formatting test complete")
@@ -208,10 +208,10 @@ def run_all_tests():
         baseline_data, origin_map = test_origin_mapping()
         
         # Test 3: Trace movements
-        current_data, trace_results = test_movement_tracing(baseline_data, origin_map)
+        current_data, trace_results, container_destinations = test_movement_tracing(baseline_data, origin_map)
         
         # Test 4: Format display
-        test_display_formatting(trace_results)
+        test_display_formatting(trace_results, container_destinations)
         
         # Test 5: Add detailed column
         test_detailed_column(current_data, baseline_data)

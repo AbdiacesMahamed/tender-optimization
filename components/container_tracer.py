@@ -229,17 +229,26 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
             'total_unknown': len(unknown),
             'original_count': original_count_in_group,  # PER-GROUP count
             'current_count': len(container_ids),
-            'all_original_containers': original_group_state.get(group_key, {}).get(current_carrier, []) if group_key in original_group_state else []  # NEW: original container IDs
+            'all_original_containers': original_group_state.get(group_key, {}).get(current_carrier, []) if group_key in original_group_state else [],  # NEW: original container IDs
+            'current_carrier': current_carrier  # Store current carrier for destination lookup
         })
     
-    return trace_results
+    # Build global container destinations map: {container_id: new_carrier}
+    container_destinations = {}
+    for idx, row in current_data.iterrows():
+        carrier = row.get(carrier_col, 'Unknown')
+        container_str = row.get('Container Numbers', '')
+        for cid in parse_container_ids(container_str):
+            container_destinations[cid] = carrier
+    
+    return trace_results, container_destinations
 
 
-def format_flip_details(trace_result, show_container_ids=True, max_carriers=5):
+def format_flip_details(trace_result, show_container_ids=True, max_carriers=5, container_destinations=None):
     """
     Format traced container movements into readable text with container IDs.
     
-    Format: Had X [container IDs] → From CARRIER (+Y) [container IDs], Lost Z [container IDs] → Now Total
+    Format: Had X [container IDs] → From CARRIER (+Y) [container IDs], Lost Z → To CARRIER (-N) [container IDs] → Now Total
     
     Parameters:
     -----------
@@ -249,6 +258,8 @@ def format_flip_details(trace_result, show_container_ids=True, max_carriers=5):
         Whether to include actual container IDs in output (default True)
     max_carriers : int
         Maximum number of source carriers to show individually
+    container_destinations : dict
+        Map of {container_id: destination_carrier} for tracking where lost containers went
         
     Returns:
     --------
@@ -350,15 +361,55 @@ def format_flip_details(trace_result, show_container_ids=True, max_carriers=5):
                     flip_strs.append(f"{remaining_carriers} others (+{remaining_count})")
                     changes.append(f"From {' + '.join(flip_strs)}")
         
-        # Losses (if original > kept)
+        # Losses (if original > kept) - show destination carriers
         if lost_count > 0:
-            if show_container_ids and lost_containers:
-                container_list = ', '.join(lost_containers[:2])
-                if len(lost_containers) > 2:
-                    container_list += f"... ({lost_count})"
-                changes.append(f"Lost {lost_count} [{container_list}]")
+            # Build lost_to_summary: {destination_carrier: [container_ids]}
+            lost_to_summary = {}
+            if container_destinations:
+                for cid in lost_containers:
+                    dest_carrier = container_destinations.get(cid, 'Unknown')
+                    if dest_carrier not in lost_to_summary:
+                        lost_to_summary[dest_carrier] = []
+                    lost_to_summary[dest_carrier].append(cid)
+            
+            if lost_to_summary:
+                # Format: "Lost X → To CARRIER1 (-N), To CARRIER2 (-M)"
+                sorted_lost_to = sorted(lost_to_summary.items(), key=lambda x: len(x[1]), reverse=True)
+                
+                if show_container_ids:
+                    lost_parts = []
+                    for dest_carrier, cids in sorted_lost_to[:max_carriers]:
+                        container_list = ', '.join(cids[:2])
+                        if len(cids) > 2:
+                            container_list += f"..."
+                        lost_parts.append(f"To {dest_carrier} (-{len(cids)}) [{container_list}]")
+                    
+                    if len(sorted_lost_to) > max_carriers:
+                        remaining_count = sum(len(cids) for _, cids in sorted_lost_to[max_carriers:])
+                        remaining_carriers = len(sorted_lost_to) - max_carriers
+                        lost_parts.append(f"{remaining_carriers} others (-{remaining_count})")
+                    
+                    changes.append(f"Lost {lost_count} → {', '.join(lost_parts)}")
+                else:
+                    lost_parts = []
+                    for dest_carrier, cids in sorted_lost_to[:max_carriers]:
+                        lost_parts.append(f"To {dest_carrier} (-{len(cids)})")
+                    
+                    if len(sorted_lost_to) > max_carriers:
+                        remaining_count = sum(len(cids) for _, cids in sorted_lost_to[max_carriers:])
+                        remaining_carriers = len(sorted_lost_to) - max_carriers
+                        lost_parts.append(f"{remaining_carriers} others (-{remaining_count})")
+                    
+                    changes.append(f"Lost {lost_count} → {', '.join(lost_parts)}")
             else:
-                changes.append(f"Lost {lost_count}")
+                # Fallback if no destination tracking available
+                if show_container_ids and lost_containers:
+                    container_list = ', '.join(lost_containers[:2])
+                    if len(lost_containers) > 2:
+                        container_list += f"... ({lost_count})"
+                    changes.append(f"Lost {lost_count} [{container_list}]")
+                else:
+                    changes.append(f"Lost {lost_count}")
         
         # Unknown/new containers
         if unknown_count > 0:
@@ -409,11 +460,11 @@ def add_detailed_carrier_flips_column(current_data, original_data,
     # Step 1: Build origin map
     origin_map = build_container_origin_map(original_data, carrier_col)
     
-    # Step 2: Trace movements
-    trace_results = trace_container_movements(current_data, origin_map, carrier_col)
+    # Step 2: Trace movements (now returns container_destinations too)
+    trace_results, container_destinations = trace_container_movements(current_data, origin_map, carrier_col)
     
-    # Step 3: Format results
-    flip_details = [format_flip_details(result, show_container_ids) for result in trace_results]
+    # Step 3: Format results with destination tracking for losses
+    flip_details = [format_flip_details(result, show_container_ids, container_destinations=container_destinations) for result in trace_results]
     
     current_data['Carrier Flips (Detailed)'] = flip_details
     
@@ -452,8 +503,8 @@ def get_container_movement_summary(current_data, original_data, carrier_col='Dra
     # Build origin map
     origin_map = build_container_origin_map(original_data, carrier_col)
     
-    # Trace movements
-    trace_results = trace_container_movements(current_data, origin_map, carrier_col)
+    # Trace movements (now returns container_destinations too)
+    trace_results, container_destinations = trace_container_movements(current_data, origin_map, carrier_col)
     
     # Aggregate statistics
     total_kept = sum(r['total_kept'] for r in trace_results)

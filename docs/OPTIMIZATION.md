@@ -121,15 +121,16 @@ Had X → [Changes] → Now Y
 
 - `Had X` - Original containers before optimization
 - `From CARRIER (+N)` - Gained N containers from CARRIER
-- `Lost N` - Lost N containers to other carriers
+- `Lost N → To CARRIER (-N)` - Lost N containers to CARRIER
 - `Now Y` - Final container count
 
 **Examples:**
 
 ```
-Had 4 → From RKNE (+8) + XPDR (+3) → Now 15
+Had 4 → From RKNE (+8) + XPDR (+3), Lost 2 → To FROT (-2) → Now 15
 Had 10 (kept all) → Now 10
 Had 0 → From ATMI (+5) → Now 5
+Had 20 → Lost 12 → To ATMI (-8), To XPDR (-4) → Now 8
 ```
 
 ### Container IDs
