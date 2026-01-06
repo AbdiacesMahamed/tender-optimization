@@ -31,6 +31,7 @@ def show_advanced_constraints_interface(comprehensive_data):
     - `Category` - Product/service category (optional)
     - `Carrier` - Carrier SCAC code (optional)
     - `Lane` - Specific lane (optional)
+    - `SSL` - Steamship line code (optional)
     - `Week Number` - Specific week(s) (optional)
     - `Maximum Container Count` - Max containers for this constraint (optional)
     - `Minimum Container Count` - Min containers for this constraint (optional)
@@ -128,6 +129,7 @@ def create_constraints_template():
         'Category': ['FBA LCL', 'Retail CD', None],
         'Carrier': ['XPDR', 'ATMI', 'SONW'],
         'Lane': ['USOAK→TCY2-S', None, 'USEWRIEA2→'],
+        'SSL': [None, 'MAEU', None],
         'Week Number': [32, '32,33', None],
         'Maximum Container Count': [500, None, 200],
         'Minimum Container Count': [100, 50, None],
@@ -141,7 +143,7 @@ def validate_and_process_constraints(constraints_df, comprehensive_data):
     """Validate and process uploaded constraints"""
     
     # Required columns (at least one must be present to define scope)
-    scope_columns = ['Category', 'Carrier', 'Lane', 'Week Number']
+    scope_columns = ['Category', 'Carrier', 'Lane', 'Week Number', 'SSL']
     constraint_columns = ['Maximum Container Count', 'Minimum Container Count', 'Percent Allocation']
     
     # Check if we have any scope or constraint columns
@@ -149,7 +151,7 @@ def validate_and_process_constraints(constraints_df, comprehensive_data):
     has_constraint = any(col in constraints_df.columns for col in constraint_columns)
     
     if not has_scope:
-        st.warning("⚠️ No scope columns found (Category, Carrier, Lane, or Week Number)")
+        st.warning("⚠️ No scope columns found (Category, Carrier, Lane, Week Number, or SSL)")
         return None
     
     if not has_constraint:
@@ -237,7 +239,7 @@ def display_constraints_table(constraints_df):
         )
     
     # Fill NaN values with 'Any' for scope columns
-    for col in ['Category', 'Carrier', 'Lane']:
+    for col in ['Category', 'Carrier', 'Lane', 'SSL']:
         if col in display_df.columns:
             display_df[col] = display_df[col].fillna('Any')
     
@@ -335,6 +337,10 @@ def apply_advanced_constraints(comprehensive_data):
             mask &= unconstrained_data['Week Number'].isin(constraint['Week Number'])
             st.write(f"  - Weeks: {', '.join(map(str, constraint['Week Number']))}")
         
+        if pd.notna(constraint.get('SSL')) and 'SSL' in unconstrained_data.columns:
+            mask &= unconstrained_data['SSL'] == constraint['SSL']
+            st.write(f"  - SSL: {constraint['SSL']}")
+        
         # Get eligible data (not already allocated)
         available_mask = mask & ~unconstrained_data.index.isin(allocated_indices)
         eligible_data = unconstrained_data[available_mask].copy()
@@ -411,6 +417,8 @@ def apply_advanced_constraints(comprehensive_data):
                 notes_parts = []
                 if pd.notna(constraint['Category']):
                     notes_parts.append(f"Cat:{constraint['Category']}")
+                if pd.notna(constraint.get('SSL')):
+                    notes_parts.append(f"SSL:{constraint['SSL']}")
                 if pd.notna(constraint['Carrier']):
                     notes_parts.append(f"Carrier:{constraint['Carrier']}")
                 if pd.notna(constraint['Notes']):

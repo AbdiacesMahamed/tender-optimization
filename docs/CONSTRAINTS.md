@@ -15,6 +15,7 @@ Upload an Excel file with the following columns:
 | `Port`                    | No          | Filter by port                                |
 | `Week Number`             | No          | Filter by week                                |
 | `Terminal`                | No          | Filter by terminal                            |
+| `SSL`                     | No          | Filter by steamship line code                 |
 | `Maximum Container Count` | No          | Hard cap on containers for carrier            |
 | `Minimum Container Count` | No          | Minimum containers for carrier                |
 | `Percent Allocation`      | No          | Target percentage allocation                  |
@@ -144,16 +145,16 @@ Constraints are processed in order of Priority Score (highest first):
 
 ## Example Constraints File
 
-| Priority Score | Carrier | Category  | Lane      | Maximum Container Count | Excluded FC |
-| -------------- | ------- | --------- | --------- | ----------------------- | ----------- |
-| 20             | ATMI    | FBA FCL   |           | 150                     |             |
-| 15             | XPDR    |           |           |                         | HGR6        |
-| 10             | HDDR    | Retail CD | USBALHGR6 | 75                      |             |
-| 5              | FRQT    |           |           | 50                      | BWI4        |
+| Priority Score | Carrier | Category  | Lane      | SSL  | Maximum Container Count | Excluded FC |
+| -------------- | ------- | --------- | --------- | ---- | ----------------------- | ----------- |
+| 20             | ATMI    | FBA FCL   |           |      | 150                     |             |
+| 15             | XPDR    |           |           | MAEU |                         | HGR6        |
+| 10             | HDDR    | Retail CD | USBALHGR6 |      | 75                      |             |
+| 5              | FRQT    |           |           |      | 50                      | BWI4        |
 
 This example:
 
 1. First gives ATMI up to 150 FBA FCL containers
-2. Then excludes XPDR from HGR6 facility
+2. Then excludes XPDR from HGR6 facility (for MAEU steamship line only)
 3. Then gives HDDR up to 75 Retail CD containers on USBAL-HGR6 lane
 4. Finally gives FRQT up to 50 containers (not at BWI4 facility)

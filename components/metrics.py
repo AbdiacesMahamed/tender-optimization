@@ -666,6 +666,8 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         cols_c = ['Discharged Port']
         if 'Category' in constrained_display.columns:
             cols_c.append('Category')
+        if 'SSL' in constrained_display.columns:
+            cols_c.append('SSL')
         cols_c.extend([carrier_col_c, 'Lane', 'Facility'])
         if 'Terminal' in constrained_display.columns:
             cols_c.append('Terminal')
@@ -999,6 +1001,8 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         cols = ['Discharged Port']
         if 'Category' in display_data.columns:
             cols.append('Category')
+        if 'SSL' in display_data.columns:
+            cols.append('SSL')
         cols.extend([carrier_col, 'Lane', 'Facility'])
         if 'Terminal' in display_data.columns:
             cols.append('Terminal')
@@ -1211,6 +1215,8 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             group_cols = []
             if 'Category' in source_data.columns:
                 group_cols.append('Category')
+            if 'SSL' in source_data.columns:
+                group_cols.append('SSL')
             if 'Week Number' in source_data.columns:
                 group_cols.append('Week Number')
             if 'Lane' in source_data.columns:
@@ -1437,6 +1443,85 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             use_container_width=True,
             key='download_constrained'
         )
+    
+    # ==================== PEEL PILE ANALYSIS ====================
+    # Show SSL containers that qualify as Peel Pile (30+ containers)
+    show_peel_pile_analysis(final_filtered_data)
+
+
+def show_peel_pile_analysis(data):
+    """
+    Show Peel Pile Analysis table - SSL groups with 30+ containers per Week/Terminal/Port qualify as peel pile.
+    
+    Args:
+        data: DataFrame containing container data with SSL column (should be filtered data)
+    """
+    if 'SSL' not in data.columns:
+        return  # SSL column not available, skip this analysis
+    
+    st.markdown("---")
+    section_header("📦 Peel Pile Analysis")
+    
+    # Calculate container count per SSL
+    # Use Container Numbers if available for accurate count, otherwise use Container Count
+    if 'Container Numbers' in data.columns:
+        def count_containers_from_string(container_str):
+            if pd.isna(container_str) or not str(container_str).strip():
+                return 0
+            return len([c.strip() for c in str(container_str).split(',') if c.strip()])
+        
+        data_copy = data.copy()
+        data_copy['_container_count'] = data_copy['Container Numbers'].apply(count_containers_from_string)
+    else:
+        data_copy = data.copy()
+        data_copy['_container_count'] = data_copy['Container Count']
+    
+    # Build grouping columns: SSL + Week + Terminal (if exists) + Port
+    group_cols = ['SSL']
+    
+    if 'Week Number' in data_copy.columns:
+        group_cols.append('Week Number')
+    
+    if 'Terminal' in data_copy.columns:
+        group_cols.append('Terminal')
+    
+    if 'Discharged Port' in data_copy.columns:
+        group_cols.append('Discharged Port')
+    
+    # Group by SSL + Week + Terminal + Port and sum containers
+    ssl_summary = data_copy.groupby(group_cols).agg({
+        '_container_count': 'sum',
+    }).reset_index()
+    
+    # Rename columns for display
+    ssl_summary = ssl_summary.rename(columns={'_container_count': 'Container Count'})
+    
+    # Filter for peel pile (30+ containers)
+    peel_pile = ssl_summary[ssl_summary['Container Count'] >= 30].copy()
+    peel_pile = peel_pile.sort_values('Container Count', ascending=False)
+    
+    if len(peel_pile) > 0:
+        # Build display columns dynamically
+        display_cols = group_cols + ['Container Count']
+        
+        # Format the dataframe for display
+        display_peel = peel_pile[display_cols].copy()
+        display_peel['Container Count'] = display_peel['Container Count'].apply(lambda x: f"{x:,.0f}")
+        
+        st.dataframe(display_peel, use_container_width=True, hide_index=True)
+        
+        # Download option
+        csv = peel_pile.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Peel Pile",
+            data=csv,
+            file_name='peel_pile.csv',
+            mime='text/csv',
+            use_container_width=True
+        )
+    else:
+        st.info("ℹ️ No SSL groups meet the peel pile threshold (30+ containers per Week/Terminal/Port).")
+
 
 def show_top_savings_opportunities(final_filtered_data):
     """Show top 10 savings opportunities - DEPRECATED

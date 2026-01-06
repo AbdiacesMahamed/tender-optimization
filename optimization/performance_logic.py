@@ -17,6 +17,7 @@ import pandas as pd
 DEFAULT_GROUP_COLUMNS: List[str] = [
     "Discharged Port",
     "Category",
+    "SSL",
     "Lane",
     "Facility",
     "Terminal",

@@ -146,6 +146,8 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
         group_cols = ['Discharged Port', 'Lane', 'Facility', 'Week Number']
         if 'Category' in current_data.columns:
             group_cols.insert(0, 'Category')
+        if 'SSL' in current_data.columns:
+            group_cols.insert(1, 'SSL')
         if 'Terminal' in current_data.columns:
             group_cols.append('Terminal')
         group_cols = [col for col in group_cols if col in current_data.columns]
@@ -160,6 +162,7 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
         'Facility': 'facility',
         'Terminal': 'terminal',
         'Category': 'category',
+        'SSL': 'ssl',
         'Week Number': 'week_number'
     }
     

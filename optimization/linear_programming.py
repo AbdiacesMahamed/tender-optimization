@@ -20,6 +20,7 @@ from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, value
 DEFAULT_GROUP_COLUMNS: List[str] = [
     "Discharged Port",
     "Category",
+    "SSL",
     "Lane",
     "Facility",
     "Terminal",

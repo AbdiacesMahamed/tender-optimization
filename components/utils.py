@@ -115,6 +115,10 @@ def get_grouping_columns(
     if 'Category' in data.columns and 'Category' not in cols:
         cols.insert(0, 'Category')
     
+    # Add SSL after Category if it exists
+    if 'SSL' in data.columns and 'SSL' not in cols:
+        cols.insert(1, 'SSL')
+    
     # Add Terminal if it exists
     if 'Terminal' in data.columns and 'Terminal' not in cols:
         cols.append('Terminal')

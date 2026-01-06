@@ -62,6 +62,7 @@ def process_constraints_file(constraints_file):
     - Port (Discharged Port)
     - Week Number
     - Terminal
+    - SSL (Steamship Line)
     - Maximum container number / Maximum Container Count
     - minimum container number / Minimum Container Count
     - Percent Allocation
@@ -118,13 +119,16 @@ def process_constraints_file(constraints_file):
             # Map Terminal
             elif col_lower == 'terminal':
                 column_mapping[col] = 'Terminal'
+            # Map SSL
+            elif col_lower == 'ssl':
+                column_mapping[col] = 'SSL'
         
         # Apply column mapping
         constraints_df = constraints_df.rename(columns=column_mapping)
         
         # Define expected columns
         expected_cols = [
-            'Category', 'Carrier', 'Lane', 'Port', 'Week Number', 'Terminal',
+            'Category', 'Carrier', 'Lane', 'Port', 'Week Number', 'Terminal', 'SSL',
             'Maximum Container Count', 'Minimum Container Count',
             'Percent Allocation', 'Excluded FC', 'Priority Score'
         ]
@@ -141,7 +145,7 @@ def process_constraints_file(constraints_file):
                 constraints_df[col] = None
         
         # Clean up text fields - convert empty strings to None
-        for col in ['Category', 'Lane', 'Carrier', 'Port', 'Terminal', 'Excluded FC']:
+        for col in ['Category', 'Lane', 'Carrier', 'Port', 'Terminal', 'Excluded FC', 'SSL']:
             if col in constraints_df.columns:
                 # Replace empty strings with None
                 constraints_df[col] = constraints_df[col].apply(
@@ -241,7 +245,7 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
         
         IMPORTANT: Maximum constraints only REQUIRE a Carrier field.
         - Carrier (REQUIRED): The carrier to cap
-        - Filters (OPTIONAL): Category, Lane, Port, Week Number
+        - Filters (OPTIONAL): Category, Lane, Port, Week Number, Terminal, SSL
         - Containers are NOT removed from unconstrained table
         - Container count is preserved: Original = Constrained + Unconstrained
         - Optimization excludes the carrier, allowing other carriers to use the volume
@@ -505,6 +509,12 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             if 'Terminal' in remaining_data.columns:
                 mask &= remaining_data['Terminal'] == constraint['Terminal']
                 filters_applied.append(f"Terminal={constraint['Terminal']}")
+        
+        # Apply SSL filter if specified
+        if is_valid_value(constraint.get('SSL')):
+            if 'SSL' in remaining_data.columns:
+                mask &= remaining_data['SSL'] == constraint['SSL']
+                filters_applied.append(f"SSL={constraint['SSL']}")
         
         # CRITICAL: If Excluded FC is specified, we need to filter OUT rows at that facility
         # This prevents the carrier from being allocated containers at that facility

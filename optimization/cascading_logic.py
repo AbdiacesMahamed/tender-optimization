@@ -129,6 +129,8 @@ def cascading_allocate_with_constraints(
     group_columns = [lane_column]
     if category_column in data.columns:
         group_columns.insert(0, category_column)
+    if 'SSL' in data.columns:
+        group_columns.insert(1, 'SSL')
     if 'Facility' in data.columns:
         group_columns.append('Facility')
     if 'Terminal' in data.columns:

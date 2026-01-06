@@ -139,6 +139,8 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
     group_cols = ['Week Number', 'Discharged Port', 'Dray SCAC(FL)', 'Facility', 'Lane', 'Lookup']
     if 'Category' in GVTdata.columns:
         group_cols.insert(1, 'Category')
+    if 'SSL' in GVTdata.columns:
+        group_cols.insert(2, 'SSL')  # Insert after Category (or after Week Number if no Category)
     if 'Terminal' in GVTdata.columns:
         group_cols.insert(len(group_cols) - 1, 'Terminal')  # Insert before 'Lookup'
     

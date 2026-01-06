@@ -208,6 +208,8 @@ def calculate_carrier_volume_share(
     group_columns = [carrier_column, lane_column]
     if category_column in historical_data.columns:
         group_columns.insert(1, category_column)
+    if 'SSL' in historical_data.columns:
+        group_columns.insert(2, 'SSL')
     if 'Terminal' in historical_data.columns:
         group_columns.append('Terminal')
     
@@ -223,6 +225,8 @@ def calculate_carrier_volume_share(
     lane_group = [lane_column]
     if category_column in historical_data.columns:
         lane_group.insert(0, category_column)
+    if 'SSL' in historical_data.columns:
+        lane_group.insert(1, 'SSL')
     if 'Terminal' in historical_data.columns:
         lane_group.append('Terminal')
     

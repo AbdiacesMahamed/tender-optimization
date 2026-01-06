@@ -329,6 +329,9 @@ def load_gvt_data(gvt_file):
         if 'Category' in gvt_data.columns:
             select_cols.insert(1, 'Category')  # Add Category after Discharged Port
         
+        if 'SSL' in gvt_data.columns:
+            select_cols.insert(2, 'SSL')  # Add SSL after Category (or after Discharged Port if no Category)
+        
         bal_before_select = gvt_data[(gvt_data['Week Number'] == 47) & (gvt_data['Lane'].str.startswith('BAL', na=False))]
         st.write(f"- BAL Week 47 rows before select: {len(bal_before_select)}")
         st.write(f"- BAL Week 47 Container Count sum: {bal_before_select['Container Count'].sum()}")
