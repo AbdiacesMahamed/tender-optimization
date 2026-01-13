@@ -14,13 +14,9 @@ import pandas as pd
 
 
 # Columns considered when grouping carriers that share the same demand slice.
+# For optimization scenarios (performance, cheapest, optimized), we only group by Lane and Week.
 DEFAULT_GROUP_COLUMNS: List[str] = [
-    "Discharged Port",
-    "Category",
-    "SSL",
     "Lane",
-    "Facility",
-    "Terminal",
     "Week Number",
 ]
 

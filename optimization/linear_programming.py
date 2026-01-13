@@ -17,13 +17,9 @@ from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, value
 
 
 # Default grouping columns for optimization
+# For optimization scenarios (performance, cheapest, optimized), we only group by Lane and Week.
 DEFAULT_GROUP_COLUMNS: List[str] = [
-    "Discharged Port",
-    "Category",
-    "SSL",
     "Lane",
-    "Facility",
-    "Terminal",
     "Week Number",
 ]
 

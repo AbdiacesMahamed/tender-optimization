@@ -147,6 +147,8 @@ def show_market_share_analysis(volume_share: pd.DataFrame, n_weeks: int):
             lane_cols.insert(0, 'Category')
         if 'SSL' in volume_share.columns:
             lane_cols.insert(1, 'SSL')
+        if 'Vessel' in volume_share.columns:
+            lane_cols.insert(2, 'Vessel')
         if 'Terminal' in volume_share.columns:
             lane_cols.append('Terminal')
         
@@ -234,6 +236,10 @@ def show_market_share_analysis(volume_share: pd.DataFrame, n_weeks: int):
     # Add SSL if it exists
     if 'SSL' in filtered_data.columns:
         display_cols.insert(2, 'SSL')
+    
+    # Add Vessel if it exists
+    if 'Vessel' in filtered_data.columns:
+        display_cols.insert(3, 'Vessel')
     
     st.dataframe(
         filtered_data[display_cols].style.format({

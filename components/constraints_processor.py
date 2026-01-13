@@ -63,6 +63,7 @@ def process_constraints_file(constraints_file):
     - Week Number
     - Terminal
     - SSL (Steamship Line)
+    - Vessel
     - Maximum container number / Maximum Container Count
     - minimum container number / Minimum Container Count
     - Percent Allocation
@@ -122,13 +123,16 @@ def process_constraints_file(constraints_file):
             # Map SSL
             elif col_lower == 'ssl':
                 column_mapping[col] = 'SSL'
+            # Map Vessel
+            elif col_lower == 'vessel':
+                column_mapping[col] = 'Vessel'
         
         # Apply column mapping
         constraints_df = constraints_df.rename(columns=column_mapping)
         
         # Define expected columns
         expected_cols = [
-            'Category', 'Carrier', 'Lane', 'Port', 'Week Number', 'Terminal', 'SSL',
+            'Category', 'Carrier', 'Lane', 'Port', 'Week Number', 'Terminal', 'SSL', 'Vessel',
             'Maximum Container Count', 'Minimum Container Count',
             'Percent Allocation', 'Excluded FC', 'Priority Score'
         ]
@@ -145,7 +149,7 @@ def process_constraints_file(constraints_file):
                 constraints_df[col] = None
         
         # Clean up text fields - convert empty strings to None
-        for col in ['Category', 'Lane', 'Carrier', 'Port', 'Terminal', 'Excluded FC', 'SSL']:
+        for col in ['Category', 'Lane', 'Carrier', 'Port', 'Terminal', 'Excluded FC', 'SSL', 'Vessel']:
             if col in constraints_df.columns:
                 # Replace empty strings with None
                 constraints_df[col] = constraints_df[col].apply(
@@ -515,6 +519,12 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             if 'SSL' in remaining_data.columns:
                 mask &= remaining_data['SSL'] == constraint['SSL']
                 filters_applied.append(f"SSL={constraint['SSL']}")
+        
+        # Apply Vessel filter if specified
+        if is_valid_value(constraint.get('Vessel')):
+            if 'Vessel' in remaining_data.columns:
+                mask &= remaining_data['Vessel'] == constraint['Vessel']
+                filters_applied.append(f"Vessel={constraint['Vessel']}")
         
         # CRITICAL: If Excluded FC is specified, we need to filter OUT rows at that facility
         # This prevents the carrier from being allocated containers at that facility

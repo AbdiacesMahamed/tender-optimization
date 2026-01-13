@@ -668,6 +668,8 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             cols_c.append('Category')
         if 'SSL' in constrained_display.columns:
             cols_c.append('SSL')
+        if 'Vessel' in constrained_display.columns:
+            cols_c.append('Vessel')
         cols_c.extend([carrier_col_c, 'Lane', 'Facility'])
         if 'Terminal' in constrained_display.columns:
             cols_c.append('Terminal')
@@ -1003,6 +1005,8 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             cols.append('Category')
         if 'SSL' in display_data.columns:
             cols.append('SSL')
+        if 'Vessel' in display_data.columns:
+            cols.append('Vessel')
         cols.extend([carrier_col, 'Lane', 'Facility'])
         if 'Terminal' in display_data.columns:
             cols.append('Terminal')
@@ -1217,6 +1221,8 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                 group_cols.append('Category')
             if 'SSL' in source_data.columns:
                 group_cols.append('SSL')
+            if 'Vessel' in source_data.columns:
+                group_cols.append('Vessel')
             if 'Week Number' in source_data.columns:
                 group_cols.append('Week Number')
             if 'Lane' in source_data.columns:
@@ -1451,18 +1457,18 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
 
 def show_peel_pile_analysis(data):
     """
-    Show Peel Pile Analysis table - SSL groups with 30+ containers per Week/Terminal/Port qualify as peel pile.
+    Show Peel Pile Analysis table - Vessel groups with 30+ containers per Week/Port qualify as peel pile.
     
     Args:
-        data: DataFrame containing container data with SSL column (should be filtered data)
+        data: DataFrame containing container data with Vessel column (should be filtered data)
     """
-    if 'SSL' not in data.columns:
-        return  # SSL column not available, skip this analysis
+    if 'Vessel' not in data.columns:
+        return  # Vessel column not available, skip this analysis
     
     st.markdown("---")
     section_header("📦 Peel Pile Analysis")
     
-    # Calculate container count per SSL
+    # Calculate container count per Vessel
     # Use Container Numbers if available for accurate count, otherwise use Container Count
     if 'Container Numbers' in data.columns:
         def count_containers_from_string(container_str):
@@ -1476,28 +1482,25 @@ def show_peel_pile_analysis(data):
         data_copy = data.copy()
         data_copy['_container_count'] = data_copy['Container Count']
     
-    # Build grouping columns: SSL + Week + Terminal (if exists) + Port
-    group_cols = ['SSL']
+    # Build grouping columns: Vessel + Week + Port
+    group_cols = ['Vessel']
     
     if 'Week Number' in data_copy.columns:
         group_cols.append('Week Number')
     
-    if 'Terminal' in data_copy.columns:
-        group_cols.append('Terminal')
-    
     if 'Discharged Port' in data_copy.columns:
         group_cols.append('Discharged Port')
     
-    # Group by SSL + Week + Terminal + Port and sum containers
-    ssl_summary = data_copy.groupby(group_cols).agg({
+    # Group by Vessel + Week + Port and sum containers
+    vessel_summary = data_copy.groupby(group_cols).agg({
         '_container_count': 'sum',
     }).reset_index()
     
     # Rename columns for display
-    ssl_summary = ssl_summary.rename(columns={'_container_count': 'Container Count'})
+    vessel_summary = vessel_summary.rename(columns={'_container_count': 'Container Count'})
     
     # Filter for peel pile (30+ containers)
-    peel_pile = ssl_summary[ssl_summary['Container Count'] >= 30].copy()
+    peel_pile = vessel_summary[vessel_summary['Container Count'] >= 30].copy()
     peel_pile = peel_pile.sort_values('Container Count', ascending=False)
     
     if len(peel_pile) > 0:
@@ -1520,7 +1523,7 @@ def show_peel_pile_analysis(data):
             use_container_width=True
         )
     else:
-        st.info("ℹ️ No SSL groups meet the peel pile threshold (30+ containers per Week/Terminal/Port).")
+        st.info("ℹ️ No Vessel groups meet the peel pile threshold (30+ containers per Week/Port).")
 
 
 def show_top_savings_opportunities(final_filtered_data):

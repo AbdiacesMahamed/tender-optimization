@@ -91,7 +91,7 @@ def filter_interface_fragment(comprehensive_data):
         st.markdown("**🚢 Ports:**")
         port_search = st.text_input("Search ports...", key="port_search", placeholder="Type to search ports")
         
-        port_options = sorted(list(comprehensive_data['Discharged Port'].unique()))
+        port_options = sorted([x for x in comprehensive_data['Discharged Port'].unique() if pd.notna(x)])
         if port_search:
             port_options = [port for port in port_options if port_search.lower() in str(port).lower()]
         
@@ -111,7 +111,7 @@ def filter_interface_fragment(comprehensive_data):
         st.markdown("**🏭 Facilities:**")
         fc_search = st.text_input("Search facilities...", key="fc_search", placeholder="Type to search facilities")
         
-        fc_options = sorted(list(comprehensive_data['Facility'].str[:4].unique()))
+        fc_options = sorted([x for x in comprehensive_data['Facility'].str[:4].unique() if pd.notna(x)])
         if fc_search:
             fc_options = [fc for fc in fc_options if fc_search.lower() in str(fc).lower()]
         
@@ -129,7 +129,7 @@ def filter_interface_fragment(comprehensive_data):
         st.markdown("**📅 Week Numbers:**")
         week_search = st.text_input("Search weeks...", key="week_search", placeholder="Type to search weeks")
         
-        week_options = sorted(list(comprehensive_data['Week Number'].unique()))
+        week_options = sorted([x for x in comprehensive_data['Week Number'].unique() if pd.notna(x)])
         if week_search:
             week_options = [week for week in week_options if week_search.lower() in str(week).lower()]
         
@@ -147,7 +147,7 @@ def filter_interface_fragment(comprehensive_data):
         st.markdown("**🚛 SCACs:**")
         scac_search = st.text_input("Search SCACs...", key="scac_search", placeholder="Type to search SCACs")
         
-        scac_options = sorted(list(comprehensive_data['Dray SCAC(FL)'].unique()))
+        scac_options = sorted([x for x in comprehensive_data['Dray SCAC(FL)'].unique() if pd.notna(x)])
         if scac_search:
             scac_options = [scac for scac in scac_options if scac_search.lower() in str(scac).lower()]
         

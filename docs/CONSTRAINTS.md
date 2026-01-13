@@ -16,6 +16,7 @@ Upload an Excel file with the following columns:
 | `Week Number`             | No          | Filter by week                                |
 | `Terminal`                | No          | Filter by terminal                            |
 | `SSL`                     | No          | Filter by steamship line code                 |
+| `Vessel`                  | No          | Filter by vessel name                         |
 | `Maximum Container Count` | No          | Hard cap on containers for carrier            |
 | `Minimum Container Count` | No          | Minimum containers for carrier                |
 | `Percent Allocation`      | No          | Target percentage allocation                  |

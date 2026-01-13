@@ -121,7 +121,8 @@ def cascading_allocate_with_constraints(
         
         if len(excluded_data) > 0:
             excluded_containers = excluded_data[container_column].sum()
-            print(f"🔒 Found {len(excluded_data)} rows ({excluded_containers:.0f} containers) from {len(excluded_carriers)} carriers with maximum constraints: {', '.join(sorted(excluded_carriers))}")
+            valid_excluded = [c for c in excluded_carriers if pd.notna(c)]
+            print(f"🔒 Found {len(excluded_data)} rows ({excluded_containers:.0f} containers) from {len(excluded_carriers)} carriers with maximum constraints: {', '.join(sorted(valid_excluded))}")
             print(f"   These containers will be reallocated to available carriers or marked as unallocatable.")
     
     # Determine grouping columns - must match data_processor.py grouping
@@ -131,6 +132,8 @@ def cascading_allocate_with_constraints(
         group_columns.insert(0, category_column)
     if 'SSL' in data.columns:
         group_columns.insert(1, 'SSL')
+    if 'Vessel' in data.columns:
+        group_columns.insert(2, 'Vessel')
     if 'Facility' in data.columns:
         group_columns.append('Facility')
     if 'Terminal' in data.columns:
@@ -463,8 +466,9 @@ def _rank_carriers_from_lp(
     Returns dict mapping carrier to rank (1=best, 2=second best, etc.)
     """
     if lp_results.empty:
-        # Default ranking: alphabetical
-        return {carrier: idx + 1 for idx, carrier in enumerate(sorted(carriers))}
+        # Default ranking: alphabetical (filter out NaN values)
+        valid_carriers = [c for c in carriers if pd.notna(c)]
+        return {carrier: idx + 1 for idx, carrier in enumerate(sorted(valid_carriers))}
     
     # Filter LP results to this group - use boolean indexing for efficiency
     lp_group = lp_results
@@ -473,8 +477,9 @@ def _rank_carriers_from_lp(
             lp_group = lp_group[lp_group[col] == group_key[idx]]
     
     if lp_group.empty:
-        # No LP results for this group, rank alphabetically
-        return {carrier: idx + 1 for idx, carrier in enumerate(sorted(carriers))}
+        # No LP results for this group, rank alphabetically (filter out NaN values)
+        valid_carriers = [c for c in carriers if pd.notna(c)]
+        return {carrier: idx + 1 for idx, carrier in enumerate(sorted(valid_carriers))}
     
     # Rank by container allocation in LP results (higher allocation = better rank)
     if carrier_column in lp_group.columns and container_column in lp_group.columns:
@@ -495,8 +500,9 @@ def _rank_carriers_from_lp(
         
         return carrier_ranks
     
-    # Fallback: alphabetical
-    return {carrier: idx + 1 for idx, carrier in enumerate(sorted(carriers))}
+    # Fallback: alphabetical (filter out NaN values)
+    valid_carriers = [c for c in carriers if pd.notna(c)]
+    return {carrier: idx + 1 for idx, carrier in enumerate(sorted(valid_carriers))}
 
 
 def _get_historical_percentages(
@@ -551,8 +557,9 @@ def _cascade_allocate_volume(
     - allocations: Dict mapping carrier to allocated container count
     - notes: Dict mapping carrier to allocation notes string
     """
-    # Sort carriers by rank (best first)
-    sorted_carriers = sorted(carriers, key=lambda c: carrier_ranks.get(c, 999))
+    # Sort carriers by rank (best first), filter out NaN values
+    valid_carriers = [c for c in carriers if pd.notna(c)]
+    sorted_carriers = sorted(valid_carriers, key=lambda c: carrier_ranks.get(c, 999))
     
     allocations = {carrier: 0 for carrier in carriers}
     notes = {}

@@ -119,6 +119,10 @@ def get_grouping_columns(
     if 'SSL' in data.columns and 'SSL' not in cols:
         cols.insert(1, 'SSL')
     
+    # Add Vessel after SSL if it exists
+    if 'Vessel' in data.columns and 'Vessel' not in cols:
+        cols.insert(2, 'Vessel')
+    
     # Add Terminal if it exists
     if 'Terminal' in data.columns and 'Terminal' not in cols:
         cols.append('Terminal')

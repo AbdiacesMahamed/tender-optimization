@@ -130,6 +130,7 @@ def create_constraints_template():
         'Carrier': ['XPDR', 'ATMI', 'SONW'],
         'Lane': ['USOAK→TCY2-S', None, 'USEWRIEA2→'],
         'SSL': [None, 'MAEU', None],
+        'Vessel': [None, None, 'SAMPLE VESSEL'],
         'Week Number': [32, '32,33', None],
         'Maximum Container Count': [500, None, 200],
         'Minimum Container Count': [100, 50, None],
@@ -143,7 +144,7 @@ def validate_and_process_constraints(constraints_df, comprehensive_data):
     """Validate and process uploaded constraints"""
     
     # Required columns (at least one must be present to define scope)
-    scope_columns = ['Category', 'Carrier', 'Lane', 'Week Number', 'SSL']
+    scope_columns = ['Category', 'Carrier', 'Lane', 'Week Number', 'SSL', 'Vessel']
     constraint_columns = ['Maximum Container Count', 'Minimum Container Count', 'Percent Allocation']
     
     # Check if we have any scope or constraint columns
@@ -151,7 +152,7 @@ def validate_and_process_constraints(constraints_df, comprehensive_data):
     has_constraint = any(col in constraints_df.columns for col in constraint_columns)
     
     if not has_scope:
-        st.warning("⚠️ No scope columns found (Category, Carrier, Lane, Week Number, or SSL)")
+        st.warning("⚠️ No scope columns found (Category, Carrier, Lane, Week Number, SSL, or Vessel)")
         return None
     
     if not has_constraint:
@@ -341,6 +342,10 @@ def apply_advanced_constraints(comprehensive_data):
             mask &= unconstrained_data['SSL'] == constraint['SSL']
             st.write(f"  - SSL: {constraint['SSL']}")
         
+        if pd.notna(constraint.get('Vessel')) and 'Vessel' in unconstrained_data.columns:
+            mask &= unconstrained_data['Vessel'] == constraint['Vessel']
+            st.write(f"  - Vessel: {constraint['Vessel']}")
+        
         # Get eligible data (not already allocated)
         available_mask = mask & ~unconstrained_data.index.isin(allocated_indices)
         eligible_data = unconstrained_data[available_mask].copy()
@@ -419,6 +424,8 @@ def apply_advanced_constraints(comprehensive_data):
                     notes_parts.append(f"Cat:{constraint['Category']}")
                 if pd.notna(constraint.get('SSL')):
                     notes_parts.append(f"SSL:{constraint['SSL']}")
+                if pd.notna(constraint.get('Vessel')):
+                    notes_parts.append(f"Vessel:{constraint['Vessel']}")
                 if pd.notna(constraint['Carrier']):
                     notes_parts.append(f"Carrier:{constraint['Carrier']}")
                 if pd.notna(constraint['Notes']):

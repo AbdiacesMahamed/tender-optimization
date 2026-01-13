@@ -48,13 +48,9 @@ def calculate_performance_optimization(final_filtered_data, rate_type='Base Rate
             # No performance data for this carrier at all
             carrier_weighted_performance[carrier] = 0
     
-    # Now analyze each Lane-Week-Category-SSL combination
-    # Determine grouping columns - include Category and SSL if they exist
+    # Now analyze each Lane-Week combination
+    # For optimization scenarios, we only group by Lane and Week Number
     group_cols = ['Lane', 'Week Number']
-    if 'Category' in final_filtered_data.columns:
-        group_cols.append('Category')
-    if 'SSL' in final_filtered_data.columns:
-        group_cols.append('SSL')
     
     for group_key, group in final_filtered_data.groupby(group_cols):
         # Unpack group_key dynamically based on columns included
@@ -63,10 +59,8 @@ def calculate_performance_optimization(final_filtered_data, rate_type='Base Rate
         
         lane = group_key[0]
         week = group_key[1]
-        category = group_key[group_cols.index('Category')] if 'Category' in group_cols else None
-        ssl = group_key[group_cols.index('SSL')] if 'SSL' in group_cols else None
         
-        # Get all carriers that service this lane-week-category with their effective performance
+        # Get all carriers that service this lane-week with their effective performance
         carriers_performance = {}
         
         for _, record in group.iterrows():
@@ -103,13 +97,11 @@ def calculate_performance_optimization(final_filtered_data, rate_type='Base Rate
             lane_week_cost = best_carrier_rate * total_lane_week_volume
             highest_perf_cost += lane_week_cost
             
-            # Create detailed performance optimization data for each record in this lane-week-category
+            # Create detailed performance optimization data for each record in this lane-week
             for _, current in group.iterrows():
                 performance_data = {
                     'Lane': lane,
                     'Week_Number': week,
-                    'Category': category if category is not None else current.get('Category', ''),
-                    'SSL': ssl if ssl is not None else current.get('SSL', ''),
                     'Current_Carrier': current['Dray SCAC(FL)'],
                     'Current_Base_Rate': current[rate_col],
                     'Current_Total_Cost': current[total_rate_col],

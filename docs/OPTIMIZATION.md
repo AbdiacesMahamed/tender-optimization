@@ -92,7 +92,7 @@ Historical volume analysis prevents dramatic shifts:
 
 1. Calculate carrier's average volume share over last 5 weeks
 2. Apply maximum growth limit (default 30%)
-3. New allocation cannot exceed: `historical_share × (1 + max_growth)`
+3. New allocation cannot exceed: `historical_share × (1 + max_growth)`![1767714604414]
 
 **Example:**
 
