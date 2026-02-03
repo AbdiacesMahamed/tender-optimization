@@ -712,7 +712,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             rename_dict_c['Constraint_Description'] = '📝 Description'
         
         if carrier_col_c == 'Dray SCAC(FL)':
-            rename_dict_c['Dray SCAC(FL)'] = 'Carrier'
+            rename_dict_c['Dray SCAC(FL)'] = 'NEW SCAC'
         constrained_display = constrained_display.rename(columns=rename_dict_c)
         
         # Format constrained data
@@ -1106,9 +1106,9 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             'Performance_Score': 'Performance',
             'Original Primary Performance': 'Original Lead Performance'
         }
-        # Always rename carrier column to 'Carrier' for consistency
+        # Always rename carrier column to 'NEW SCAC' for consistency with downstream analysis
         if carrier_col in display_data.columns:
-            rename_dict[carrier_col] = 'Carrier'
+            rename_dict[carrier_col] = 'NEW SCAC'
         if 'Missing_Rate' in display_data.columns:
             rename_dict['Missing_Rate'] = '⚠️ No Rate'
         if 'Allocation Strategy' in display_data.columns:
@@ -1344,9 +1344,19 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             cols.append('Missing_Rate')
         
         display_data = display_data[[c for c in cols if c in display_data.columns]].copy()
+        
+        # ADD CARRIER FLIPS COLUMN for Cheapest Cost scenario (consistent with other scenarios)
+        # Compare against baseline (original filtered data) to show what changed
+        baseline_data = final_filtered_data.copy()
+        display_data = add_detailed_carrier_flips_column(display_data, baseline_data, carrier_col=carrier_col)
+        
+        # Rename column to just "Carrier Flips" for cleaner display
+        if 'Carrier Flips (Detailed)' in display_data.columns:
+            display_data.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
+        
         display_data = display_data.rename(columns={
             'Savings Percentage': 'Savings %',
-            carrier_col: 'Carrier',
+            carrier_col: 'NEW SCAC',
             'Missing_Rate': '⚠️ No Rate'
         }).sort_values('Potential Savings', ascending=False)
         

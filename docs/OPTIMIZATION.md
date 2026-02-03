@@ -2,6 +2,21 @@
 
 The Tender Optimization system provides multiple strategies for allocating containers to carriers.
 
+## Standard Output Columns
+
+All optimization scenarios (Current Selection, Performance, Cheapest Cost, Optimized) export data with these standardized columns for downstream analysis:
+
+| Column                | Description                                                                             |
+| --------------------- | --------------------------------------------------------------------------------------- |
+| **Carrier Flips**     | Shows container movement: `Had X → From CARRIER (+N), Lost N → To CARRIER (-N) → Now Y` |
+| **Container Numbers** | Comma-separated list of container IDs assigned to the carrier                           |
+| **NEW SCAC**          | The carrier assigned in this scenario (renamed from `Dray SCAC(FL)`)                    |
+| **Discharged Port**   | Port code (e.g., OAK, LAX, BAL)                                                         |
+| **Category**          | Container category type                                                                 |
+| **Week Number**       | Week number for the allocation                                                          |
+
+> **Note:** The `NEW SCAC` column is intentionally named to distinguish the optimized carrier assignment from the original `Dray SCAC(FL)` in the source data, enabling easy comparison in downstream tools like the Carrier Flip Analysis script.
+
 ## Available Scenarios
 
 ### 1. Current Selection
@@ -51,7 +66,6 @@ Uses Linear Programming to balance cost and performance, with growth constraints
 2. **Historical Analysis**: Calculate each carrier's market share from last 5 weeks
 
 3. **Growth Limits**: Cap allocation at historical share + max growth %
-
    - Default max growth: 30%
    - Example: Carrier with 20% historical share can grow to max 26% (20% × 1.3)
 
@@ -92,7 +106,7 @@ Historical volume analysis prevents dramatic shifts:
 
 1. Calculate carrier's average volume share over last 5 weeks
 2. Apply maximum growth limit (default 30%)
-3. New allocation cannot exceed: `historical_share × (1 + max_growth)`![1767714604414]
+3. New allocation cannot exceed: `historical_share × (1 + max_growth)`
 
 **Example:**
 
