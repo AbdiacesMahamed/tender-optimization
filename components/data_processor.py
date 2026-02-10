@@ -211,6 +211,10 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
         
         agg_dict = {container_col: combine_containers_unique_per_group}
         
+        # Preserve Ocean ETA through the groupby (same date per group, take first)
+        if 'Ocean ETA' in GVTdata.columns:
+            agg_dict['Ocean ETA'] = 'first'
+        
         # Use dropna=False to include rows with blank Terminal or other NaN values in grouping columns
         lane_count = GVTdata.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
         lane_count = lane_count.rename(columns={container_col: 'Container Numbers'})

@@ -153,7 +153,4 @@ def calculate_optimization_metrics(
 __all__ = [
     "optimize_allocation",
     "calculate_optimization_metrics",
-    "lp_optimize",
-    "allocate_to_cheapest_carrier",
-    "allocate_to_highest_performance",
 ]

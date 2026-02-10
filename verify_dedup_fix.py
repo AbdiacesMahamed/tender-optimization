@@ -5,9 +5,13 @@ This script traces through the data flow to check for container duplicates.
 
 import pandas as pd
 import os
+import sys
 
-# Use the specific GVT file
-gvt_file = r"C:\Users\maabdiac\Downloads\BAL GVT 11.19.xlsx"
+# Accept GVT file path as command-line argument or prompt for it
+if len(sys.argv) > 1:
+    gvt_file = sys.argv[1]
+else:
+    gvt_file = input("Enter path to GVT Excel file: ").strip().strip('"')
 
 print("=" * 80)
 print("DEDUPLICATION FIX VERIFICATION")

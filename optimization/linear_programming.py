@@ -287,9 +287,9 @@ def _optimize_single_group(
     # Create LP problem
     prob = LpProblem(f"Carrier_Optimization_Group", LpMinimize)
     
-    # Decision variables: containers allocated to each carrier
+    # Decision variables: containers allocated to each carrier (Integer since containers are discrete)
     allocation_vars = {
-        carrier: LpVariable(f"alloc_{carrier}", lowBound=0, upBound=total_containers, cat="Continuous")
+        carrier: LpVariable(f"alloc_{carrier}", lowBound=0, upBound=total_containers, cat="Integer")
         for carrier in carriers
     }
     

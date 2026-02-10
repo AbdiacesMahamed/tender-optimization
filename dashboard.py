@@ -28,6 +28,7 @@ from components import (
     calculate_enhanced_metrics, display_current_metrics, show_detailed_analysis_table,
     show_top_savings_opportunities, show_complete_data_export, show_performance_score_analysis,
     show_carrier_performance_matrix,
+    apply_peel_pile_as_constraints,
     
     # Tables and analysis
     show_summary_tables,
@@ -120,6 +121,16 @@ def main():
                 st.warning("⚠️ Constraints file could not be processed")
         else:
             st.info("ℹ️ No constraints file uploaded - all data is unconstrained")
+    
+    # ==================== PEEL PILE CONSTRAINTS ====================
+    # Apply peel pile allocations as constraints (from session state)
+    # This must happen after constraint file processing but before metrics calculation
+    if st.session_state.get('peel_pile_allocations'):
+        constrained_data, unconstrained_data, constraint_summary, peel_pile_carriers = apply_peel_pile_as_constraints(
+            final_filtered_data, constrained_data, unconstrained_data, constraint_summary
+        )
+        # Add peel pile carriers to the max_constrained set so optimization doesn't reassign them
+        max_constrained_carriers = max_constrained_carriers | peel_pile_carriers
     
     # Calculate metrics on the FULL filtered data (before constraint split)
     # Pass unconstrained_data so scenarios (Performance, Cheapest, Optimized) 
