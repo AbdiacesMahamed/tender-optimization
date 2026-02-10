@@ -1448,10 +1448,11 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     # Download
     csv = display_data.to_csv(index=False)
     label_suffix = " (Unconstrained)" if has_constraints else ""
+    download_filename = f"unconstrained_{filename}" if has_constraints else filename
     st.download_button(
         label=f"📥 Download {selected}{label_suffix}",
         data=csv,
-        file_name=filename,
+        file_name=download_filename,
         mime='text/csv',
         use_container_width=True
     )
