@@ -90,6 +90,53 @@ def concat_and_dedupe_containers(values: pd.Series) -> str:
     return ', '.join(unique_containers)
 
 
+def deduplicate_containers_per_lane_week(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Deduplicate container IDs across carriers within the same lane/week.
+    
+    A physical container can only belong to ONE carrier per lane/week (zero sum).
+    If the same container appears under 2 carriers in the same lane/week,
+    it is kept under the first carrier encountered and removed from the second.
+    
+    Container Count and Total Rate/Total CPC are recalculated after dedup.
+    
+    Args:
+        df: DataFrame with Container Numbers, Week Number, and optionally Lane columns.
+        
+    Returns:
+        DataFrame with deduplicated containers per lane/week.
+    """
+    if 'Container Numbers' not in df.columns or 'Week Number' not in df.columns:
+        return df
+    
+    result = df.copy()
+    lane_col = 'Lane' if 'Lane' in result.columns else None
+    seen = {}  # {(week, lane): set of container IDs already assigned}
+    
+    for idx in result.index:
+        week = result.at[idx, 'Week Number']
+        lane = result.at[idx, lane_col] if lane_col else ''
+        cn_str = result.at[idx, 'Container Numbers']
+        if pd.isna(cn_str) or not str(cn_str).strip():
+            continue
+        key = (week, lane)
+        if key not in seen:
+            seen[key] = set()
+        ids = [c.strip() for c in str(cn_str).split(',') if c.strip()]
+        unique_ids = [c for c in ids if c not in seen[key]]
+        seen[key].update(unique_ids)
+        result.at[idx, 'Container Numbers'] = ', '.join(unique_ids) if unique_ids else ''
+        result.at[idx, 'Container Count'] = len(unique_ids)
+    
+    # Recalculate cost columns
+    if 'Base Rate' in result.columns:
+        result['Total Rate'] = result['Base Rate'] * result['Container Count']
+    if 'CPC' in result.columns:
+        result['Total CPC'] = result['CPC'] * result['Container Count']
+    
+    return result
+
+
 # ==================== DATA GROUPING UTILITIES ====================
 
 def get_grouping_columns(

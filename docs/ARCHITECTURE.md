@@ -103,6 +103,10 @@ flowchart LR
         PEEL[apply_peel_pile_as_constraints]
     end
 
+    subgraph Deduplication
+        DEDUP[deduplicate_containers_per_lane_week<br/>Zero-sum: 1 container = 1 carrier per lane/week]
+    end
+
     subgraph Output
         CONST_D[Constrained Data<br/>Locked Allocations]
         UNCONST_D[Unconstrained Data<br/>Available for Optimization]
@@ -115,8 +119,9 @@ flowchart LR
     CONS --> PROC_C --> APPLY_C
     FILT --> APPLY_C
     APPLY_C --> PEEL
-    PEEL --> CONST_D
-    PEEL --> UNCONST_D
+    PEEL --> DEDUP
+    DEDUP --> CONST_D
+    DEDUP --> UNCONST_D
 ```
 
 ## Scenario Calculation Flow

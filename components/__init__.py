@@ -15,7 +15,8 @@ from .utils import (
     format_currency,
     format_percentage,
     format_number,
-    filter_excluded_carrier_facility_rows
+    filter_excluded_carrier_facility_rows,
+    deduplicate_containers_per_lane_week
 )
 
 # Configuration and styling

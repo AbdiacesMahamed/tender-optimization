@@ -223,17 +223,26 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
     if 'Performance_Score' in scenario_data.columns and len(scenario_data) > 0:
         try:
             carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
-            # Filter out excluded carrier+facility combinations before allocation
             filtered_scenario_data = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
+            
+            # Split: only optimize rows with valid rates
+            has_valid_rate = filtered_scenario_data['Base Rate'].notna() & (filtered_scenario_data['Base Rate'] != 0)
+            rated_perf = filtered_scenario_data[has_valid_rate].copy()
+            unrated_perf = filtered_scenario_data[~has_valid_rate].copy()
+            
             performance_allocated = allocate_to_highest_performance(
-                filtered_scenario_data,
+                rated_perf,
                 carrier_column=carrier_col,
                 container_column='Container Count',
                 performance_column='Performance_Score',
                 container_numbers_column='Container Numbers',
             )
+            # Recombine
+            if len(unrated_perf) > 0:
+                performance_allocated = pd.concat([performance_allocated, unrated_perf], ignore_index=True)
             if rate_cols['total_rate'] in performance_allocated.columns:
                 performance_cost = performance_allocated[rate_cols['total_rate']].sum()
+            st.session_state['_cached_perf_allocated'] = performance_allocated
         except (ValueError, KeyError):
             pass
     
@@ -289,13 +298,7 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
                         cheapest_per_group = cheapest_per_group.merge(container_numbers_concat, on=group_cols_cheap, how='left')
                         
                         # Recalculate Container Count from concatenated Container Numbers
-                        def count_containers_in_string(container_str):
-                            if pd.isna(container_str) or not str(container_str).strip():
-                                return 0
-                            containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
-                            return len(containers)
-                        
-                        cheapest_per_group['Container Count'] = cheapest_per_group['_container_numbers_all'].apply(count_containers_in_string)
+                        cheapest_per_group['Container Count'] = cheapest_per_group['_container_numbers_all'].apply(count_containers)
                     else:
                         # Fall back to summing Container Count if Container Numbers doesn't exist
                         container_totals = working.groupby(group_cols_cheap)['Container Count'].sum()
@@ -327,34 +330,40 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
             
             # CRITICAL: Recalculate Container Count from Container Numbers to ensure consistency
             if 'Container Numbers' in optimization_source.columns:
-                def count_containers_from_string(container_str):
-                    """Count actual container IDs in a comma-separated string"""
-                    if pd.isna(container_str) or not str(container_str).strip():
-                        return 0
-                    return len([c.strip() for c in str(container_str).split(',') if c.strip()])
-                
-                optimization_source['Container Count'] = optimization_source['Container Numbers'].apply(count_containers_from_string)
+                optimization_source['Container Count'] = optimization_source['Container Numbers'].apply(count_containers)
+            
+            # Split: only optimize rows with valid rates. Unrated rows pass through unchanged.
+            has_valid_rate = optimization_source['Base Rate'].notna() & (optimization_source['Base Rate'] != 0)
+            rated_data = optimization_source[has_valid_rate].copy()
+            unrated_data = optimization_source[~has_valid_rate].copy()
             
             # Get optimization parameters from session state
             cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0
             performance_weight = st.session_state.get('opt_performance_weight', 30) / 100.0
             max_growth_pct = st.session_state.get('opt_max_growth_pct', 30) / 100.0
             
-            optimized_allocated = cascading_allocate_with_constraints(
-                optimization_source,
-                max_growth_pct=max_growth_pct,
-                cost_weight=cost_weight,
-                performance_weight=performance_weight,
-                n_historical_weeks=5,
-                carrier_column=carrier_col,
-                container_column='Container Count',
-                excluded_carriers=max_constrained_carriers,  # Exclude carriers with maximum constraints
-                historical_data=historical_data_source,  # Use unfiltered data for stable historical percentages
-            )
+            optimized_allocated = None
+            if len(rated_data) > 0:
+                optimized_allocated = cascading_allocate_with_constraints(
+                    rated_data,
+                    max_growth_pct=max_growth_pct,
+                    cost_weight=cost_weight,
+                    performance_weight=performance_weight,
+                    n_historical_weeks=5,
+                    carrier_column=carrier_col,
+                    container_column='Container Count',
+                    excluded_carriers=max_constrained_carriers,
+                    historical_data=historical_data_source,
+                )
             
+            # Recombine: optimized rated rows + unchanged unrated rows
             if optimized_allocated is not None and len(optimized_allocated) > 0:
+                if len(unrated_data) > 0:
+                    optimized_allocated = pd.concat([optimized_allocated, unrated_data], ignore_index=True)
                 if rate_cols['total_rate'] in optimized_allocated.columns:
                     optimized_cost = optimized_allocated[rate_cols['total_rate']].sum()
+                # Cache result for reuse in detailed analysis table
+                st.session_state['_cached_opt_allocated'] = optimized_allocated
         except (ValueError, KeyError, ImportError):
             pass
 
@@ -562,19 +571,6 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     if carrier_facility_exclusions is None:
         carrier_facility_exclusions = {}
     
-    bal_wk47_final = final_filtered_data[
-        (final_filtered_data['Discharged Port'] == 'BAL') & 
-        (final_filtered_data['Week Number'] == 47)
-    ]
-    bal_wk47_uncon = unconstrained_data[
-        (unconstrained_data['Discharged Port'] == 'BAL') & 
-        (unconstrained_data['Week Number'] == 47)
-    ] if len(unconstrained_data) > 0 else pd.DataFrame()
-    bal_wk47_con = constrained_data[
-        (constrained_data['Discharged Port'] == 'BAL') & 
-        (constrained_data['Week Number'] == 47)
-    ] if len(constrained_data) > 0 else pd.DataFrame()
-    
     # Get metrics if not provided
     if metrics is None:
         metrics = calculate_enhanced_metrics(final_filtered_data)
@@ -595,29 +591,23 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     
     selected = st.selectbox("📊 Select Strategy:", strategy_options)
     
+    # Clean up cached scenario results not needed for the selected strategy
+    if selected != 'Performance':
+        st.session_state.pop('_cached_perf_allocated', None)
+    if selected != 'Optimized':
+        st.session_state.pop('_cached_opt_allocated', None)
+    
     # Show constraint info if applicable
     if has_constraints:
         # Recalculate constrained container count from Container Numbers for accuracy
         if 'Container Numbers' in constrained_data.columns:
-            def count_containers_from_string(container_str):
-                """Count actual container IDs in a comma-separated string"""
-                if pd.isna(container_str) or not str(container_str).strip():
-                    return 0
-                return len([c.strip() for c in str(container_str).split(',') if c.strip()])
-            
-            constrained_containers = constrained_data['Container Numbers'].apply(count_containers_from_string).sum()
+            constrained_containers = constrained_data['Container Numbers'].apply(count_containers).sum()
         else:
             constrained_containers = constrained_data['Container Count'].sum()
         
         # Recalculate unconstrained container count from Container Numbers for accuracy
         if 'Container Numbers' in unconstrained_data.columns:
-            def count_containers_from_string(container_str):
-                """Count actual container IDs in a comma-separated string"""
-                if pd.isna(container_str) or not str(container_str).strip():
-                    return 0
-                return len([c.strip() for c in str(container_str).split(',') if c.strip()])
-            
-            unconstrained_containers = unconstrained_data['Container Numbers'].apply(count_containers_from_string).sum()
+            unconstrained_containers = unconstrained_data['Container Numbers'].apply(count_containers).sum()
         else:
             unconstrained_containers = unconstrained_data['Container Count'].sum()
         
@@ -645,13 +635,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         # CRITICAL: Recalculate Container Count from Container Numbers to ensure accuracy
         # This ensures container counts match the actual concatenated container IDs
         if 'Container Numbers' in constrained_display.columns:
-            def count_containers_from_string(container_str):
-                """Count actual container IDs in a comma-separated string"""
-                if pd.isna(container_str) or not str(container_str).strip():
-                    return 0
-                return len([c.strip() for c in str(container_str).split(',') if c.strip()])
-            
-            constrained_display['Container Count'] = constrained_display['Container Numbers'].apply(count_containers_from_string)
+            constrained_display['Container Count'] = constrained_display['Container Numbers'].apply(count_containers)
         
         # ADD CARRIER FLIPS COLUMN for constrained data
         # Compare against original data (final_filtered_data) to show what changed due to constraints
@@ -742,24 +726,24 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     # SAFETY CHECK: Ensure Container Count column exists
     # If Container Numbers exists but Container Count doesn't, calculate it
     if 'Container Numbers' in display_data.columns and 'Container Count' not in display_data.columns:
-        def count_containers_from_string(container_str):
-            """Count actual container IDs in a comma-separated string"""
-            if pd.isna(container_str) or not str(container_str).strip():
-                return 0
-            return len([c.strip() for c in str(container_str).split(',') if c.strip()])
-        display_data['Container Count'] = display_data['Container Numbers'].apply(count_containers_from_string)
+        display_data['Container Count'] = display_data['Container Numbers'].apply(count_containers)
     elif 'Container Count' not in display_data.columns:
         # If neither exists, set to 0 as fallback
         display_data['Container Count'] = 0
 
-    bal_wk47_scenario_source = display_data[
-        (display_data['Discharged Port'] == 'BAL') & 
-        (display_data['Week Number'] == 47)
-    ]
-    
     # Use ALL data regardless of rate availability - no filtering
     display_data_with_rates = display_data.copy()
     missing_rate_rows = pd.DataFrame()  # Empty dataframe - not needed anymore
+    
+    # Verify Container Count matches Container Numbers
+    if 'Container Numbers' in display_data_with_rates.columns:
+        _actual_ids = display_data_with_rates['Container Numbers'].apply(count_containers).sum()
+        if _actual_ids != int(display_data_with_rates['Container Count'].sum()):
+            display_data_with_rates['Container Count'] = display_data_with_rates['Container Numbers'].apply(count_containers)
+            if 'Base Rate' in display_data_with_rates.columns:
+                display_data_with_rates['Total Rate'] = display_data_with_rates['Base Rate'] * display_data_with_rates['Container Count']
+            if 'CPC' in display_data_with_rates.columns:
+                display_data_with_rates['Total CPC'] = display_data_with_rates['CPC'] * display_data_with_rates['Container Count']
     
     # CAPTURE BASELINE DATA for Carrier Flips comparison
     # This represents the "Current Selection" before any scenario transformations
@@ -800,112 +784,113 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             # CRITICAL: Recalculate Container Count from Container Numbers to ensure accuracy
             # This ensures container counts match the actual concatenated container IDs after grouping
             if 'Container Numbers' in display_data.columns:
-                def count_containers_from_string(container_str):
-                    """Count actual container IDs in a comma-separated string"""
-                    if pd.isna(container_str) or not str(container_str).strip():
-                        return 0
-                    return len([c.strip() for c in str(container_str).split(',') if c.strip()])
-                
-                display_data['Container Count'] = display_data['Container Numbers'].apply(count_containers_from_string)
+                display_data['Container Count'] = display_data['Container Numbers'].apply(count_containers)
         
         # When viewing the optimized scenario, reallocate volume using cascading logic with LP + historical constraints
         elif selected == 'Optimized':
+            # Skip cache to enable step-by-step debugging
+            st.session_state.pop('_cached_opt_allocated', None)
+            
             from optimization import cascading_allocate_with_constraints
             
-            # Use data_with_rates to ensure consistent container counts across all scenarios
             optimization_source = display_data_with_rates.copy()
             
-            # APPLY CARRIER+FACILITY EXCLUSIONS: Filter out rows where a carrier is excluded from a specific facility
-            # This prevents excluded carriers from being selected as options at their excluded facilities
             optimization_source = filter_excluded_carrier_facility_rows(optimization_source, carrier_facility_exclusions, carrier_col)
             
-            # Recalculate Container Count from Container Numbers to fix input data mismatches
-            if 'Container Numbers' in optimization_source.columns:
-                def count_containers_from_string(container_str):
-                    """Count actual container IDs in a comma-separated string"""
-                    if pd.isna(container_str) or not str(container_str).strip():
-                        return 0
-                    return len([c.strip() for c in str(container_str).split(',') if c.strip()])
-                
-                optimization_source['Container Count'] = optimization_source['Container Numbers'].apply(count_containers_from_string)
+            # Split: only optimize rows with valid rates
+            has_valid_rate = optimization_source['Base Rate'].notna() & (optimization_source['Base Rate'] != 0)
+            rated_data = optimization_source[has_valid_rate].copy()
+            unrated_data = optimization_source[~has_valid_rate].copy()
             
-            # Get optimization parameters from session state (set by sliders in Optimization Settings tab)
-            cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0  # Convert from % to decimal
+            cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0
             performance_weight = st.session_state.get('opt_performance_weight', 30) / 100.0
             max_growth_pct = st.session_state.get('opt_max_growth_pct', 30) / 100.0
             
             try:
-                allocated = cascading_allocate_with_constraints(
-                    optimization_source,
-                    max_growth_pct=max_growth_pct,
-                    cost_weight=cost_weight,
-                    performance_weight=performance_weight,
-                    n_historical_weeks=5,   # Last 5 weeks of data
-                    carrier_column=carrier_col,
-                    container_column='Container Count',
-                    excluded_carriers=max_constrained_carriers,  # Exclude carriers with maximum constraints
-                    historical_data=historical_data_source,  # Use unfiltered data for stable historical calculations
-                )
+                allocated = None
+                if len(rated_data) > 0:
+                    allocated = cascading_allocate_with_constraints(
+                        rated_data,
+                        max_growth_pct=max_growth_pct,
+                        cost_weight=cost_weight,
+                        performance_weight=performance_weight,
+                        n_historical_weeks=5,
+                        carrier_column=carrier_col,
+                        container_column='Container Count',
+                        excluded_carriers=max_constrained_carriers,
+                        historical_data=historical_data_source,
+                    )
             except (ValueError, ImportError) as exc:
                 st.warning(f"Unable to build optimized scenario: {exc}")
                 display_data = optimization_source
             else:
-                display_data = allocated
+                if allocated is not None and len(allocated) > 0:
+                    if len(unrated_data) > 0:
+                        allocated = pd.concat([allocated, unrated_data], ignore_index=True)
+                    display_data = allocated
+                else:
+                    display_data = optimization_source
+            
+            # Calculate how many containers were reallocated/impacted
+            if 'Volume_Change' in display_data.columns:
+                # Convert to numeric first in case it's a string
+                volume_change_numeric = pd.to_numeric(display_data['Volume_Change'], errors='coerce').fillna(0)
+                optimized_reallocated = int(abs(volume_change_numeric).sum() / 2)  # Divide by 2 to avoid double counting
+                performance_reallocated = optimized_reallocated  # Reuse variable for display logic
                 
-                # Calculate how many containers were reallocated/impacted
-                if 'Volume_Change' in display_data.columns:
-                    # Convert to numeric first in case it's a string
-                    volume_change_numeric = pd.to_numeric(display_data['Volume_Change'], errors='coerce').fillna(0)
-                    optimized_reallocated = int(abs(volume_change_numeric).sum() / 2)  # Divide by 2 to avoid double counting
-                    performance_reallocated = optimized_reallocated  # Reuse variable for display logic
-                    
-                    group_cols = [
-                        col for col in ['Discharged Port', 'Category', 'Lane', 'Facility', 'Week Number']
-                        if col in display_data.columns
-                    ]
-                    if group_cols and optimized_reallocated > 0:
-                        performance_groups_impacted = int(
-                            display_data.loc[
-                                volume_change_numeric != 0,
-                                group_cols
-                            ]
-                            .drop_duplicates()
-                            .shape[0]
-                        )
+                group_cols = [
+                    col for col in ['Discharged Port', 'Category', 'Lane', 'Facility', 'Week Number']
+                    if col in display_data.columns
+                ]
+                if group_cols and optimized_reallocated > 0:
+                    performance_groups_impacted = int(
+                        display_data.loc[
+                            volume_change_numeric != 0,
+                            group_cols
+                        ]
+                        .drop_duplicates()
+                        .shape[0]
+                    )
+            
 
         # When viewing the performance scenario, reallocate volume using performance_logic
         elif selected == 'Performance':
-            # Use data_with_rates to ensure consistent container counts across all scenarios
             performance_source = display_data_with_rates.copy()
-            
-            # APPLY CARRIER+FACILITY EXCLUSIONS: Filter out rows where a carrier is excluded from a specific facility
-            # This prevents excluded carriers from being selected as options at their excluded facilities
-            performance_source = filter_excluded_carrier_facility_rows(performance_source, carrier_facility_exclusions, carrier_col)
-            
-            # Recalculate Container Count from Container Numbers to fix input data mismatches
-            if 'Container Numbers' in performance_source.columns:
-                def count_containers_from_string(container_str):
-                    """Count actual container IDs in a comma-separated string"""
-                    if pd.isna(container_str) or not str(container_str).strip():
-                        return 0
-                    return len([c.strip() for c in str(container_str).split(',') if c.strip()])
-                
-                performance_source['Container Count'] = performance_source['Container Numbers'].apply(count_containers_from_string)
-            
             if carrier_col in performance_source.columns:
                 performance_source['Original Carrier'] = performance_source[carrier_col]
-            try:
-                allocated = allocate_to_highest_performance(
-                    performance_source,
-                    carrier_column=carrier_col,
-                    container_column='Container Count',
-                    performance_column='Performance_Score',
-                    container_numbers_column='Container Numbers',
-                )
-            except ValueError as exc:
-                st.warning(f"Unable to build performance scenario: {exc}")
-                display_data = performance_source
+            
+            # Try cached result from calculate_enhanced_metrics (same deduped data)
+            cached_perf = st.session_state.pop('_cached_perf_allocated', None)
+            allocated = None
+            
+            if cached_perf is not None and len(cached_perf) > 0:
+                allocated = cached_perf
             else:
+                perf_input = filter_excluded_carrier_facility_rows(performance_source.copy(), carrier_facility_exclusions, carrier_col)
+                if 'Container Numbers' in perf_input.columns:
+                    perf_input['Container Count'] = perf_input['Container Numbers'].apply(count_containers)
+                
+                # Split: only optimize rows with valid rates
+                has_valid_rate = perf_input['Base Rate'].notna() & (perf_input['Base Rate'] != 0)
+                rated_perf = perf_input[has_valid_rate].copy()
+                unrated_perf = perf_input[~has_valid_rate].copy()
+                
+                try:
+                    allocated = allocate_to_highest_performance(
+                        rated_perf,
+                        carrier_column=carrier_col,
+                        container_column='Container Count',
+                        performance_column='Performance_Score',
+                        container_numbers_column='Container Numbers',
+                    )
+                    # Recombine
+                    if len(unrated_perf) > 0:
+                        allocated = pd.concat([allocated, unrated_perf], ignore_index=True)
+                except ValueError as exc:
+                    st.warning(f"Unable to build performance scenario: {exc}")
+                    display_data = performance_source
+            
+            if allocated is not None:
                 group_cols = [
                     col for col in ['Discharged Port', 'Category', 'Lane', 'Facility', 'Terminal', 'Week Number']
                     if col in performance_source.columns
@@ -1198,13 +1183,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         
         # Recalculate Container Count from Container Numbers to fix input data mismatches
         if 'Container Numbers' in source_data.columns:
-            def count_containers_from_string(container_str):
-                """Count actual container IDs in a comma-separated string"""
-                if pd.isna(container_str) or not str(container_str).strip():
-                    return 0
-                return len([c.strip() for c in str(container_str).split(',') if c.strip()])
-            
-            source_data['Container Count'] = source_data['Container Numbers'].apply(count_containers_from_string)
+            source_data['Container Count'] = source_data['Container Numbers'].apply(count_containers)
         
         # Keep ALL carriers regardless of rate availability
         # Ensure rate column is numeric but don't filter out NaN values yet
@@ -1286,15 +1265,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                 
                 # Recalculate Container Count based on actual container IDs in the concatenated string
                 # This ensures Container Count matches the number of containers listed in Container Numbers
-                def count_containers_in_string(container_str):
-                    """Count actual container IDs in a comma-separated string"""
-                    if pd.isna(container_str) or not str(container_str).strip():
-                        return 0
-                    # Split by comma and count non-empty items
-                    containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
-                    return len(containers)
-                
-                cheapest_per_group['_actual_container_count'] = cheapest_per_group['Container Numbers'].apply(count_containers_in_string)
+                cheapest_per_group['_actual_container_count'] = cheapest_per_group['Container Numbers'].apply(count_containers)
             
             # Assign total containers to the cheapest carrier
             cheapest_per_group = cheapest_per_group.merge(container_totals, on=group_cols, how='left')
@@ -1385,11 +1356,6 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             display_data = pd.concat([display_data, missing_rate_rows], ignore_index=True)
         
     st.info(desc)
-    
-    bal_wk47_final_display = display_data[
-        (display_data['Discharged Port'] == 'BAL') & 
-        (display_data['Week Number'] == 47)
-    ] if 'Discharged Port' in display_data.columns else pd.DataFrame()
     # Format columns for display - use dynamic rate columns
     rate_cols = get_rate_columns()
     display_formatted = display_data.copy()
@@ -1495,13 +1461,8 @@ def show_peel_pile_analysis(data):
     
     # Calculate container count per Vessel
     if 'Container Numbers' in data.columns:
-        def count_containers_from_string(container_str):
-            if pd.isna(container_str) or not str(container_str).strip():
-                return 0
-            return len([c.strip() for c in str(container_str).split(',') if c.strip()])
-        
         data_copy = data.copy()
-        data_copy['_container_count'] = data_copy['Container Numbers'].apply(count_containers_from_string)
+        data_copy['_container_count'] = data_copy['Container Numbers'].apply(count_containers)
     else:
         data_copy = data.copy()
         data_copy['_container_count'] = data_copy['Container Count']

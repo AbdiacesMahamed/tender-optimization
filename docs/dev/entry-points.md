@@ -11,10 +11,11 @@ The primary Streamlit application. Orchestrates the full pipeline:
 6. **Filters**: `show_rate_type_selector()`, `show_filter_interface()`, `apply_filters_to_data()`
 7. **Constraints**: `process_constraints_file()`, `apply_constraints_to_data()`
 8. **Peel pile constraints**: `apply_peel_pile_as_constraints()` (from session state)
-9. **Metrics**: `calculate_enhanced_metrics()` → cost calculations for all 4 scenarios
-10. **Display**: `display_current_metrics()` → cost cards, `show_detailed_analysis_table()` → main table
-11. **Analytics**: `show_advanced_analytics()`, `show_interactive_visualizations()`
-12. **Historic volume**: `show_historic_volume_analysis()`
+9. **Container deduplication**: `deduplicate_containers_per_lane_week()` on `final_filtered_data`, `constrained_data`, and `unconstrained_data` — ensures each container belongs to only one carrier per lane/week before any calculations
+10. **Metrics**: `calculate_enhanced_metrics()` → cost calculations for all 4 scenarios
+11. **Display**: `display_current_metrics()` → cost cards, `show_detailed_analysis_table()` → main table
+12. **Analytics**: `show_advanced_analytics()`, `show_interactive_visualizations()`
+13. **Historic volume**: `show_historic_volume_analysis()`
 
 Run with: `streamlit run dashboard.py`
 

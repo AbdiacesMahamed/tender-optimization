@@ -149,7 +149,13 @@ def optimize_carrier_allocation(
     # Convert to numeric once and handle missing values upfront
     working = data.copy()
     working[container_column] = pd.to_numeric(working[container_column], errors="coerce").fillna(0)
-    working[rate_column] = pd.to_numeric(working[rate_column], errors="coerce").fillna(0)
+    # CRITICAL: Missing rates should NOT be treated as $0 (free).
+    # Fill with a high penalty so carriers with no rate are ranked last.
+    working['_has_rate'] = working[rate_column].notna() & (working[rate_column] != 0)
+    max_known_rate = pd.to_numeric(working[rate_column], errors="coerce").max()
+    penalty_rate = max_known_rate * 10 if pd.notna(max_known_rate) and max_known_rate > 0 else 999999
+    working[rate_column] = pd.to_numeric(working[rate_column], errors="coerce").fillna(penalty_rate)
+    working.loc[working[rate_column] == 0, rate_column] = penalty_rate
     
     if has_performance:
         working[performance_column] = pd.to_numeric(working[performance_column], errors="coerce").fillna(0).clip(0, 1)
@@ -229,19 +235,18 @@ def _optimize_single_group(
     if len(carriers) == 0:
         return None
     
-    # Collect all container numbers for this group
+    # Collect all container numbers for this group — vectorized
     all_container_numbers = []
     if container_numbers_column in group_data.columns:
-        for containers_str in group_data[container_numbers_column]:
-            if pd.notna(containers_str) and str(containers_str).strip():
-                all_container_numbers.extend([c.strip() for c in str(containers_str).split(',') if c.strip()])
+        all_container_numbers = [
+            c.strip()
+            for s in group_data[container_numbers_column].dropna()
+            for c in str(s).split(',')
+            if c.strip()
+        ]
     
-    # CRITICAL: Use actual container ID count as the source of truth
-    # This ensures allocations are based on real container IDs, not potentially mismatched Container Count values
-    if all_container_numbers:
-        actual_container_count = len(all_container_numbers)
-        if actual_container_count != total_containers:
-            total_containers = actual_container_count
+    # Use the summed Container Count as source of truth (already deduped upstream)
+    # Don't override with len(all_container_numbers) as container IDs may not perfectly match counts
     
     # If only one carrier, assign all containers to it
     if len(carriers) == 1:
@@ -287,9 +292,9 @@ def _optimize_single_group(
     # Create LP problem
     prob = LpProblem(f"Carrier_Optimization_Group", LpMinimize)
     
-    # Decision variables: containers allocated to each carrier (Integer since containers are discrete)
+    # Decision variables: containers allocated to each carrier (Continuous for exact splits, rounded after)
     allocation_vars = {
-        carrier: LpVariable(f"alloc_{carrier}", lowBound=0, upBound=total_containers, cat="Integer")
+        carrier: LpVariable(f"alloc_{carrier}", lowBound=0, upBound=total_containers, cat="Continuous")
         for carrier in carriers
     }
     
@@ -336,6 +341,23 @@ def _optimize_single_group(
         cheapest_carrier = min(carriers, key=lambda c: carrier_data[c]['rate'])
         significant_allocations = {cheapest_carrier: total_containers}
     
+    # Round allocations while preserving total container count
+    # Use largest-remainder method to ensure sum == total_containers
+    floored = {c: int(v) for c, v in significant_allocations.items()}
+    remainders = {c: significant_allocations[c] - floored[c] for c in floored}
+    shortfall = total_containers - sum(floored.values())
+    # Give the shortfall to carriers with the largest fractional remainders
+    for c in sorted(remainders, key=remainders.get, reverse=True):
+        if shortfall <= 0:
+            break
+        floored[c] += 1
+        shortfall -= 1
+    significant_allocations = {c: v for c, v in floored.items() if v > 0}
+    
+    if not significant_allocations:
+        cheapest_carrier = min(carriers, key=lambda c: carrier_data[c]['rate'])
+        significant_allocations = {cheapest_carrier: total_containers}
+    
     # Build result DataFrame
     result_rows = []
     
@@ -343,9 +365,6 @@ def _optimize_single_group(
     # (all_container_numbers was collected when we validated total_containers)
     
     for carrier, allocated_count in significant_allocations.items():
-        # Round to nearest integer
-        allocated_count = round(allocated_count)
-        
         if allocated_count == 0:
             continue
         
@@ -377,24 +396,11 @@ def _optimize_single_group(
     
     result = pd.DataFrame(result_rows)
     
-    # CRITICAL: Recalculate Container Count from Container Numbers after assignment
-    # This ensures Container Count always matches the actual number of IDs in Container Numbers
-    if container_numbers_column in result.columns:
-        def count_containers_in_string(container_str):
-            """Count actual container IDs in a comma-separated string"""
-            if pd.isna(container_str) or not str(container_str).strip():
-                return 0
-            containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
-            return len(containers)
-        
-        result[container_column] = result[container_numbers_column].apply(count_containers_in_string)
-        
-        # CRITICAL: Recalculate Total Cost using the NEW Container Count
-        # Support both Base Rate and CPC for dynamic rate selection
-        if 'Base Rate' in result.columns:
-            result['Total Rate'] = result['Base Rate'] * result[container_column]
-        if 'CPC' in result.columns:
-            result['Total CPC'] = result['CPC'] * result[container_column]
+    # Recalculate costs based on allocated Container Count (don't override count from container IDs)
+    if 'Base Rate' in result.columns:
+        result['Total Rate'] = result['Base Rate'] * result[container_column]
+    if 'CPC' in result.columns:
+        result['Total CPC'] = result['CPC'] * result[container_column]
     
     return result
 

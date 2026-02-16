@@ -38,7 +38,8 @@ from components import (
     
     # Utilities
     show_calculation_logic, show_debug_performance_merge, show_footer,
-    show_performance_assignments_table, export_performance_assignments
+    show_performance_assignments_table, export_performance_assignments,
+    deduplicate_containers_per_lane_week
 )
 
 from components.constraints_processor import (
@@ -131,6 +132,14 @@ def main():
         )
         # Add peel pile carriers to the max_constrained set so optimization doesn't reassign them
         max_constrained_carriers = max_constrained_carriers | peel_pile_carriers
+    
+    # ==================== DEDUPLICATE CONTAINERS ====================
+    # A container can only belong to ONE carrier per lane/week (zero sum).
+    # Apply dedup before metrics so cost cards and detailed table use the same data.
+    final_filtered_data = deduplicate_containers_per_lane_week(final_filtered_data)
+    if len(constrained_data) > 0:
+        constrained_data = deduplicate_containers_per_lane_week(constrained_data)
+    unconstrained_data = deduplicate_containers_per_lane_week(unconstrained_data)
     
     # Calculate metrics on the FULL filtered data (before constraint split)
     # Pass unconstrained_data so scenarios (Performance, Cheapest, Optimized) 

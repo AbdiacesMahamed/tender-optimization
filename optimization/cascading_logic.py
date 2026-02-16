@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple, Set
 import pandas as pd
+import logging
+logger = logging.getLogger(__name__)
 import numpy as np
 
 from .linear_programming import optimize_carrier_allocation
@@ -122,8 +124,8 @@ def cascading_allocate_with_constraints(
         if len(excluded_data) > 0:
             excluded_containers = excluded_data[container_column].sum()
             valid_excluded = [c for c in excluded_carriers if pd.notna(c)]
-            print(f"🔒 Found {len(excluded_data)} rows ({excluded_containers:.0f} containers) from {len(excluded_carriers)} carriers with maximum constraints: {', '.join(sorted(valid_excluded))}")
-            print(f"   These containers will be reallocated to available carriers or marked as unallocatable.")
+            logger.debug(f"🔒 Found {len(excluded_data)} rows ({excluded_containers:.0f} containers) from {len(excluded_carriers)} carriers with maximum constraints: {', '.join(sorted(valid_excluded))}")
+            logger.debug(f"   These containers will be reallocated to available carriers or marked as unallocatable.")
     
     # Determine grouping columns - must match data_processor.py grouping
     # to prevent mixing containers from different groups
@@ -154,7 +156,7 @@ def cascading_allocate_with_constraints(
             category_column=category_column,
         )
     except Exception as e:
-        print(f"Warning: Could not calculate historical volume: {e}")
+        logger.debug(f"Warning: Could not calculate historical volume: {e}")
         historical_share = pd.DataFrame()
     
     # Run LP optimization to get carrier rankings
@@ -167,7 +169,7 @@ def cascading_allocate_with_constraints(
             container_column=container_column,
         )
     except Exception as e:
-        print(f"Warning: LP optimization failed: {e}")
+        logger.debug(f"Warning: LP optimization failed: {e}")
         # Fallback to cheapest carrier if LP fails
         lp_results = data.copy()
     
@@ -246,9 +248,12 @@ def _cascading_allocate_single_group(
         # Collect container numbers from excluded carriers
         container_numbers_column = "Container Numbers"
         if container_numbers_column in excluded_group_data.columns:
-            for containers_str in excluded_group_data[container_numbers_column]:
-                if pd.notna(containers_str) and str(containers_str).strip():
-                    excluded_container_numbers.extend([c.strip() for c in str(containers_str).split(',') if c.strip()])
+            excluded_container_numbers = [
+                c.strip()
+                for s in excluded_group_data[container_numbers_column].dropna()
+                for c in str(s).split(',')
+                if c.strip()
+            ]
     
     # Total containers to allocate = allocatable + excluded (to be reallocated)
     total_containers_to_allocate = total_containers + excluded_containers
@@ -278,25 +283,22 @@ def _cascading_allocate_single_group(
     all_container_numbers = []
     container_numbers_column = "Container Numbers"
     if container_numbers_column in group_data.columns:
-        for containers_str in group_data[container_numbers_column]:
-            if pd.notna(containers_str) and str(containers_str).strip():
-                all_container_numbers.extend([c.strip() for c in str(containers_str).split(',') if c.strip()])
+        all_container_numbers = [
+            c.strip()
+            for s in group_data[container_numbers_column].dropna()
+            for c in str(s).split(',')
+            if c.strip()
+        ]
     
     # Add excluded container numbers to the pool
     all_container_numbers.extend(excluded_container_numbers)
     
-    # CRITICAL FIX: Deduplicate container IDs to prevent the same container from being assigned to multiple carriers
-    # This can happen when the same container appears under multiple carriers in the input data
-    # Each physical container should only be allocated once
+    # Deduplicate container IDs within this group for clean assignment
+    # (upstream dedup already handled cross-carrier dedup per lane/week)
     all_container_numbers = list(dict.fromkeys(all_container_numbers))  # Preserve order while deduplicating
     
-    # CRITICAL: Use actual container ID count as the source of truth
-    # This ensures allocations are based on real container IDs, not potentially mismatched Container Count values
-    if all_container_numbers:
-        actual_container_count = len(all_container_numbers)
-        if actual_container_count != total_containers_to_allocate:
-            # Use the actual count from Container Numbers as the source of truth
-            total_containers_to_allocate = actual_container_count
+    # Use the summed Container Count as source of truth (already deduped upstream)
+    # Don't override with len(all_container_numbers) as container IDs may not perfectly match counts
     
     # Build carrier lookup
     carrier_data = {}
@@ -422,26 +424,14 @@ def _cascading_allocate_single_group(
                         unique_containers.append(c)
                 result.at[idx, container_numbers_column] = ", ".join(unique_containers) if unique_containers else ""
     
-    # CRITICAL: Recalculate Container Count from Container Numbers after deduplication
-    # This ensures Container Count always matches the actual number of IDs in Container Numbers
+    # Recalculate percentages and costs based on allocated Container Count
+    # (Don't override Container Count from Container Numbers — use the allocation as source of truth)
     if container_numbers_column in result.columns:
-        def count_containers_in_string(container_str):
-            """Count actual container IDs in a comma-separated string"""
-            if pd.isna(container_str) or not str(container_str).strip():
-                return 0
-            containers = [c.strip() for c in str(container_str).split(',') if c.strip()]
-            return len(containers)
-        
-        result[container_column] = result[container_numbers_column].apply(count_containers_in_string)
-        
-        # CRITICAL: Recalculate New_Allocation_Pct using the NEW Container Count
-        # This ensures the percentage reflects the actual container count after recalculation
         total_containers_actual = result[container_column].sum()
         if total_containers_actual > 0 and 'New_Allocation_Pct' in result.columns:
             result['New_Allocation_Pct'] = (result[container_column] / total_containers_actual * 100).fillna(0)
         
-        # CRITICAL: Recalculate Total Cost using the NEW Container Count
-        # Support both Base Rate and CPC for dynamic rate selection
+        # Recalculate Total Cost using the allocated Container Count
         if 'Base Rate' in result.columns:
             result['Total Rate'] = result['Base Rate'] * result[container_column]
         if 'CPC' in result.columns:
@@ -585,7 +575,7 @@ def _cascade_allocate_volume(
         
         # Allocate
         allocated = min(remaining, max_allowed_containers)
-        allocations[carrier] = round(allocated)  # Round to whole number
+        allocations[carrier] = allocated  # Store exact value, round later
         remaining -= allocated
         
         # Generate notes
@@ -619,49 +609,39 @@ def _cascade_allocate_volume(
                 f"Allocated: {allocated:.0f} containers{limit_note}"
             )
     
-    # Second pass: if volume remains, cascade to carriers that can take more
-    # (Carriers with no historical data or below their cap)
+    # Second pass: if volume remains, allow ALL carriers to take more (bypass growth cap)
+    # This handles cases where growth caps prevented full allocation in the first pass
     if remaining > 0:
         for carrier in sorted_carriers:
             if remaining <= 0:
                 break
             
-            hist_pct = historical_pcts.get(carrier, 0)
             current_allocation = allocations[carrier]
-            current_pct = (current_allocation / total_containers * 100) if total_containers > 0 else 0
-            
-            # Check if carrier can take more
-            if hist_pct == 0:
-                # New carrier: can grow up to 100%
-                additional_capacity = total_containers - current_allocation
-            else:
-                # Existing carrier: already at cap, skip
-                continue
+            additional_capacity = total_containers - current_allocation
             
             if additional_capacity > 0:
                 additional = min(remaining, additional_capacity)
                 allocations[carrier] += additional
                 remaining -= additional
                 
-                # Update notes - show if at growth limit
+                # Update notes
                 new_pct = (allocations[carrier] / total_containers * 100) if total_containers > 0 else 0
                 rank = carrier_ranks.get(carrier, 999)
+                hist_pct = historical_pcts.get(carrier, 0)
                 
-                # Check if this carrier hit the growth limit (100% for new carriers)
-                max_allowed_pct = max_growth_pct * 100  # For new carriers, max is max_growth_pct of total
-                if new_pct >= max_allowed_pct - 0.1:
-                    # At growth limit
+                if hist_pct > 0:
+                    change_pct = new_pct - hist_pct
+                    change_abs = allocations[carrier] - ((hist_pct / 100) * total_containers)
                     notes[carrier] = (
                         f"Rank #{rank} | "
-                        f"Historical: 0% (new carrier) → New: {new_pct:.1f}% | "
-                        f"Allocated: {allocations[carrier]:.0f} containers (at {max_growth_pct*100:.0f}% growth limit)"
+                        f"Historical: {hist_pct:.1f}% → New: {new_pct:.1f}% | "
+                        f"Change: {change_pct:+.1f}% ({change_abs:+.0f} containers) (overflow from growth caps)"
                     )
                 else:
-                    # Not at limit, just cascaded
                     notes[carrier] = (
                         f"Rank #{rank} | "
                         f"Historical: 0% (new carrier) → New: {new_pct:.1f}% | "
-                        f"Allocated: {allocations[carrier]:.0f} containers (cascaded, limit {max_growth_pct*100:.0f}%)"
+                        f"Allocated: {allocations[carrier]:.0f} containers (overflow from growth caps)"
                     )
     
     # Third pass: if volume still remains, assign to rank 1 (best) carrier
@@ -715,6 +695,18 @@ def _cascade_allocate_volume(
                 )
         
         remaining = 0  # All volume now allocated
+    
+    # Final step: round all allocations to integers while preserving total_containers
+    # Use largest-remainder method so sum(rounded) == total_containers
+    floored = {c: int(v) for c, v in allocations.items()}
+    remainders = {c: allocations[c] - floored[c] for c in allocations}
+    shortfall = int(round(total_containers)) - sum(floored.values())
+    for c in sorted(remainders, key=remainders.get, reverse=True):
+        if shortfall <= 0:
+            break
+        floored[c] += 1
+        shortfall -= 1
+    allocations = floored
     
     return allocations, notes
 

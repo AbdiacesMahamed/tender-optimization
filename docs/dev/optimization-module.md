@@ -21,7 +21,9 @@ Key functions:
 - `_optimize_single_group(group_data, ...)` — Solves LP for one lane/week group
 - `_normalize_values(values, lower_is_better)` — Min-max normalization for objective function
 
-Decision variables are **Integer** (container counts per carrier). The objective minimizes `cost_weight * normalized_cost - performance_weight * normalized_performance`.
+Decision variables are **Continuous** (fractional splits allowed). After solving, allocations are rounded to integers using the **largest-remainder method** which guarantees `sum(rounded) == total_containers`. This prevents container loss from rounding.
+
+The objective minimizes `cost_weight * normalized_cost + performance_weight * (1 - normalized_performance)`.
 
 ### optimization/performance_logic.py — Highest Performance Allocation
 Allocates 100% of containers in each lane/week to the carrier with the highest `Performance_Score`.
@@ -38,13 +40,14 @@ Key functions:
 - `_cascading_allocate_single_group(group_data, ...)` — Per-group allocation
 - `_rank_carriers_from_lp(group_data, ...)` — Uses LP to rank carriers by cost/performance score
 - `_get_historical_percentages(carrier, lane, historical_data, ...)` — Looks up carrier's historical market share
-- `_cascade_allocate_volume(ranked_carriers, total_volume, historical_pcts, max_growth_pct)` — Distributes volume respecting growth caps
+- `_cascade_allocate_volume(ranked_carriers, total_volume, historical_pcts, max_growth_pct)` — Distributes volume respecting growth caps, uses largest-remainder rounding to preserve totals
 
 Flow per group:
 1. Rank carriers using LP objective scores
 2. Look up each carrier's historical volume share (last N weeks)
 3. Allocate volume top-down, capping each carrier at `historical_share + max_growth_pct`
 4. Overflow goes to next-ranked carrier
+5. Final rounding uses largest-remainder method to preserve total container count
 
 ### optimization/historic_volume.py — Historical Volume Analysis
 Calculates carrier market share from historical data.
@@ -69,3 +72,6 @@ Streamlit display for historical volume analysis:
 | Cost Weight | `opt_cost_weight` | 70 | % weight for cost in LP objective |
 | Performance Weight | `opt_performance_weight` | 30 | % weight for performance in LP objective |
 | Max Growth | `opt_max_growth_pct` | 30 | Max % a carrier can grow beyond historical share |
+
+## Logging
+All `print()` statements replaced with `logging.getLogger(__name__).debug()`. Clean console by default.

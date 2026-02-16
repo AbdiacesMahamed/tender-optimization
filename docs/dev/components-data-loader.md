@@ -26,6 +26,9 @@ Excel files → show_file_upload_section() → load_data_files() → raw DataFra
                                                           data_processor.py
 ```
 
+## Logging
+All `st.write()` and `print()` debug statements replaced with `logging.getLogger(__name__).debug()`. Console is clean by default.
+
 ## Dependencies
 - `streamlit` (file upload widgets)
 - `pandas` / `openpyxl` (Excel reading)
