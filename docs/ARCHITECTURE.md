@@ -86,7 +86,7 @@ flowchart LR
 
     subgraph Processing
         LOAD[load_data_files]
-        VAL_G[validate_gvt_data<br/>Parse Ocean ETA<br/>Calculate Week Number<br/>Create Lane/Lookup]
+        VAL_G[validate_gvt_data<br/>Exclude Canada<br/>Parse Ocean ETA<br/>Calculate Week Number<br/>Create Lane/Lookup]
         VAL_R[validate_rate_data<br/>Clean Rates]
         PROC_P[process_performance<br/>Melt Wide → Long]
         MERGE[merge_all_data<br/>GroupBy + Aggregate<br/>Join Rate + Perf<br/>Calculate Totals]

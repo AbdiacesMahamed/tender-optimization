@@ -67,11 +67,15 @@ def build_container_origin_map(original_data, carrier_col='Dray SCAC(FL)', week_
         'facility': 'Facility',
         'terminal': 'Terminal',
         'category': 'Category',
+        'ssl': 'SSL',
+        'vessel': 'Vessel',
         'week_number': 'Week Number'
     }
     
     for _, row in original_data.iterrows():
         carrier = row.get(carrier_col, 'Unknown')
+        if pd.isna(carrier):
+            carrier = 'Unknown'
         week = row.get(week_col, 0)
         container_str = row.get('Container Numbers', '')
         
@@ -174,10 +178,13 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
         group_key_values = []
         for col in group_cols:
             key = col_to_key.get(col, col.lower().replace(' ', '_'))
-            value = info.get(key, '')
-            # Handle week number specially
-            if col == 'Week Number' and key == 'week':
-                value = info.get('week', '')
+            # The origin map stores week as 'week', not 'week_number'
+            if key == 'week_number':
+                value = info.get('week', info.get('week_number', ''))
+            else:
+                value = info.get(key, '')
+            if pd.isna(value):
+                value = ''
             group_key_values.append(value)
         
         group_key = tuple(group_key_values)
@@ -192,11 +199,25 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
     
     for _, row in current_data.iterrows():
         current_carrier = row.get(carrier_col, 'Unknown')
+        if pd.isna(current_carrier):
+            current_carrier = 'Unknown'
         container_str = row.get('Container Numbers', '')
         container_ids = parse_container_ids(container_str)
         
-        # Build group key for this row
-        group_key = tuple(row.get(col, '') for col in group_cols)
+        # Build group key for this row (normalize types to match origin map)
+        group_key_values = []
+        for col in group_cols:
+            val = row.get(col, '')
+            # Normalize week number to int for consistent matching
+            if col == 'Week Number' and pd.notna(val):
+                try:
+                    val = int(val)
+                except (ValueError, TypeError):
+                    pass
+            elif pd.isna(val):
+                val = ''
+            group_key_values.append(val)
+        group_key = tuple(group_key_values)
         
         # Get original count for THIS carrier IN THIS GROUP
         original_count_in_group = 0
@@ -243,6 +264,8 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
     container_destinations = {}
     for idx, row in current_data.iterrows():
         carrier = row.get(carrier_col, 'Unknown')
+        if pd.isna(carrier):
+            carrier = 'Unknown'
         container_str = row.get('Container Numbers', '')
         for cid in parse_container_ids(container_str):
             container_destinations[cid] = carrier
@@ -309,8 +332,9 @@ def format_flip_details(trace_result, show_container_ids=True, max_carriers=5, c
     # Part 2: Show changes
     # "kept all" means: original_count == current_count AND all current are kept (no flips/unknown)
     if original_count > 0 and original_count == current_count and kept_count == current_count and flipped_count == 0 and unknown_count == 0:
-        # Kept everything, no changes
-        parts.append("(kept all)")
+        return "No Flip"
+    elif original_count == 0 and current_count == 0:
+        return "No Flip"
     else:
         changes = []
         

@@ -639,8 +639,8 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         
         # ADD CARRIER FLIPS COLUMN for constrained data
         # Compare against original data (final_filtered_data) to show what changed due to constraints
-        carrier_col_c = 'Carrier' if 'Carrier' in constrained_display.columns else 'Dray SCAC(FL)'
-        constrained_display = add_detailed_carrier_flips_column(constrained_display, final_filtered_data, carrier_col=carrier_col_c)
+        carrier_col_c = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in constrained_display.columns else 'Carrier'
+        constrained_display = add_detailed_carrier_flips_column(constrained_display, final_filtered_data, carrier_col='Dray SCAC(FL)')
         
         # Rename column to just "Carrier Flips" for cleaner display
         if 'Carrier Flips (Detailed)' in constrained_display.columns:
@@ -1323,9 +1323,9 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         display_data = display_data[[c for c in cols if c in display_data.columns]].copy()
         
         # ADD CARRIER FLIPS COLUMN for Cheapest Cost scenario (consistent with other scenarios)
-        # Compare against baseline (original filtered data) to show what changed
-        baseline_data = final_filtered_data.copy()
-        display_data = add_detailed_carrier_flips_column(display_data, baseline_data, carrier_col=carrier_col)
+        # Compare against the same baseline as other scenarios (unconstrained data)
+        cheapest_baseline = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
+        display_data = add_detailed_carrier_flips_column(display_data, cheapest_baseline, carrier_col=carrier_col)
         
         # Rename column to just "Carrier Flips" for cleaner display
         if 'Carrier Flips (Detailed)' in display_data.columns:

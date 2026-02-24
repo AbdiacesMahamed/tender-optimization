@@ -6,6 +6,7 @@ Validates, transforms, and merges the three data sources (GVT, Rate, Performance
 ## Key Functions
 
 ### `validate_and_process_gvt_data(GVTdata) -> DataFrame`
+- Excludes Canada market rows (if `Market` column exists)
 - Parses `Ocean ETA` to datetime
 - Calculates `Week Number` from `Ocean ETA` (or uses existing `WK num` column)
 - Drops rows with null `Ocean ETA`

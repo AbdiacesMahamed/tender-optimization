@@ -22,6 +22,10 @@ def validate_and_process_gvt_data(GVTdata):
     # Calculate week number from Ocean ETA date - use inplace operations
     GVTdata['Ocean ETA'] = pd.to_datetime(GVTdata['Ocean ETA'], errors='coerce')
     
+    # Exclude Canada market
+    if 'Market' in GVTdata.columns:
+        GVTdata = GVTdata[~GVTdata['Market'].str.upper().str.contains('CANADA', na=False)]
+    
     # Check if WK num column already exists (from Excel WEEKNUM formula)
     # If it exists, use it directly to match Excel's calculation exactly
     if 'WK num' in GVTdata.columns:

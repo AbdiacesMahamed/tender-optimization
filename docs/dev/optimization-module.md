@@ -23,7 +23,11 @@ Key functions:
 
 Decision variables are **Continuous** (fractional splits allowed). After solving, allocations are rounded to integers using the **largest-remainder method** which guarantees `sum(rounded) == total_containers`. This prevents container loss from rounding.
 
+Carriers with missing or zero rates are penalized (10x the max known rate) so they're ranked last instead of appearing "free".
+
 The objective minimizes `cost_weight * normalized_cost + performance_weight * (1 - normalized_performance)`.
+
+**Important**: Rows with missing rates are excluded from optimization entirely (handled in `metrics.py`). They pass through unchanged and are recombined after.
 
 ### optimization/performance_logic.py — Highest Performance Allocation
 Allocates 100% of containers in each lane/week to the carrier with the highest `Performance_Score`.

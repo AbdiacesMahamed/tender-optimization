@@ -53,9 +53,17 @@ Adds a column showing how carrier allocations changed (gained/lost/new/kept) com
 ## Container Count Consistency
 All scenarios must produce the same total container count as Current Selection. This is enforced by:
 1. `deduplicate_containers_per_lane_week()` runs in `dashboard.py` before any calculations
-2. Scenarios group by lane/week and redistribute containers to different carriers
-3. LP and cascading allocation use largest-remainder rounding to preserve totals
-4. A debug expander appears if any scenario's count differs from baseline
+2. Container Count is verified against Container Numbers at baseline (force recount if mismatch)
+3. Scenarios split data into rated (optimized) and unrated (pass-through) to avoid losing unrated containers
+4. LP and cascading allocation use largest-remainder rounding to preserve totals
+5. Rows with missing rates are excluded from optimization and recombined unchanged after
+
+## Carrier Flips
+- Constrained data: compared against `final_filtered_data` (full dataset) to show constraint effects
+- Unconstrained scenarios: compared against `baseline_data` (unconstrained data before scenario)
+- Cheapest Cost: compared against `unconstrained_data` (or `final_filtered_data` when no constraints)
+- Current Selection always shows "No Flip" (comparing data against itself)
+- All comparisons use `'Dray SCAC(FL)'` as the carrier column for consistency
 
 ## Session State Keys
 - `peel_pile_allocations` — dict of applied peel pile assignments `{group_key: carrier}`
