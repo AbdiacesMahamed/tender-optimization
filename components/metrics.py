@@ -1059,6 +1059,8 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
 
         # Select only existing columns
         cols = [c for c in cols if c in display_data.columns]
+        # Keep a full copy (all columns) for the CSV download
+        download_data = display_data.copy()
         display_data = display_data[cols].copy()
 
         # Sort data based on scenario
@@ -1128,6 +1130,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             rename_dict['Allocation_Notes'] = '📝 Allocation Details'
             
         display_data = display_data.rename(columns=rename_dict)
+        download_data = download_data.rename(columns=rename_dict)
         
         # No need to add back missing rate rows since we're keeping all data now
 
@@ -1320,22 +1323,32 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         if 'Missing_Rate' in display_data.columns:
             cols.append('Missing_Rate')
         
+        # Keep a full copy (all columns) for the CSV download
+        download_data = display_data.copy()
         display_data = display_data[[c for c in cols if c in display_data.columns]].copy()
         
         # ADD CARRIER FLIPS COLUMN for Cheapest Cost scenario (consistent with other scenarios)
         # Compare against the same baseline as other scenarios (unconstrained data)
         cheapest_baseline = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
         display_data = add_detailed_carrier_flips_column(display_data, cheapest_baseline, carrier_col=carrier_col)
+        download_data = add_detailed_carrier_flips_column(download_data, cheapest_baseline, carrier_col=carrier_col)
         
         # Rename column to just "Carrier Flips" for cleaner display
         if 'Carrier Flips (Detailed)' in display_data.columns:
             display_data.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
+        if 'Carrier Flips (Detailed)' in download_data.columns:
+            download_data.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
         
         display_data = display_data.rename(columns={
             'Savings Percentage': 'Savings %',
             carrier_col: 'NEW SCAC',
             'Missing_Rate': '⚠️ No Rate'
         }).sort_values('Potential Savings', ascending=False)
+        download_data = download_data.rename(columns={
+            'Savings Percentage': 'Savings %',
+            carrier_col: 'NEW SCAC',
+            'Missing_Rate': '⚠️ No Rate'
+        })
         
         # Calculate total cost from the display data
         cheapest_cost = display_data['Total Cost'].sum() if 'Total Cost' in display_data.columns else 0
@@ -1354,6 +1367,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         # ADD BACK MISSING RATE ROWS for Cheapest Cost scenario to maintain consistent container counts
         if len(missing_rate_rows) > 0:
             display_data = pd.concat([display_data, missing_rate_rows], ignore_index=True)
+            download_data = pd.concat([download_data, missing_rate_rows], ignore_index=True)
         
     st.info(desc)
     # Format columns for display - use dynamic rate columns
@@ -1411,8 +1425,8 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         col2.metric("📦 Total Containers", f"{total_displayed_containers:,}")
         col3.metric("💰 Total Cost", f"${actual_displayed_cost:,.2f}")
     
-    # Download
-    csv = display_data.to_csv(index=False)
+    # Download - use full data (all columns) instead of trimmed display data
+    csv = download_data.to_csv(index=False)
     label_suffix = " (Unconstrained)" if has_constraints else ""
     download_filename = f"unconstrained_{filename}" if has_constraints else filename
     st.download_button(
