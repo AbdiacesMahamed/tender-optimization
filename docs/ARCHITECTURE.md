@@ -184,9 +184,9 @@ sequenceDiagram
     participant State as Session State
     participant Pipeline as Dashboard Pipeline
 
-    User->>Fragment: Select group + carrier
+    User->>Fragment: Select group + carrier(s)
     User->>Fragment: Click "Add to Queue"
-    Fragment->>State: peel_pile_pending[key] = carrier
+    Fragment->>State: peel_pile_pending[key] = [carrier1, carrier2, ...]
     Note over Fragment: Only fragment reruns<br/>No full page rerun
 
     User->>Fragment: Add more to queue...
@@ -197,7 +197,9 @@ sequenceDiagram
     Fragment->>Pipeline: st.rerun() — full page
 
     Pipeline->>Pipeline: apply_peel_pile_as_constraints()
-    Pipeline->>Pipeline: Move matched rows to constrained_data
+    Pipeline->>Pipeline: Split matched rows equally across carriers
+    Pipeline->>Pipeline: Extra rows go to first carrier(s) round-robin
+    Pipeline->>Pipeline: Move all matched rows to constrained_data
     Pipeline->>Pipeline: Recalculate metrics
 ```
 
@@ -284,8 +286,8 @@ graph LR
 | `opt_cost_weight` | int | filters, metrics | LP cost weight (0-100) |
 | `opt_performance_weight` | int | filters, metrics | LP performance weight (0-100) |
 | `opt_max_growth_pct` | int | filters, metrics | Max carrier growth % |
-| `peel_pile_allocations` | dict | metrics | Applied peel pile assignments |
-| `peel_pile_pending` | dict | metrics | Queued (not yet applied) peel pile assignments |
+| `peel_pile_allocations` | dict | metrics | Applied peel pile assignments `{key: [carrier, ...]}` |
+| `peel_pile_pending` | dict | metrics | Queued (not yet applied) peel pile assignments `{key: [carrier, ...]}` |
 
 ## Dev Docs Index
 

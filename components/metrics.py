@@ -646,6 +646,9 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         if 'Carrier Flips (Detailed)' in constrained_display.columns:
             constrained_display.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
         
+        # Keep a full copy (all columns) for the CSV download BEFORE column filtering
+        constrained_download_data = constrained_display.copy()
+        
         # Prepare constrained data for display
         cols_c = ['Discharged Port']
         if 'Category' in constrained_display.columns:
@@ -1439,7 +1442,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     
     # Option to download constrained data separately
     if has_constraints:
-        constrained_csv = constrained_data.to_csv(index=False)
+        constrained_csv = constrained_download_data.to_csv(index=False)
         st.download_button(
             label=f"📥 Download Constrained Allocations",
             data=constrained_csv,
@@ -1483,6 +1486,8 @@ def show_peel_pile_analysis(data):
     
     # Build grouping columns: Vessel + Week + Port + Terminal
     group_cols = ['Vessel']
+    if 'Category' in data_copy.columns:
+        group_cols.append('Category')
     if 'Week Number' in data_copy.columns:
         group_cols.append('Week Number')
     if 'Discharged Port' in data_copy.columns:
@@ -1514,11 +1519,31 @@ def show_peel_pile_analysis(data):
     
     # Build allocation key for each row and add assigned carrier info
     assigned_carriers = []
+    split_info = []
     for _, row in peel_pile.iterrows():
         key = _peel_pile_key(row, group_cols)
         assigned = st.session_state.peel_pile_allocations.get(key, None)
-        assigned_carriers.append(assigned if assigned else '—')
+        # Normalize legacy single-carrier strings to list
+        if isinstance(assigned, str):
+            assigned = [assigned]
+        if assigned and len(assigned) > 0:
+            assigned_carriers.append(', '.join(assigned))
+            total = int(row['Container Count'])
+            n = len(assigned)
+            per_carrier = total // n
+            remainder = total % n
+            if n == 1:
+                split_info.append(f"All {total}")
+            elif remainder == 0:
+                split_info.append(f"{per_carrier} each ({n}-way)")
+            else:
+                # First {remainder} carriers get per_carrier+1, rest get per_carrier
+                split_info.append(f"{per_carrier+1}/{per_carrier} ({n}-way)")
+        else:
+            assigned_carriers.append('—')
+            split_info.append('—')
     display_peel['Assigned Carrier'] = assigned_carriers
+    display_peel['Split'] = split_info
     
     # Format container count for display
     display_fmt = display_peel.copy()
@@ -1527,33 +1552,32 @@ def show_peel_pile_analysis(data):
     st.dataframe(display_fmt, use_container_width=True, hide_index=True)
     
     # Show how many are actively constraining
-    active_count = sum(1 for v in st.session_state.peel_pile_allocations.values() if v)
+    active_count = sum(1 for v in st.session_state.peel_pile_allocations.values() if v and (len(v) > 0 if isinstance(v, list) else True))
     if active_count > 0:
         st.success(f"🔒 {active_count} peel pile allocation(s) active — these are applied as constraints in the analysis above.")
     
     # ==================== ALLOCATION UI (fragment — reruns independently) ====================
     @st.fragment
     def _peel_pile_allocation_ui():
-        st.markdown("#### 🚛 Allocate Peel Pile to Carrier")
-        st.caption("Pick a peel pile group and a carrier, then click 'Add to Queue'. Queue up as many as you need, then click 'Apply All' to lock them as constraints.")
+        st.markdown("#### 🚛 Allocate Peel Pile to Carrier(s)")
+        st.caption("Pick a peel pile group and one or more carriers, then click 'Add to Queue'. Containers are split equally across selected carriers. Queue up as many as you need, then click 'Apply All' to lock them as constraints.")
         
         # Initialize pending queue in session state (not yet applied)
         if 'peel_pile_pending' not in st.session_state:
             st.session_state.peel_pile_pending = {}
         
         # Build human-readable labels and keys for each peel pile row
+        _label_map = {
+            'Vessel': lambda r: f"Vessel: {r['Vessel']}",
+            'Category': lambda r: f"Cat: {r['Category']}",
+            'Week Number': lambda r: f"Wk {int(r['Week Number'])}",
+            'Discharged Port': lambda r: f"Port: {r['Discharged Port']}",
+            'Terminal': lambda r: f"Terminal: {r['Terminal']}",
+        }
         peel_labels_inner = []
         peel_keys_inner = []
         for _, row in peel_pile.iterrows():
-            parts = []
-            if 'Vessel' in group_cols:
-                parts.append(f"Vessel: {row['Vessel']}")
-            if 'Week Number' in group_cols:
-                parts.append(f"Wk {int(row['Week Number'])}")
-            if 'Discharged Port' in group_cols:
-                parts.append(f"Port: {row['Discharged Port']}")
-            if 'Terminal' in group_cols:
-                parts.append(f"Terminal: {row['Terminal']}")
+            parts = [_label_map[col](row) for col in group_cols if col in _label_map]
             parts.append(f"({int(row['Container Count'])} containers)")
             peel_labels_inner.append(" | ".join(parts))
             peel_keys_inner.append(_peel_pile_key(row, group_cols))
@@ -1570,16 +1594,19 @@ def show_peel_pile_analysis(data):
             )
         
         with col2:
-            selected_carrier = st.selectbox(
-                "Assign to Carrier (SCAC)",
+            selected_carriers = st.multiselect(
+                "Assign to Carrier(s) (SCAC)",
                 all_carriers,
                 key="peel_pile_carrier"
             )
         
         # Add to Queue — only reruns this fragment, not the full page
         if st.button("➕ Add to Queue", use_container_width=True, key="peel_pile_queue"):
-            key = peel_keys_inner[selected_idx]
-            st.session_state.peel_pile_pending[key] = selected_carrier
+            if selected_carriers:
+                key = peel_keys_inner[selected_idx]
+                st.session_state.peel_pile_pending[key] = selected_carriers
+            else:
+                st.warning("⚠️ Select at least one carrier.")
         
         # Show the pending queue
         combined_queue = dict(st.session_state.peel_pile_allocations)
@@ -1588,7 +1615,10 @@ def show_peel_pile_analysis(data):
         if combined_queue:
             st.markdown("**📋 Queued Assignments:**")
             queue_rows = []
-            for key, carrier in combined_queue.items():
+            for key, carriers in combined_queue.items():
+                # Normalize legacy single-carrier strings to list
+                if isinstance(carriers, str):
+                    carriers = [carriers]
                 label = None
                 for k, lbl in zip(peel_keys_inner, peel_labels_inner):
                     if k == key:
@@ -1600,11 +1630,13 @@ def show_peel_pile_analysis(data):
                 is_existing = key in st.session_state.peel_pile_allocations
                 if is_new and not is_existing:
                     status = '🆕 New'
-                elif is_new and is_existing and st.session_state.peel_pile_allocations.get(key) != carrier:
+                elif is_new and is_existing and st.session_state.peel_pile_allocations.get(key) != carriers:
                     status = '✏️ Changed'
                 else:
                     status = '✅ Applied'
-                queue_rows.append({'Peel Pile Group': label, 'Carrier': carrier, 'Status': status})
+                carrier_display = ', '.join(carriers)
+                split_label = f"Equal {len(carriers)}-way" if len(carriers) > 1 else "100%"
+                queue_rows.append({'Peel Pile Group': label, 'Carriers': carrier_display, 'Split': split_label, 'Status': status})
             
             queue_df = pd.DataFrame(queue_rows)
             st.dataframe(queue_df, use_container_width=True, hide_index=True)
@@ -1633,10 +1665,30 @@ def show_peel_pile_analysis(data):
     
     # ==================== EXPORT ====================
     export_peel = peel_pile.copy()
-    export_peel['Assigned Carrier'] = [
-        st.session_state.peel_pile_allocations.get(_peel_pile_key(row, group_cols), '')
-        for _, row in peel_pile.iterrows()
-    ]
+    assigned_export = []
+    split_export = []
+    for _, row in peel_pile.iterrows():
+        key = _peel_pile_key(row, group_cols)
+        carriers = st.session_state.peel_pile_allocations.get(key, None)
+        if isinstance(carriers, str):
+            carriers = [carriers]
+        if carriers and len(carriers) > 0:
+            assigned_export.append(', '.join(carriers))
+            total = int(row['Container Count'])
+            n = len(carriers)
+            per_carrier = total // n
+            remainder = total % n
+            if n == 1:
+                split_export.append(f"All {total}")
+            elif remainder == 0:
+                split_export.append(f"{per_carrier} each ({n}-way)")
+            else:
+                split_export.append(f"{per_carrier+1}/{per_carrier} ({n}-way)")
+        else:
+            assigned_export.append('')
+            split_export.append('')
+    export_peel['Assigned Carriers'] = assigned_export
+    export_peel['Split'] = split_export
     
     csv = export_peel.to_csv(index=False)
     st.download_button(
@@ -1652,10 +1704,14 @@ def apply_peel_pile_as_constraints(filtered_data, constrained_data, unconstraine
     """
     Apply peel pile allocations from session state as constraints.
     
+    Supports splitting a peel pile group across multiple carriers with equal split.
+    Matching rows are divided evenly among the selected carriers. Any remainder
+    rows (from integer division) stay in the unconstrained pool.
+    
     This mirrors the constraint processor behavior:
     - Matching rows are moved from unconstrained_data to constrained_data
-    - The carrier on those rows is reassigned to the chosen SCAC
-    - The carrier is added to max_constrained_carriers so optimization skips it
+    - The carrier on those rows is reassigned to the chosen SCAC(s)
+    - Each carrier is added to max_constrained_carriers so optimization skips it
     
     Args:
         filtered_data: Full filtered dataset (for reference)
@@ -1679,83 +1735,108 @@ def apply_peel_pile_as_constraints(filtered_data, constrained_data, unconstraine
     remaining = unconstrained_data.copy()
     new_constrained_rows = []
     
-    for alloc_key, target_carrier in peel_pile_allocations.items():
-        if not target_carrier:
+    for alloc_key, target_carriers in peel_pile_allocations.items():
+        if not target_carriers:
             continue
         
+        # Normalize legacy single-carrier strings to list
+        if isinstance(target_carriers, str):
+            target_carriers = [target_carriers]
+        
         # Parse the key back into filter values
-        # Key format: (Vessel, Week Number, Discharged Port, Terminal)
-        key_values = list(alloc_key)
+        # New format: ((col_name, value), (col_name, value), ...)
+        # Legacy format: (value, value, ...) — plain strings, positional order
+        key_pairs = list(alloc_key)
+        
+        # Detect legacy keys: if the first element is a string instead of a tuple
+        if key_pairs and isinstance(key_pairs[0], str):
+            # Legacy positional format — map to named pairs using the old column order
+            _legacy_cols = ['Vessel', 'Week Number', 'Discharged Port', 'Terminal']
+            key_pairs = [(col, val) for col, val in zip(_legacy_cols[:len(key_pairs)], key_pairs)]
+        
+        key_values = [v for _, v in key_pairs]
         
         # Build mask to find matching rows in unconstrained data
         mask = pd.Series(True, index=remaining.index)
         
-        # Match Vessel
-        if len(key_values) > 0 and 'Vessel' in remaining.columns:
-            mask &= remaining['Vessel'].astype(str) == key_values[0]
-        
-        # Match Week Number
-        key_idx = 1
-        if len(key_values) > key_idx and 'Week Number' in remaining.columns:
-            try:
-                week_val = float(key_values[key_idx])
-                mask &= remaining['Week Number'] == week_val
-            except (ValueError, TypeError):
-                mask &= remaining['Week Number'].astype(str) == key_values[key_idx]
-        
-        # Match Discharged Port
-        key_idx = 2
-        if len(key_values) > key_idx and 'Discharged Port' in remaining.columns:
-            mask &= remaining['Discharged Port'].astype(str) == key_values[key_idx]
-        
-        # Match Terminal
-        key_idx = 3
-        if len(key_values) > key_idx and 'Terminal' in remaining.columns:
-            mask &= remaining['Terminal'].astype(str) == key_values[key_idx]
+        for col_name, col_value in key_pairs:
+            if col_name not in remaining.columns:
+                continue
+            if col_name == 'Week Number':
+                try:
+                    week_val = float(col_value)
+                    mask &= remaining['Week Number'] == week_val
+                except (ValueError, TypeError):
+                    mask &= remaining['Week Number'].astype(str) == col_value
+            else:
+                mask &= remaining[col_name].astype(str) == col_value
         
         matched_rows = remaining[mask]
         
         if len(matched_rows) == 0:
             continue
         
-        # Move matched rows to constrained, reassigning carrier
-        for idx, row in matched_rows.iterrows():
-            constrained_row = row.copy()
-            constrained_row[carrier_col] = target_carrier
-            if 'Carrier' in constrained_row.index and carrier_col != 'Carrier':
-                constrained_row['Carrier'] = target_carrier
+        num_carriers = len(target_carriers)
+        total_rows = len(matched_rows)
+        base_per_carrier = total_rows // num_carriers
+        remainder_count = total_rows % num_carriers
+        
+        # Build description parts for constraint summary
+        _short_names = {'Vessel': 'Vessel', 'Category': 'Cat', 'Week Number': 'Wk', 'Discharged Port': 'Port', 'Terminal': 'Terminal'}
+        desc_parts = [f"{_short_names.get(c, c)}={v}" for c, v in key_pairs]
+        
+        # Split matched rows across carriers. First {remainder_count} carriers
+        # each get one extra row so all containers are assigned.
+        matched_indices = matched_rows.index.tolist()
+        assigned_indices = set()
+        offset = 0
+        
+        for i, carrier in enumerate(target_carriers):
+            count_for_carrier = base_per_carrier + (1 if i < remainder_count else 0)
+            carrier_indices = matched_indices[offset:offset + count_for_carrier]
+            offset += count_for_carrier
             
-            # Recalculate costs for the new carrier assignment
-            # Look up the target carrier's rate for this lane from the unconstrained data
-            # (the row keeps its existing rate — the user is choosing the carrier, not the rate)
-            constrained_row['Constraint_Description'] = f"Peel Pile: {key_values[0]} → {target_carrier}"
-            new_constrained_rows.append(constrained_row)
+            if not carrier_indices:
+                continue
+            
+            carrier_rows = remaining.loc[carrier_indices]
+            
+            # Move these rows to constrained, reassigning carrier
+            for idx in carrier_indices:
+                row = remaining.loc[idx]
+                constrained_row = row.copy()
+                constrained_row[carrier_col] = carrier
+                if 'Carrier' in constrained_row.index and carrier_col != 'Carrier':
+                    constrained_row['Carrier'] = carrier
+                
+                # The row keeps its existing rate — the user is choosing the carrier, not the rate
+                split_desc = f" (equal split {num_carriers}-way)" if num_carriers > 1 else ""
+                constrained_row['Constraint_Description'] = f"Peel Pile: {key_values[0]} → {carrier}{split_desc}"
+                new_constrained_rows.append(constrained_row)
+                assigned_indices.add(idx)
+            
+            container_count = carrier_rows['Container Count'].sum()
+            peel_pile_carriers.add(carrier)
+            
+            # Add per-carrier constraint summary entry
+            if num_carriers > 1:
+                method_desc = f'Equal Split {num_carriers}-way'
+                carrier_desc = f"Peel Pile: {', '.join(desc_parts)} → {carrier} ({i+1}/{num_carriers})"
+            else:
+                method_desc = '100% Allocation'
+                carrier_desc = f"Peel Pile: {', '.join(desc_parts)} → {carrier}"
+            
+            constraint_summary.append({
+                'priority': 'Peel Pile',
+                'description': carrier_desc,
+                'method': method_desc,
+                'status': 'Applied',
+                'containers_allocated': int(container_count),
+                'target_containers': int(container_count),
+            })
         
-        container_count = matched_rows['Container Count'].sum()
-        peel_pile_carriers.add(target_carrier)
-        
-        # Remove from remaining
-        remaining = remaining[~mask]
-        
-        # Add to constraint summary
-        desc_parts = []
-        if len(key_values) > 0:
-            desc_parts.append(f"Vessel={key_values[0]}")
-        if len(key_values) > 1:
-            desc_parts.append(f"Wk={key_values[1]}")
-        if len(key_values) > 2:
-            desc_parts.append(f"Port={key_values[2]}")
-        if len(key_values) > 3:
-            desc_parts.append(f"Terminal={key_values[3]}")
-        
-        constraint_summary.append({
-            'priority': 'Peel Pile',
-            'description': f"Peel Pile: {', '.join(desc_parts)} → {target_carrier}",
-            'method': '100% Allocation',
-            'status': 'Applied',
-            'containers_allocated': int(container_count),
-            'target_containers': int(container_count),
-        })
+        # Remove all assigned rows from remaining (all containers are assigned)
+        remaining = remaining.drop(index=list(assigned_indices))
     
     # Merge new constrained rows with existing constrained data
     if new_constrained_rows:
@@ -1769,8 +1850,12 @@ def apply_peel_pile_as_constraints(filtered_data, constrained_data, unconstraine
 
 
 def _peel_pile_key(row, group_cols):
-    """Build a hashable key for a peel pile row from its group column values."""
-    return tuple(str(row.get(col, '')) for col in group_cols)
+    """Build a hashable key for a peel pile row from its group column values.
+    
+    Returns a tuple of (column_name, value) pairs so the apply function
+    can match columns dynamically without positional assumptions.
+    """
+    return tuple((col, str(row.get(col, ''))) for col in group_cols)
 
 
 def show_top_savings_opportunities(final_filtered_data):

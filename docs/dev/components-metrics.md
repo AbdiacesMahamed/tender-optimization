@@ -39,13 +39,20 @@ Port → Category → SSL → Vessel → Carrier → Lane → Facility → Termi
 ### `show_peel_pile_analysis(data)`
 Renders the peel pile table (vessel groups with 30+ containers) and the allocation UI:
 - Uses `@st.fragment` to isolate the queue UI from full page reruns
-- Dropdowns for group selection + carrier assignment
+- Dropdowns for group selection + **multiselect** for carrier assignment (one or more carriers)
+- Containers are split equally across selected carriers; remainder stays unconstrained
 - Queue system: Add to Queue → Apply All workflow
 - "Clear Queue" uses `st.rerun(scope="fragment")` for immediate UI update
 - Applied allocations stored in `st.session_state.peel_pile_allocations`
 
 ### `apply_peel_pile_as_constraints(final_filtered_data, constrained_data, unconstrained_data, constraint_summary) -> tuple`
-Converts peel pile allocations into constraints. Moves matching rows from unconstrained to constrained data, reassigns carrier, adds to constraint summary.
+Converts peel pile allocations into constraints. Supports splitting across multiple carriers:
+- For each allocation `(group_key → [carrier1, carrier2, ...])`, finds matching rows in unconstrained data
+- Divides rows equally: `rows_per_carrier = total_rows // num_carriers`
+- Remainder rows (`total_rows % num_carriers`) stay in unconstrained pool
+- Moves assigned rows to constrained data, reassigns carrier column
+- Adds one constraint summary entry per carrier per peel pile group
+- Legacy single-carrier string values are auto-normalized to list
 
 ### `add_carrier_flips_column(current_data, original_data, carrier_col)`
 Adds a column showing how carrier allocations changed (gained/lost/new/kept) compared to the original data.
@@ -66,8 +73,8 @@ All scenarios must produce the same total container count as Current Selection. 
 - All comparisons use `'Dray SCAC(FL)'` as the carrier column for consistency
 
 ## Session State Keys
-- `peel_pile_allocations` — dict of applied peel pile assignments `{group_key: carrier}`
-- `peel_pile_pending` — dict of queued (not yet applied) assignments
+- `peel_pile_allocations` — dict of applied peel pile assignments `{group_key: [carrier1, carrier2, ...]}`
+- `peel_pile_pending` — dict of queued (not yet applied) assignments `{group_key: [carrier1, carrier2, ...]}`
 
 ## Dependencies
 - `optimization.performance_logic.allocate_to_highest_performance`

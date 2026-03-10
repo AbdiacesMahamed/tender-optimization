@@ -55,6 +55,76 @@ def _load_excel_file(file_bytes, file_name):
     import io
     return pd.read_excel(io.BytesIO(file_bytes))
 
+
+@st.cache_data(show_spinner=False)
+def _load_rate_file(file_bytes, file_name):
+    """
+    Load a rate Excel file with auto-detection of format.
+    
+    Supports two formats:
+    1. Standard rate sheet — flat Excel with headers in row 0, columns include
+       SCAC, Port, FC, Lookup, Base Rate.
+    2. Master Rate Card — multi-sheet workbook where the rate data lives in a
+       sheet whose name contains 'Master Sheet' and headers start at row 3
+       (rows 0-2 contain metadata). Same key columns once the correct header
+       row is used.
+    
+    Returns:
+        DataFrame with rate data, regardless of input format.
+    """
+    import io
+    buf = io.BytesIO(file_bytes)
+    
+    # Try default load first (header=0)
+    df = pd.read_excel(buf, header=0)
+    
+    # Quick check: if the expected key columns already exist, return immediately
+    if 'Lookup' in df.columns and 'SCAC' in df.columns:
+        return df
+    
+    # ---------- Master Rate Card detection ----------
+    # Re-open the workbook and look for a sheet matching "Master Sheet"
+    buf.seek(0)
+    xls = pd.ExcelFile(buf)
+    
+    master_sheet = None
+    for name in xls.sheet_names:
+        if 'master sheet' in name.lower() and 'original' not in name.lower():
+            master_sheet = name
+            break
+    
+    if master_sheet:
+        # Scan the first 10 rows to find the header row containing 'Lookup' and 'SCAC'
+        preview = pd.read_excel(xls, sheet_name=master_sheet, header=None, nrows=10)
+        header_row = None
+        for i in range(len(preview)):
+            row_values = [str(v).strip() for v in preview.iloc[i].values]
+            if 'Lookup' in row_values and 'SCAC' in row_values:
+                header_row = i
+                break
+        
+        if header_row is not None:
+            df = pd.read_excel(xls, sheet_name=master_sheet, header=header_row)
+            logger.info(f"Detected Master Rate Card format in sheet '{master_sheet}' (header row {header_row})")
+            return df
+    
+    # ---------- Generic header-row scan (fallback) ----------
+    # The file might have metadata rows above the header in the first sheet.
+    # Scan the first 10 rows for 'Lookup'/'SCAC'.
+    buf.seek(0)
+    preview = pd.read_excel(buf, header=None, nrows=10)
+    for i in range(len(preview)):
+        row_values = [str(v).strip() for v in preview.iloc[i].values]
+        if 'Lookup' in row_values and 'SCAC' in row_values:
+            buf.seek(0)
+            df = pd.read_excel(buf, header=i)
+            logger.info(f"Detected rate data header at row {i}")
+            return df
+    
+    # Nothing matched — return the original default load; validate_and_process_rate_data
+    # will raise a clear error if required columns are missing.
+    return df
+
 def load_data_files(gvt_file, rate_file, performance_file):
     """Load data from uploaded files or use defaults"""
     if gvt_file is not None and rate_file is not None:
@@ -72,7 +142,8 @@ def load_data_files(gvt_file, rate_file, performance_file):
         try:
             with st.spinner('📂 Loading Rate data...'):
                 # Cache file reading using file bytes as key
-                Ratedata = _load_excel_file(rate_file.read(), rate_file.name)
+                # Supports both standard rate sheets and Master Rate Card format
+                Ratedata = _load_rate_file(rate_file.read(), rate_file.name)
                 rate_file.seek(0)  # Reset file pointer
                 
         except Exception as e:
