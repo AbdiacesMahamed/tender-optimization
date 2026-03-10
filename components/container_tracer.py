@@ -320,9 +320,7 @@ def format_flip_details(trace_result, show_container_ids=True, max_carriers=5, c
     # Part 1: Show what carrier started with (Had X)
     if original_count > 0:
         if show_container_ids and all_original_containers:
-            container_list = ', '.join(all_original_containers[:3])
-            if len(all_original_containers) > 3:
-                container_list += f"... ({original_count})"
+            container_list = ', '.join(all_original_containers)
             parts.append(f"Had {original_count} [{container_list}]")
         else:
             parts.append(f"Had {original_count}")
@@ -343,36 +341,26 @@ def format_flip_details(trace_result, show_container_ids=True, max_carriers=5, c
             sorted_flips = sorted(flip_summary.items(), key=lambda x: x[1], reverse=True)
             
             if show_container_ids:
-                # Show with container IDs
+                # Show with container IDs - no truncation
                 if len(sorted_flips) == 1:
                     carrier, count = sorted_flips[0]
                     containers = flip_containers_by_source.get(carrier, [])
-                    container_list = ', '.join(containers[:2])
-                    if len(containers) > 2:
-                        container_list += f"... ({count})"
+                    container_list = ', '.join(containers)
                     changes.append(f"From {carrier} (+{count}) [{container_list}]")
                 elif len(sorted_flips) <= max_carriers:
                     flip_parts = []
                     for carrier, count in sorted_flips:
                         containers = flip_containers_by_source.get(carrier, [])
-                        container_list = ', '.join(containers[:2])
-                        if len(containers) > 2:
-                            container_list += f"..."
+                        container_list = ', '.join(containers)
                         flip_parts.append(f"{carrier} (+{count}) [{container_list}]")
                     changes.append(f"From {' + '.join(flip_parts)}")
                 else:
-                    # Too many carriers - show top ones
+                    # Many carriers - show all
                     flip_parts = []
-                    for carrier, count in sorted_flips[:max_carriers]:
+                    for carrier, count in sorted_flips:
                         containers = flip_containers_by_source.get(carrier, [])
-                        container_list = ', '.join(containers[:2])
-                        if len(containers) > 2:
-                            container_list += f"..."
+                        container_list = ', '.join(containers)
                         flip_parts.append(f"{carrier} (+{count}) [{container_list}]")
-                    
-                    remaining_count = sum(count for _, count in sorted_flips[max_carriers:])
-                    remaining_carriers = len(sorted_flips) - max_carriers
-                    flip_parts.append(f"{remaining_carriers} others (+{remaining_count})")
                     changes.append(f"From {' + '.join(flip_parts)}")
             else:
                 # Show without container IDs
@@ -408,35 +396,21 @@ def format_flip_details(trace_result, show_container_ids=True, max_carriers=5, c
                 
                 if show_container_ids:
                     lost_parts = []
-                    for dest_carrier, cids in sorted_lost_to[:max_carriers]:
-                        container_list = ', '.join(cids[:2])
-                        if len(cids) > 2:
-                            container_list += f"..."
+                    for dest_carrier, cids in sorted_lost_to:
+                        container_list = ', '.join(cids)
                         lost_parts.append(f"To {dest_carrier} (-{len(cids)}) [{container_list}]")
-                    
-                    if len(sorted_lost_to) > max_carriers:
-                        remaining_count = sum(len(cids) for _, cids in sorted_lost_to[max_carriers:])
-                        remaining_carriers = len(sorted_lost_to) - max_carriers
-                        lost_parts.append(f"{remaining_carriers} others (-{remaining_count})")
                     
                     changes.append(f"Lost {lost_count} → {', '.join(lost_parts)}")
                 else:
                     lost_parts = []
-                    for dest_carrier, cids in sorted_lost_to[:max_carriers]:
+                    for dest_carrier, cids in sorted_lost_to:
                         lost_parts.append(f"To {dest_carrier} (-{len(cids)})")
-                    
-                    if len(sorted_lost_to) > max_carriers:
-                        remaining_count = sum(len(cids) for _, cids in sorted_lost_to[max_carriers:])
-                        remaining_carriers = len(sorted_lost_to) - max_carriers
-                        lost_parts.append(f"{remaining_carriers} others (-{remaining_count})")
                     
                     changes.append(f"Lost {lost_count} → {', '.join(lost_parts)}")
             else:
                 # Fallback if no destination tracking available
                 if show_container_ids and lost_containers:
-                    container_list = ', '.join(lost_containers[:2])
-                    if len(lost_containers) > 2:
-                        container_list += f"... ({lost_count})"
+                    container_list = ', '.join(lost_containers)
                     changes.append(f"Lost {lost_count} [{container_list}]")
                 else:
                     changes.append(f"Lost {lost_count}")
