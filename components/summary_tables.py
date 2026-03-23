@@ -75,7 +75,7 @@ def show_port_summary(final_filtered_data):
     port_summary = final_filtered_data.groupby('Discharged Port').agg(port_agg).round(2)
     port_summary = finalize_summary_table(port_summary)
         
-    st.dataframe(port_summary, use_container_width=True)
+    st.dataframe(port_summary, width='stretch')
 
 def show_scac_summary(final_filtered_data):
     """Show summary by SCAC"""
@@ -85,7 +85,7 @@ def show_scac_summary(final_filtered_data):
     scac_summary = final_filtered_data.groupby('Dray SCAC(FL)').agg(scac_agg).round(2)
     scac_summary = finalize_summary_table(scac_summary)
         
-    st.dataframe(scac_summary, use_container_width=True)
+    st.dataframe(scac_summary, width='stretch')
 
 def show_lane_summary(final_filtered_data):
     """Show summary by lane"""
@@ -95,7 +95,7 @@ def show_lane_summary(final_filtered_data):
     lane_summary = final_filtered_data.groupby('Lane').agg(lane_agg).round(2)
     lane_summary = finalize_summary_table(lane_summary)
         
-    st.dataframe(lane_summary, use_container_width=True)
+    st.dataframe(lane_summary, width='stretch')
 
 def show_facility_summary(final_filtered_data):
     """Show summary by facility"""
@@ -105,7 +105,7 @@ def show_facility_summary(final_filtered_data):
     facility_summary = final_filtered_data.groupby('Facility').agg(facility_agg).round(2)
     facility_summary = finalize_summary_table(facility_summary)
         
-    st.dataframe(facility_summary, use_container_width=True)
+    st.dataframe(facility_summary, width='stretch')
 
 def show_terminal_summary(final_filtered_data):
     """Show summary by terminal"""
@@ -119,7 +119,7 @@ def show_terminal_summary(final_filtered_data):
     terminal_summary = final_filtered_data.groupby('Terminal').agg(terminal_agg).round(2)
     terminal_summary = finalize_summary_table(terminal_summary)
         
-    st.dataframe(terminal_summary, use_container_width=True)
+    st.dataframe(terminal_summary, width='stretch')
 
 def show_week_summary(final_filtered_data):
     """Show summary by week"""
@@ -129,4 +129,4 @@ def show_week_summary(final_filtered_data):
     week_summary = final_filtered_data.groupby('Week Number').agg(week_agg).round(2)
     week_summary = finalize_summary_table(week_summary)
         
-    st.dataframe(week_summary, use_container_width=True)
+    st.dataframe(week_summary, width='stretch')

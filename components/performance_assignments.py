@@ -76,11 +76,11 @@ class PerformanceAssignmentTracker:
                 'Assigned_Score': 'mean'
             }).round(3)
             type_summary.columns = ['Carriers', 'Records_Affected', 'Avg_Score']
-            st.dataframe(type_summary, use_container_width=True)
+            st.dataframe(type_summary, width='stretch')
             
             st.markdown("### Detailed Assignments")
             display_df = assignments_df[['Carrier', 'Assignment_Type', 'Assigned_Score', 'Records_Affected']]
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(display_df, width='stretch')
     
     def clear_assignments(self):
         """Clear all assignments and logs"""

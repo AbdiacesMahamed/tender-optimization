@@ -9,6 +9,15 @@ from .config_styling import section_header
 # Set up module logger — debug output goes to console only when DEBUG level is enabled
 logger = logging.getLogger(__name__)
 
+# ── Category normalisation mapping (edit this dict to add/change aliases) ──
+# Keys   = raw value that may appear in the GVT "Category" column
+# Values = the standardised name used throughout the dashboard
+CATEGORY_MAPPING = {
+    "FBA LCL": "CD",
+    "Retail CD": "CD",
+    "FBA FCL": "CD",
+}
+
 @st.cache_data(show_spinner=False)
 def validate_and_process_gvt_data(GVTdata):
     """Validate and process GVT data"""
@@ -25,7 +34,16 @@ def validate_and_process_gvt_data(GVTdata):
     # Exclude Canada market
     if 'Market' in GVTdata.columns:
         GVTdata = GVTdata[~GVTdata['Market'].str.upper().str.contains('CANADA', na=False)]
-    
+
+    # Normalise Category values using the mapping defined at module level
+    if 'Category' in GVTdata.columns:
+        GVTdata['Category'] = (
+            GVTdata['Category']
+            .astype(str)
+            .str.strip()
+            .map(lambda v: CATEGORY_MAPPING.get(v, v))
+        )
+
     # Check if WK num column already exists (from Excel WEEKNUM formula)
     # If it exists, use it directly to match Excel's calculation exactly
     if 'WK num' in GVTdata.columns:

@@ -892,7 +892,7 @@ def show_constraints_summary(constraint_summary, explanation_logs=None):
         })
     
     summary_df = pd.DataFrame(summary_data)
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.dataframe(summary_df, width='stretch', hide_index=True)
     
     # Summary metrics
     col1, col2, col3 = st.columns(3)
@@ -914,6 +914,6 @@ def show_constraints_summary(constraint_summary, explanation_logs=None):
             data=csv,
             file_name="constraint_explanations.csv",
             mime="text/csv",
-            use_container_width=True,
+            width='stretch',
             help="Download detailed log of all constraint processing actions, exclusions, and reallocations"
         )

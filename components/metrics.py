@@ -710,7 +710,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         if 'Total Cost' in constrained_display.columns:
             constrained_display['Total Cost'] = constrained_display['Total Cost'].apply(format_currency)
         
-        st.dataframe(constrained_display, use_container_width=True, hide_index=True)
+        st.dataframe(constrained_display, width='stretch', hide_index=True)
         
         # Constrained data metrics
         col1, col2, col3 = st.columns(3)
@@ -1400,7 +1400,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             )
     
     # Show table
-    st.dataframe(display_formatted, use_container_width=True, hide_index=True)
+    st.dataframe(display_formatted, width='stretch', hide_index=True)
     
     # Metrics (use correct container counts from displayed data)
     col1, col2, col3 = st.columns(3)
@@ -1437,7 +1437,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
         data=csv,
         file_name=download_filename,
         mime='text/csv',
-        use_container_width=True
+        width='stretch'
     )
     
     # Option to download constrained data separately
@@ -1448,7 +1448,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             data=constrained_csv,
             file_name='constrained_allocations.csv',
             mime='text/csv',
-            use_container_width=True,
+            width='stretch',
             key='download_constrained'
         )
     
@@ -1549,7 +1549,7 @@ def show_peel_pile_analysis(data):
     display_fmt = display_peel.copy()
     display_fmt['Container Count'] = display_fmt['Container Count'].apply(lambda x: f"{x:,.0f}")
     
-    st.dataframe(display_fmt, use_container_width=True, hide_index=True)
+    st.dataframe(display_fmt, width='stretch', hide_index=True)
     
     # Show how many are actively constraining
     active_count = sum(1 for v in st.session_state.peel_pile_allocations.values() if v and (len(v) > 0 if isinstance(v, list) else True))
@@ -1601,7 +1601,7 @@ def show_peel_pile_analysis(data):
             )
         
         # Add to Queue — only reruns this fragment, not the full page
-        if st.button("➕ Add to Queue", use_container_width=True, key="peel_pile_queue"):
+        if st.button("➕ Add to Queue", width='stretch', key="peel_pile_queue"):
             if selected_carriers:
                 key = peel_keys_inner[selected_idx]
                 st.session_state.peel_pile_pending[key] = selected_carriers
@@ -1639,24 +1639,24 @@ def show_peel_pile_analysis(data):
                 queue_rows.append({'Peel Pile Group': label, 'Carriers': carrier_display, 'Split': split_label, 'Status': status})
             
             queue_df = pd.DataFrame(queue_rows)
-            st.dataframe(queue_df, use_container_width=True, hide_index=True)
+            st.dataframe(queue_df, width='stretch', hide_index=True)
         
         # Action buttons
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
         
         with btn_col1:
-            if st.button("✅ Apply All", type="primary", use_container_width=True, key="peel_pile_apply"):
+            if st.button("✅ Apply All", type="primary", width='stretch', key="peel_pile_apply"):
                 st.session_state.peel_pile_allocations.update(st.session_state.peel_pile_pending)
                 st.session_state.peel_pile_pending = {}
                 st.rerun()  # full rerun to recalculate pipeline
         
         with btn_col2:
-            if st.button("🗑️ Clear Queue", use_container_width=True, key="peel_pile_clear_queue"):
+            if st.button("🗑️ Clear Queue", width='stretch', key="peel_pile_clear_queue"):
                 st.session_state.peel_pile_pending = {}
                 st.rerun(scope="fragment")
         
         with btn_col3:
-            if st.button("🗑️ Clear All", use_container_width=True, key="peel_pile_clear_all"):
+            if st.button("🗑️ Clear All", width='stretch', key="peel_pile_clear_all"):
                 st.session_state.peel_pile_allocations = {}
                 st.session_state.peel_pile_pending = {}
                 st.rerun()  # full rerun to recalculate pipeline
@@ -1696,7 +1696,7 @@ def show_peel_pile_analysis(data):
         data=csv,
         file_name='peel_pile.csv',
         mime='text/csv',
-        use_container_width=True
+        width='stretch'
     )
 
 
@@ -1878,7 +1878,7 @@ def show_complete_data_export(final_filtered_data):
             data=csv,
             file_name='comprehensive_data.csv',
             mime='text/csv',
-            use_container_width=True
+            width='stretch'
         )
 
 def show_performance_score_analysis(final_filtered_data):
@@ -1915,7 +1915,7 @@ def show_performance_score_analysis(final_filtered_data):
     for col in ['Avg Performance', 'Min Performance', 'Max Performance']:
         carrier_perf[col] = carrier_perf[col].apply(lambda x: f"{x:.1%}")
     
-    st.dataframe(carrier_perf, use_container_width=True)
+    st.dataframe(carrier_perf, width='stretch')
 
 def show_carrier_performance_matrix(final_filtered_data):
     """Show carrier performance matrix"""
@@ -1938,12 +1938,12 @@ def show_carrier_performance_matrix(final_filtered_data):
     perf_matrix = matrix_data.pivot(index='Dray SCAC(FL)', columns='Lane', values='Performance_Score')
     
     st.subheader("Performance Score Matrix (by Carrier & Lane)")
-    st.dataframe(perf_matrix.applymap(lambda x: f"{x:.1%}" if pd.notna(x) else "-"), use_container_width=True)
+    st.dataframe(perf_matrix.applymap(lambda x: f"{x:.1%}" if pd.notna(x) else "-"), width='stretch')
     
     rate_matrix = matrix_data.pivot(index='Dray SCAC(FL)', columns='Lane', values='Base Rate')
     
     st.subheader("Average Rate Matrix (by Carrier & Lane)")
-    st.dataframe(rate_matrix.applymap(lambda x: f"${x:,.2f}" if pd.notna(x) else "-"), use_container_width=True)
+    st.dataframe(rate_matrix.applymap(lambda x: f"${x:,.2f}" if pd.notna(x) else "-"), width='stretch')
 
 
 def show_container_movement_summary(current_data, baseline_data, carrier_col='Dray SCAC(FL)'):
@@ -2039,7 +2039,7 @@ def show_container_movement_summary(current_data, baseline_data, carrier_col='Dr
         
         st.dataframe(
             flows_display[['Flow', 'Containers', '% Flipped', '% Total']],
-            use_container_width=True,
+            width='stretch',
             hide_index=True
         )
         
@@ -2072,7 +2072,7 @@ def show_container_movement_summary(current_data, baseline_data, carrier_col='Dr
             yaxis={'categoryorder': 'total ascending'}
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
     
     # Summary insights
     st.subheader("💡 Insights")

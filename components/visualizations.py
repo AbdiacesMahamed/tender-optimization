@@ -67,7 +67,7 @@ def show_cost_vs_performance(final_filtered_data):
             labels={rate_cols['rate']: f'{rate_cols["rate"]} ($)', 'Performance_Score': 'Performance Score (%)'}
         )
         fig.update_layout(height=500)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
         
         # Quadrant analysis
         show_quadrant_analysis(viz_data, rate_cols)
@@ -110,7 +110,7 @@ def show_quadrant_analysis(viz_data, rate_cols):
     quad_summary = quad_summary.round(2)
     
     st.write("**Quadrant Analysis:**")
-    st.dataframe(quad_summary, use_container_width=True)
+    st.dataframe(quad_summary, width='stretch')
 
 def show_geographic_analysis(final_filtered_data):
     """Show geographic and route analysis"""
@@ -153,7 +153,7 @@ def show_port_analysis(port_analysis, geo_metric, top_n_ports):
         color_continuous_scale='viridis'
     )
     fig.update_layout(height=400, xaxis_tickangle=-45)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 def show_lane_heatmap(final_filtered_data, rate_cols):
     """Show lane performance heatmap"""
@@ -187,7 +187,7 @@ def show_lane_heatmap(final_filtered_data, rate_cols):
         title=f"Total Cost by Port-Facility Combination ({rate_cols['rate']})"
     )
     fig.update_layout(height=500)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 def show_time_series_analysis(final_filtered_data):
     """Show time series analysis"""
@@ -246,7 +246,7 @@ def show_weekly_trends_chart(weekly_trends, rate_cols):
     )
     
     fig.update_layout(height=600, showlegend=False, title_text="Weekly Trends Analysis")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 def show_growth_rate_analysis(weekly_trends, rate_cols):
     """Show growth rate analysis"""
@@ -261,7 +261,7 @@ def show_growth_rate_analysis(weekly_trends, rate_cols):
     }).dropna()
     
     st.write("**Week-over-Week Growth Rates:**")
-    st.dataframe(growth_summary, use_container_width=True)
+    st.dataframe(growth_summary, width='stretch')
 
 def show_correlation_analysis(final_filtered_data):
     """Show correlation analysis"""
@@ -306,7 +306,7 @@ def show_correlation_heatmap(corr_data):
             )
     
     fig.update_layout(height=500)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 def show_correlation_insights(corr_data):
     """Show correlation insights"""
@@ -328,6 +328,6 @@ def show_correlation_insights(corr_data):
     
     if insights:
         insights_df = pd.DataFrame(insights)
-        st.dataframe(insights_df, use_container_width=True)
+        st.dataframe(insights_df, width='stretch')
     else:
         st.info("No significant correlations found (threshold: |r| > 0.3)")

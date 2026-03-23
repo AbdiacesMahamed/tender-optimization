@@ -109,7 +109,7 @@ def deduplicate_containers_per_lane_week(df: pd.DataFrame) -> pd.DataFrame:
     if 'Container Numbers' not in df.columns or 'Week Number' not in df.columns:
         return df
     
-    result = df.copy()
+    result = df.copy().reset_index(drop=True)
     lane_col = 'Lane' if 'Lane' in result.columns else None
     seen = {}  # {(week, lane): set of container IDs already assigned}
     

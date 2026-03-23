@@ -79,7 +79,7 @@ def filter_interface_fragment(comprehensive_data):
     search_col1, search_col2 = st.columns([1, 3])
 
     with search_col1:
-        apply_filters = st.button("🔍 Apply Filters", type="primary", use_container_width=True)
+        apply_filters = st.button("🔍 Apply Filters", type="primary", width='stretch')
 
     with search_col2:
         st.write("*Select your filters below and click 'Apply Filters' to update the results*")
@@ -161,7 +161,7 @@ def filter_interface_fragment(comprehensive_data):
         )
 
     # Clear filters button
-    if st.button("🗑️ Clear All Filters", use_container_width=True):
+    if st.button("🗑️ Clear All Filters", width='stretch'):
         st.session_state.filter_ports = []
         st.session_state.filter_fcs = []
         st.session_state.filter_weeks = []
@@ -292,7 +292,7 @@ def show_optimization_settings():
             # Submit button for the form (Run Optimization)
             run_optimization = st.form_submit_button(
                 "▶️ Run Optimization", 
-                use_container_width=True, 
+                width='stretch', 
                 type="primary"
             )
         
@@ -300,7 +300,7 @@ def show_optimization_settings():
             # Reset button
             reset_defaults = st.form_submit_button(
                 "🔄 Reset to Defaults", 
-                use_container_width=True
+                width='stretch'
             )
     
     # Handle form submission OUTSIDE the form

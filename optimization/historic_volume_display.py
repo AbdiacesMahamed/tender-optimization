@@ -219,7 +219,7 @@ def show_market_share_analysis(volume_share: pd.DataFrame, n_weeks: int):
         showlegend=True
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     
     # Data table
     st.subheader("Market Share Details")
@@ -248,7 +248,7 @@ def show_market_share_analysis(volume_share: pd.DataFrame, n_weeks: int):
             'Lane_Total_Containers': '{:.0f}',
             'Avg_Weekly_Containers': '{:.1f}'
         }),
-        use_container_width=True,
+        width='stretch',
         height=400
     )
 
@@ -325,7 +325,7 @@ def show_weekly_trends_analysis(weekly_trends: pd.DataFrame, n_weeks: int):
     )
     
     fig.update_layout(height=500)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     
     # Data table
     st.subheader("Weekly Volume Data")
@@ -334,7 +334,7 @@ def show_weekly_trends_analysis(weekly_trends: pd.DataFrame, n_weeks: int):
     
     st.dataframe(
         filtered_trends[display_cols],
-        use_container_width=True,
+        width='stretch',
         height=400
     )
 
@@ -378,7 +378,7 @@ def show_participation_analysis(participation: pd.DataFrame, n_weeks: int):
     )
     
     fig.update_layout(height=400)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     
     # Detailed participation table
     st.subheader("Participation Details")
@@ -401,7 +401,7 @@ def show_participation_analysis(participation: pd.DataFrame, n_weeks: int):
         filtered_participation.style.format({
             'Participation_Rate_Pct': '{:.1f}%'
         }),
-        use_container_width=True,
+        width='stretch',
         height=400
     )
 
@@ -425,7 +425,7 @@ def show_detailed_data_export(
                 data=csv,
                 file_name="historic_market_share.csv",
                 mime="text/csv",
-                use_container_width=True
+                width='stretch'
             )
     
     with col2:
@@ -436,7 +436,7 @@ def show_detailed_data_export(
                 data=csv,
                 file_name="historic_weekly_trends.csv",
                 mime="text/csv",
-                use_container_width=True
+                width='stretch'
             )
     
     with col3:
@@ -447,20 +447,20 @@ def show_detailed_data_export(
                 data=csv,
                 file_name="historic_participation.csv",
                 mime="text/csv",
-                use_container_width=True
+                width='stretch'
             )
     
     st.divider()
     
     # Show complete data tables
     with st.expander("📋 View Complete Market Share Data"):
-        st.dataframe(volume_share, use_container_width=True)
+        st.dataframe(volume_share, width='stretch')
     
     with st.expander("📋 View Complete Weekly Trends"):
-        st.dataframe(weekly_trends, use_container_width=True)
+        st.dataframe(weekly_trends, width='stretch')
     
     with st.expander("📋 View Complete Participation Data"):
-        st.dataframe(participation, use_container_width=True)
+        st.dataframe(participation, width='stretch')
 
 
 __all__ = [
