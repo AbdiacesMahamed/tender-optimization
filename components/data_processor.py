@@ -16,6 +16,7 @@ CATEGORY_MAPPING = {
     "FBA LCL": "CD",
     "Retail CD": "CD",
     "FBA FCL": "CD",
+    "Retail Transload": "TL"
 }
 
 @st.cache_data(show_spinner=False)
