@@ -115,7 +115,7 @@ def generate_forecast(weekly_data, selected_lane, forecast_weeks, confidence_lev
             height=400
         )
         
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
         
         # Forecast summary
         forecast_df = pd.DataFrame({
@@ -123,7 +123,7 @@ def generate_forecast(weekly_data, selected_lane, forecast_weeks, confidence_lev
             'Forecasted Containers': forecast.astype(int),
             'Confidence Level': f"{confidence_level}%"
         })
-        st.dataframe(forecast_df, width='stretch')
+        st.dataframe(forecast_df, use_container_width=True)
     else:
         st.warning("Not enough historical data for this lane. Select a different lane.")
 
@@ -182,7 +182,7 @@ def show_trend_analysis_interface(final_filtered_data, perf_trends, top_carriers
             markers=True
         )
         fig.update_layout(height=400)
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
 def show_performance_ranking(final_filtered_data):
     """Show performance ranking table"""
@@ -196,7 +196,7 @@ def show_performance_ranking(final_filtered_data):
         'Carrier': current_perf.index,
         'Avg Performance': current_perf.values.round(1)
     })
-    st.dataframe(perf_rank_df.head(10), width='stretch')
+    st.dataframe(perf_rank_df.head(10), use_container_width=True)
 
 def show_anomaly_detection(final_filtered_data):
     """Show anomaly detection analysis"""
@@ -248,7 +248,7 @@ def show_anomaly_details(anomalies, final_filtered_data, lower_bound, rate_cols)
         'Unusually Low',
         'Unusually High'
     )
-    st.dataframe(anomaly_display.sort_values(rate_cols['rate']), width='stretch')
+    st.dataframe(anomaly_display.sort_values(rate_cols['rate']), use_container_width=True)
     
     # Visualization
     fig = px.box(
@@ -258,4 +258,4 @@ def show_anomaly_details(anomalies, final_filtered_data, lower_bound, rate_cols)
         points='outliers'
     )
     fig.update_layout(height=400)
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, use_container_width=True)

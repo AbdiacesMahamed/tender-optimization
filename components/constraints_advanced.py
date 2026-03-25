@@ -79,7 +79,7 @@ def show_advanced_constraints_interface(comprehensive_data):
         )
     
     with col2:
-        if st.button("📥 Download Template", width='stretch'):
+        if st.button("📥 Download Template", use_container_width=True):
             template_df = create_constraints_template()
             csv = template_df.to_csv(index=False)
             st.download_button(
@@ -87,7 +87,7 @@ def show_advanced_constraints_interface(comprehensive_data):
                 data=csv,
                 file_name="constraints_template.csv",
                 mime="text/csv",
-                width='stretch'
+                use_container_width=True
             )
     
     # Process uploaded file
@@ -256,7 +256,7 @@ def display_constraints_table(constraints_df):
             lambda x: f"{int(x)}" if pd.notna(x) else '50'
         )
     
-    st.dataframe(display_df, width='stretch', hide_index=True)
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
     
     # Summary statistics
     st.markdown("#### 📊 Constraints Summary")
@@ -504,7 +504,7 @@ def show_advanced_constraints_summary(constraint_summary):
         'target_containers': 'Target'
     })
     
-    st.dataframe(display_df, width='stretch', hide_index=True)
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
     
     # Summary metrics
     col1, col2, col3 = st.columns(3)

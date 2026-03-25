@@ -120,7 +120,7 @@ def show_missing_rate_analysis(final_filtered_data, original_data=None):
             'Total_Rate': 'Total Rate'
         })
         
-        st.dataframe(display_df, width='stretch')
+        st.dataframe(display_df, use_container_width=True)
         
         # Issue breakdown
         st.markdown("### 📊 **Issue Breakdown**")
@@ -145,7 +145,7 @@ def show_missing_rate_analysis(final_filtered_data, original_data=None):
         st.warning(f"⚠️ Found {len(lanes_with_no_carriers)} lanes that appear in your original data but have no carriers in the filtered results.")
         
         lanes_df = pd.DataFrame({'Lane': lanes_with_no_carriers})
-        st.dataframe(lanes_df, width='stretch')
+        st.dataframe(lanes_df, use_container_width=True)
         
         st.info("💡 **Tip:** These lanes might be filtered out due to your current selection criteria, or they may lack rate data entirely.")
     
@@ -158,7 +158,7 @@ def show_missing_rate_analysis(final_filtered_data, original_data=None):
             data=csv,
             file_name='missing_rate_analysis.csv',
             mime='text/csv',
-            width='stretch'
+            use_container_width=True
         )
     
     # Detailed analysis in expander
@@ -185,7 +185,7 @@ def show_missing_rate_analysis(final_filtered_data, original_data=None):
             carrier_issues = carrier_issues.sort_values('Total_Issues', ascending=False)
             
             st.markdown("**Issues by Carrier:**")
-            st.dataframe(carrier_issues, width='stretch')
+            st.dataframe(carrier_issues, use_container_width=True)
 
 def identify_missing_rate_lanes(final_filtered_data):
     """
