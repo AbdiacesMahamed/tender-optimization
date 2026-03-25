@@ -179,9 +179,12 @@ def get_grouping_columns(
 
 def normalize_facility_code(facility_str: Any) -> str:
     """
-    Normalize facility code to first 4 characters for comparison.
+    Normalize facility code for comparison.
     
-    Examples: 'HGR6-5' -> 'HGR6', 'IUSF' -> 'IUSF', 'GBPT-3' -> 'GBPT'
+    If the facility starts with 'Amazon', returns the last 4 characters.
+    Otherwise returns the first 4 characters.
+    
+    Examples: 'HGR6-5' -> 'HGR6', 'IUSF' -> 'IUSF', 'Amazon REWR' -> 'REWR'
     
     Args:
         facility_str: Facility code string.
@@ -191,8 +194,24 @@ def normalize_facility_code(facility_str: Any) -> str:
     """
     if pd.isna(facility_str) or not str(facility_str).strip():
         return ''
-    fc = str(facility_str).strip().upper()
-    return fc[:4] if len(fc) >= 4 else fc
+    fc = str(facility_str).strip()
+    if fc.upper().startswith('AMAZON'):
+        return fc[-4:].upper()
+    return fc[:4].upper() if len(fc) >= 4 else fc.upper()
+
+
+def normalize_facility_series(series: pd.Series) -> pd.Series:
+    """
+    Vectorized facility normalization for a pandas Series.
+    
+    If facility starts with 'Amazon', returns the last 4 characters.
+    Otherwise returns the first 4 characters.
+    """
+    s = series.astype(str).str.strip()
+    is_amazon = s.str.upper().str.startswith('AMAZON')
+    result = s.str[:4].str.upper()
+    result[is_amazon] = s[is_amazon].str[-4:].str.upper()
+    return result
 
 
 # ==================== VALUE FORMATTING UTILITIES ====================
@@ -297,7 +316,7 @@ def filter_excluded_carrier_facility_rows(
             continue
         for excluded_fc in excluded_facilities:
             carrier_match = df[carrier_col] == carrier
-            facility_match = df['Facility'].str[:4].str.upper() == excluded_fc.upper()[:4]
+            facility_match = normalize_facility_series(df['Facility']) == excluded_fc.upper()[:4]
             keep_mask &= ~(carrier_match & facility_match)
     
     return df[keep_mask].copy()

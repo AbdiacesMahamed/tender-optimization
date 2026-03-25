@@ -11,6 +11,7 @@ from .utils import (
     concat_and_dedupe_containers,
     get_grouping_columns,
     normalize_facility_code,
+    normalize_facility_series,
     safe_numeric,
     format_currency,
     format_percentage,

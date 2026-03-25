@@ -4,6 +4,7 @@ Filtering module for the Carrier Tender Optimization Dashboard
 import streamlit as st
 import pandas as pd
 from .config_styling import section_header
+from .utils import normalize_facility_series
 
 def initialize_filter_session_state():
     """Initialize session state for filters"""
@@ -111,7 +112,7 @@ def filter_interface_fragment(comprehensive_data):
         st.markdown("**🏭 Facilities:**")
         fc_search = st.text_input("Search facilities...", key="fc_search", placeholder="Type to search facilities")
         
-        fc_options = sorted([x for x in comprehensive_data['Facility'].str[:4].unique() if pd.notna(x)])
+        fc_options = sorted([x for x in normalize_facility_series(comprehensive_data['Facility']).unique() if pd.notna(x)])
         if fc_search:
             fc_options = [fc for fc in fc_options if fc_search.lower() in str(fc).lower()]
         
@@ -370,7 +371,7 @@ def apply_filters_to_data(comprehensive_data):
 
     # Apply FC filter
     if st.session_state.filter_fcs:
-        mask &= comprehensive_data['Facility'].str[:4].isin(st.session_state.filter_fcs)
+        mask &= normalize_facility_series(comprehensive_data['Facility']).isin(st.session_state.filter_fcs)
         display_fcs = st.session_state.filter_fcs
     else:
         display_fcs = "All FCs"

@@ -5,6 +5,7 @@ import pandas as pd
 import logging
 import streamlit as st
 from .config_styling import section_header
+from .utils import normalize_facility_series
 
 # Set up module logger — debug output goes to console only when DEBUG level is enabled
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ def validate_and_process_gvt_data(GVTdata):
     
     # Vectorized string operations
     GVTdata['Port_Processed'] = 'US' + port_str
-    GVTdata['Facility_Processed'] = facility_str.str[:4]
+    GVTdata['Facility_Processed'] = normalize_facility_series(facility_str)
     
     # Create lookup key and lane in one pass using pre-converted strings
     GVTdata['Lookup'] = scac_str + GVTdata['Port_Processed'] + GVTdata['Facility_Processed']
@@ -359,7 +360,7 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
             merged_data['Lane'] = merged_data['Lane_rate']
         else:
             # Recreate Lane column from the original data
-            merged_data['Lane'] = 'US' + merged_data['Discharged Port'].astype(str) + merged_data['Facility'].astype(str).str[:4]
+            merged_data['Lane'] = 'US' + merged_data['Discharged Port'].astype(str) + normalize_facility_series(merged_data['Facility'].astype(str))
 
     # Merge with performance data (only if available)
     if has_performance and len(performance_clean) > 0:

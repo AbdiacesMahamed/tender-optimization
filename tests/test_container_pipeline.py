@@ -15,6 +15,7 @@ from components.utils import (
     deduplicate_containers_per_lane_week,
     parse_container_ids,
     concat_and_dedupe_containers,
+    normalize_facility_series,
 )
 
 
@@ -179,7 +180,7 @@ class TestRealGVTData:
         df = gvt_file_data.copy()
         df['Discharged Port'] = df['Discharged Port'].astype(str)
         df['Facility'] = df['Facility'].astype(str)
-        df['Lane'] = df['Discharged Port'] + df['Facility'].str[:4]
+        df['Lane'] = df['Discharged Port'] + normalize_facility_series(df['Facility'])
 
         group_cols = ['Week Number', 'Discharged Port', 'Dray SCAC(FL)', 'Facility', 'Lane']
         for opt_col in ['Category', 'SSL', 'Vessel', 'Terminal']:
@@ -210,7 +211,7 @@ class TestRealGVTData:
         df = gvt_file_data.copy()
         df['Discharged Port'] = df['Discharged Port'].astype(str)
         df['Facility'] = df['Facility'].astype(str)
-        df['Lane'] = df['Discharged Port'] + df['Facility'].str[:4]
+        df['Lane'] = df['Discharged Port'] + normalize_facility_series(df['Facility'])
 
         group_cols = ['Week Number', 'Discharged Port', 'Dray SCAC(FL)', 'Facility', 'Lane']
         for opt_col in ['Category', 'SSL', 'Vessel', 'Terminal']:
