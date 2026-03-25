@@ -26,24 +26,31 @@ Tender Optimization/
 │   ├── filters.py              # Filter interface and application
 │   ├── metrics.py              # Metrics calculation and display
 │   ├── constraints_processor.py # Constraint file processing
+│   ├── constraints_advanced.py # Interactive constraint builder UI
 │   ├── container_tracer.py     # Container movement tracking
 │   ├── summary_tables.py       # Summary table generation
 │   ├── analytics.py            # Advanced analytics
 │   ├── visualizations.py       # Charts and graphs
-│   └── performance_*.py        # Performance scoring utilities
+│   ├── missing_rate_analysis.py # Missing rate detection and reporting
+│   ├── calculation_logic.py    # Calculation explanation panel
+│   ├── performance_calculator.py # Performance optimization calculator
+│   └── performance_assignments.py # Performance score tracking
 │
 ├── optimization/               # Optimization algorithms
 │   ├── __init__.py            # Module exports
 │   ├── optimization.py        # Main orchestration
 │   ├── linear_programming.py  # LP optimization
 │   ├── cascading_logic.py     # Cascading allocation with constraints
-│   ├── cheapest_logic.py      # Cheapest carrier allocation
 │   ├── performance_logic.py   # Performance-based allocation
-│   └── historic_volume.py     # Historical volume analysis
+│   ├── historic_volume.py     # Historical volume analysis
+│   └── historic_volume_display.py # Volume analysis charts
 │
 └── docs/                       # Documentation
+    ├── ARCHITECTURE.md         # System architecture overview
     ├── CONSTRAINTS.md          # Constraint system documentation
-    └── OPTIMIZATION.md         # Optimization strategies documentation
+    ├── CONSTRAINTS_GUIDE.md    # User-facing constraint file guide
+    ├── OPTIMIZATION.md         # Optimization strategies documentation
+    └── dev/                    # Developer reference docs
 ```
 
 ## Quick Start

@@ -35,8 +35,20 @@ Standalone performance optimization calculator. Functions:
 ## components/missing_rate_analysis.py
 Identifies and reports lanes/carriers with missing rate data. Shows which container groups have no pricing and their impact on cost calculations.
 
+Key function:
+- `show_missing_rate_analysis(final_filtered_data, original_data=None)` — Renders the missing rate analysis section
+
 ## components/constraints_advanced.py
 UI for creating constraints interactively (not from file upload). Provides a template builder, validation, and application interface. Separate from `constraints_processor.py` which handles file-based constraints.
+
+Key functions:
+- `initialize_advanced_constraints()` — Initialize session state for interactive constraints
+- `show_advanced_constraints_interface(comprehensive_data)` — Main interactive constraint builder UI
+- `create_constraints_template()` — Generate downloadable constraint template
+- `validate_and_process_constraints(constraints_df, comprehensive_data)` — Validate user-built constraints
+- `display_constraints_table(constraints_df)` — Render constraint table
+- `apply_advanced_constraints(comprehensive_data)` — Apply interactive constraints to data
+- `show_advanced_constraints_summary(constraint_summary)` — Display constraint application results
 
 ## components/calculation_logic.py
 - `show_calculation_logic()` — Renders the "how calculations work" explanation panel

@@ -16,6 +16,10 @@ Validates, transforms, and merges the three data sources (GVT, Rate, Performance
 - Validates rate data has required columns (`Lookup`, `Base Rate`)
 - Cleans and normalizes rate values
 
+### `perform_lane_analysis(Ratedata) -> DataFrame`
+- Analyzes rate data by lane to identify coverage and pricing patterns
+- Used during data processing to enrich lane-level insights
+
 ### `merge_all_data(GVTdata, Ratedata, performance_clean, has_performance) -> DataFrame`
 **This is the most critical function in the pipeline.** It:
 1. Groups GVT data by `group_cols` (Week, Port, Carrier, Facility, Lane, Lookup + optional Category/SSL/Vessel/Terminal)

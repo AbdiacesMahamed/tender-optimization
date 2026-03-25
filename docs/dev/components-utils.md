@@ -27,6 +27,7 @@ Shared utility functions used across all component modules. Consolidates common 
 ### DataFrame Utilities
 - `filter_excluded_carrier_facility_rows(df, exclusions_dict, carrier_col) -> DataFrame` — Remove rows where a carrier is excluded from a specific facility
 - `normalize_facility_code(facility_str) -> str` — Normalize to first 4 chars uppercase
+- `normalize_facility_series(series: pd.Series) -> pd.Series` — Vectorized facility code normalization for DataFrame columns
 
 ## Zero-Sum Container Rule
 A physical container can only belong to one carrier per lane/week. `deduplicate_containers_per_lane_week()` enforces this by iterating rows and tracking seen container IDs per `(Week Number, Lane)` key. If a container already appeared under a previous carrier, it is removed from the current row. This ensures all scenarios (Current, Performance, Cheapest, Optimized) start from the same total container count.

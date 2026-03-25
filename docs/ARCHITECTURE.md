@@ -72,6 +72,7 @@ graph TB
 
     H --> V
     L --> N
+```
 
 ## Data Pipeline
 

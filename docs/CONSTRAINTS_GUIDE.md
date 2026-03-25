@@ -5,7 +5,7 @@ The constraint file is an Excel spreadsheet that controls how containers are all
 A template is provided at `docs/constraint_template.xlsx`.
 
 ## Columns
-![1773075396111](image/CONSTRAINTS_GUIDE/1773075396111.xlsx)
+
 | Column | Required | Type | Description |
 |--------|----------|------|-------------|
 | Priority Score | Yes | Number | Processing order. Higher = processed first. When two constraints compete for the same containers, the higher priority wins. |
