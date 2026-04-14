@@ -472,6 +472,14 @@ def add_detailed_carrier_flips_column(current_data, original_data,
     
     current_data['Carrier Flips (Detailed)'] = flip_details
     
+    # Override "No Flip" for containers that had no carrier initially assigned
+    if '_Auto_Assigned_SCAC' in current_data.columns:
+        auto_mask = current_data['_Auto_Assigned_SCAC'].fillna(False).astype(bool)
+        flip_col = 'Carrier Flips (Detailed)'
+        current_data.loc[auto_mask & (current_data[flip_col] == 'No Flip'), flip_col] = (
+            'No Carrier Initially Assigned'
+        )
+    
     return current_data
 
 

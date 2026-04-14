@@ -57,6 +57,48 @@ def _load_excel_file(file_bytes, file_name):
 
 
 @st.cache_data(show_spinner=False)
+def _load_performance_file(file_bytes, file_name):
+    """
+    Load a carrier scorecard / performance Excel file with auto-detection.
+
+    Handles common format variations:
+    - Data on any sheet (picks the one with the most week-like columns)
+    - Header row may not be the first row (scans up to 10 rows)
+    - Week columns may be WK42, WK 42, Week 42, Week42, W42, Wk 42, etc.
+    - Carrier column may be Carrier, SCAC, Carrier Name, Carrier SCAC, etc.
+    - Metrics column may be Metrics, Metric, Type, or absent/unnamed
+    """
+    import io, re
+
+    buf = io.BytesIO(file_bytes)
+    xls = pd.ExcelFile(buf)
+
+    _WEEK_RE = re.compile(
+        r'^(?:wk|week|w)\s*(\d+)$', re.IGNORECASE
+    )
+
+    def _is_week_col(v):
+        s = str(v).strip()
+        return bool(_WEEK_RE.match(s) or s.isdigit())
+
+    best_df = None
+    best_week_count = 0
+
+    for sheet in xls.sheet_names:
+        preview = pd.read_excel(xls, sheet_name=sheet, header=None, nrows=10)
+        for row_idx in range(min(len(preview), 10)):
+            row_vals = [str(v).strip() for v in preview.iloc[row_idx].values]
+            wk_count = sum(1 for v in row_vals if _is_week_col(v))
+            if wk_count > best_week_count:
+                best_week_count = wk_count
+                best_df = pd.read_excel(xls, sheet_name=sheet, header=row_idx)
+
+    if best_df is not None and best_week_count > 0:
+        return best_df
+
+    # Fallback: default read (first sheet, header=0)
+    buf.seek(0)
+    return pd.read_excel(buf)
 def _load_rate_file(file_bytes, file_name):
     """
     Load a rate Excel file with auto-detection of format.
@@ -154,7 +196,7 @@ def load_data_files(gvt_file, rate_file, performance_file):
         if performance_file is not None:
             try:
                 with st.spinner('📂 Loading Performance data...'):
-                    Performancedata = _load_excel_file(performance_file.read(), performance_file.name)
+                    Performancedata = _load_performance_file(performance_file.read(), performance_file.name)
                     performance_file.seek(0)  # Reset file pointer
                     has_performance = True
                     
@@ -178,41 +220,113 @@ def load_data_files(gvt_file, rate_file, performance_file):
 
 @st.cache_data(show_spinner=False)
 def process_performance_data(Performancedata, has_performance):
-    """Process performance data if available - ONLY handles raw data cleaning, NO business logic calculations"""
+    """Process performance data if available - ONLY handles raw data cleaning, NO business logic calculations.
+
+    Robustly handles common spreadsheet variations:
+    - Carrier column: 'Carrier', 'SCAC', 'Carrier Name', 'Carrier SCAC', or first unnamed text column
+    - Metrics column: 'Metrics', 'Metric', 'Type', 'Measure', or unnamed column containing 'Total Score %'
+    - Week columns: 'WK42', 'WK 42', 'Week 42', 'Week42', 'W42', 'Wk 42', etc.
+    - Scores: percentages (80%), decimals (0.80), or whole numbers (80)
+    """
+    import re
+
     if not has_performance or Performancedata is None:
         return None, False
     
     try:
-        # Your data structure: Carrier, Metrics, WK27, WK28, WK29, WK30, etc.
         performance_clean = Performancedata.copy()
         
-        # Clean up column names by removing trailing spaces
-        performance_clean.columns = performance_clean.columns.str.strip()
+        # Clean up column names by removing trailing/leading spaces
+        # Preserve non-string column names (e.g. integer week numbers like 42)
+        performance_clean.columns = [
+            col.strip() if isinstance(col, str) else col
+            for col in performance_clean.columns
+        ]
         
-        # Filter for 'Total Score %' metrics only (your data shows this in Metrics column)
-        if 'Metrics' in performance_clean.columns:
-            performance_clean = performance_clean[performance_clean['Metrics'] == 'Total Score %'].copy()
-        
-        # Find week columns (WK27, WK28, WK29, WK30, etc.)
-        week_columns = []
+        # --- Detect carrier column ---
+        carrier_col = None
+        _carrier_patterns = ['carrier', 'scac', 'carrier name', 'carrier scac',
+                             'dray scac', 'provider', 'vendor', 'lsp']
         for col in performance_clean.columns:
-            if col.upper().startswith('WK') and len(col) > 2:
-                try:
-                    # Extract week number (WK27 -> 27)
-                    week_num = int(col[2:])
-                    week_columns.append(col)
-                except ValueError:
+            col_lower = str(col).strip().lower()
+            if col_lower in _carrier_patterns or any(p in col_lower for p in _carrier_patterns):
+                carrier_col = col
+                break
+        if carrier_col is None:
+            # Fallback: first column that contains string values (skip numeric column names)
+            for col in performance_clean.columns:
+                if isinstance(col, (int, float)):
                     continue
-        
-        if not week_columns:
-            st.warning("⚠️ No week columns (WK27, WK28, etc.) found in performance data.")
+                try:
+                    if performance_clean[col].dtype == object:
+                        sample = performance_clean[col].dropna().head(5)
+                        if len(sample) > 0 and all(isinstance(v, str) for v in sample):
+                            carrier_col = col
+                            break
+                except Exception:
+                    continue
+        if carrier_col is None:
+            st.warning("⚠️ Could not identify a Carrier column in performance data.")
             return None, False
         
-        # Create week mapping (WK27 -> 27, WK28 -> 28, etc.)
+        # Rename to standard name
+        if carrier_col != 'Carrier':
+            performance_clean = performance_clean.rename(columns={carrier_col: 'Carrier'})
+        
+        # --- Optionally filter by metrics column if present ---
+        # If a metrics/type column exists with 'Total Score' rows, keep only those.
+        # Otherwise assume every row is a score row (no filtering needed).
+        _metrics_names = ['metrics', 'metric', 'type', 'measure', 'kpi']
+        metrics_col = None
+        for col in performance_clean.columns:
+            col_lower = str(col).strip().lower()
+            if col_lower in _metrics_names:
+                metrics_col = col
+                break
+        if metrics_col is None:
+            for col in performance_clean.columns:
+                if col == 'Carrier' or isinstance(col, (int, float)):
+                    continue
+                try:
+                    if performance_clean[col].dtype != object:
+                        continue
+                except Exception:
+                    continue
+                vals = performance_clean[col].dropna().astype(str).str.strip().str.lower().unique()
+                if any('total score' in v for v in vals):
+                    metrics_col = col
+                    break
+        
+        if metrics_col is not None:
+            mask = performance_clean[metrics_col].astype(str).str.strip().str.lower().str.contains('total score', na=False)
+            if mask.any():
+                performance_clean = performance_clean[mask].copy()
+        
+        # --- Detect week columns (flexible pattern matching) ---
+        # Accepts: WK42, WK 42, Week 42, W42, Wk 42, or bare numbers (42, 43)
+        _WEEK_RE = re.compile(r'^(?:wk|week|w)\s*(\d+)$', re.IGNORECASE)
+        week_columns = []
         week_mapping = {}
-        for col in week_columns:
-            week_num = int(col[2:])
-            week_mapping[col] = week_num
+        for col in performance_clean.columns:
+            # Handle both string and integer column names
+            if isinstance(col, (int, float)) and not pd.isna(col):
+                week_columns.append(col)
+                week_mapping[col] = int(col)
+                continue
+            col_str = str(col).strip()
+            m = _WEEK_RE.match(col_str)
+            if m:
+                week_num = int(m.group(1))
+                week_columns.append(col)
+                week_mapping[col] = week_num
+            elif col_str.isdigit():
+                week_columns.append(col)
+                week_mapping[col] = int(col_str)
+        
+        if not week_columns:
+            st.warning("⚠️ No week columns found in performance data. "
+                       "Expected patterns like WK42, WK 42, Week 42, W42, or just 42.")
+            return None, False
         
         # Melt the performance data to long format
         performance_melted = performance_clean.melt(
@@ -231,29 +345,21 @@ def process_performance_data(Performancedata, has_performance):
             if pd.isna(value) or value == '':
                 return None
             
-            # Convert to string and clean
             str_value = str(value).strip().replace('%', '')
-            
             if str_value == '' or str_value.lower() == 'nan':
                 return None
             
             try:
                 numeric_value = float(str_value)
-                
-                # If the value is already between 0 and 1, it's likely already in decimal format
                 if 0 <= numeric_value <= 1:
                     return numeric_value
-                # If the value is between 1 and 100, it's likely a percentage that needs conversion
                 elif 1 < numeric_value <= 100:
                     return numeric_value / 100
-                # If the value is greater than 100, something might be wrong, but try to convert
                 else:
-                    st.warning(f"⚠️ Unusual performance score found: {numeric_value}. Converting as percentage.")
                     return numeric_value / 100
             except (ValueError, TypeError):
                 return None
         
-        # Apply the cleaning function
         performance_melted['Performance_Score'] = performance_melted['Performance_Score'].apply(clean_performance_score)
         
         # Ensure performance scores are between 0 and 1 (only for non-null values)

@@ -173,6 +173,43 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
     if 'Terminal' in GVTdata.columns:
         group_cols.insert(len(group_cols) - 1, 'Terminal')  # Insert before 'Lookup'
     
+    # --- Assign cheapest carrier to containers with no Dray SCAC ---
+    # GVT rows with blank/NaN SCAC can't match the rate card and would be
+    # skipped by the optimiser.  Fix: look up the cheapest available carrier
+    # from the rate card for the same lane and fill in the SCAC + Lookup so
+    # the container participates in optimisation normally.
+    GVTdata['_Auto_Assigned_SCAC'] = False
+    _empty_scac_mask = (
+        GVTdata['Dray SCAC(FL)'].isna()
+        | (GVTdata['Dray SCAC(FL)'].astype(str).str.strip().str.upper().isin(['', 'NAN', 'NONE']))
+    )
+    if _empty_scac_mask.any() and 'Lane' in GVTdata.columns and 'Lane' in Ratedata.columns:
+        # Build a lookup of Lane → cheapest carrier from the rate card
+        _rate_valid = Ratedata.dropna(subset=['Base Rate', 'SCAC']).copy()
+        _rate_valid['Base Rate'] = pd.to_numeric(_rate_valid['Base Rate'], errors='coerce')
+        _rate_valid = _rate_valid.dropna(subset=['Base Rate'])
+        if not _rate_valid.empty:
+            _cheapest = (
+                _rate_valid
+                .sort_values('Base Rate')
+                .drop_duplicates(subset=['Lane'], keep='first')
+                .set_index('Lane')
+            )
+            _assigned_count = 0
+            for idx in GVTdata.index[_empty_scac_mask]:
+                lane = GVTdata.at[idx, 'Lane']
+                if lane in _cheapest.index:
+                    best = _cheapest.loc[lane]
+                    GVTdata.at[idx, 'Dray SCAC(FL)'] = best['SCAC']
+                    GVTdata.at[idx, 'Lookup'] = best['SCAC'] + lane
+                    GVTdata.at[idx, '_Auto_Assigned_SCAC'] = True
+                    _assigned_count += 1
+            if _assigned_count:
+                logger.info(
+                    f"Auto-assigned cheapest carrier to {_assigned_count} container(s) "
+                    f"that had no Dray SCAC in the GVT data"
+                )
+
     if container_col:
         # DEBUG: Count containers BEFORE any processing - FOCUS ON WEEK 47
         debug_all_containers_before = []
@@ -241,6 +278,10 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
         # Preserve Ocean ETA through the groupby (same date per group, take first)
         if 'Ocean ETA' in GVTdata.columns:
             agg_dict['Ocean ETA'] = 'first'
+        
+        # Preserve auto-assigned SCAC flag (True if any row in group was auto-assigned)
+        if '_Auto_Assigned_SCAC' in GVTdata.columns:
+            agg_dict['_Auto_Assigned_SCAC'] = 'any'
         
         # Use dropna=False to include rows with blank Terminal or other NaN values in grouping columns
         lane_count = GVTdata.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
