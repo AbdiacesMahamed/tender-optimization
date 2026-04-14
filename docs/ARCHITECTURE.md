@@ -290,6 +290,21 @@ graph LR
 | `peel_pile_allocations` | dict | metrics | Applied peel pile assignments `{key: [carrier, ...]}` |
 | `peel_pile_pending` | dict | metrics | Queued (not yet applied) peel pile assignments `{key: [carrier, ...]}` |
 
+## Common Pitfalls
+
+These are bugs that have been found and fixed. This section exists to prevent them from being reintroduced.
+
+| Area | Pitfall | What goes wrong | Fix |
+|------|---------|-----------------|-----|
+| LP → Cascading | Filtering LP results by cascading group columns | LP groups by `Lane + Week` only. Cascading groups by `Category + SSL + Vessel + Lane + Facility + Terminal + Week`. Filtering LP results by all cascading columns returns empty → rank 999 → no optimization. | Only filter LP results by `Lane` and `Week Number`. |
+| Container Tracer | Missing SSL/Vessel in origin map `context_cols` | Group keys don't match between origin map and current data → `original_count = 0` → "Had 0 → Now X" instead of "No Flip". | `context_cols` must include ALL columns used in group keys: `discharged_port`, `lane`, `facility`, `terminal`, `category`, `ssl`, `vessel`, `week_number`. |
+| Container Tracer | Week Number type mismatch | Origin map stores week as `int`, DataFrame may have `float` or `Int64`. Tuple comparison fails → group keys don't match. | Normalize week to `int` on both sides. Convert NaN to `''`. |
+| Container Tracer | NaN carrier values | `NaN != NaN` in Python → containers show as "flipped" when they stayed with the same carrier. | Convert NaN carriers to `'Unknown'` in origin map, tracer, and destination map. |
+| LP Solver | Missing rates treated as $0 | Carriers with no rate appear "cheapest" → LP assigns max volume to them → cost goes UP. | Penalize missing rates with 10x max known rate. Exclude unrated rows from optimization entirely. |
+| Cascading | Rounding loses containers | `round()` per carrier doesn't preserve total. 3 carriers × `round(33.33)` = 99, not 100. | Use largest-remainder method: floor all, then distribute shortfall to carriers with largest fractional remainders. |
+| Cascading | Overflow only goes to new carriers | Second pass skipped existing carriers → remaining volume dumped on rank-1 carrier regardless of cost. | Second pass allows ALL carriers to take overflow in rank order. |
+| Cheapest Cost | Wrong carrier flips baseline | Was comparing against `final_filtered_data` (includes constrained) instead of unconstrained data. | Use `unconstrained_data` as baseline when constraints are active. |
+
 ## Dev Docs Index
 
 Detailed per-module documentation is in `docs/dev/`:

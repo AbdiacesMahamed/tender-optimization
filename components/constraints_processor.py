@@ -235,8 +235,10 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
         constrained_data: DataFrame with containers locked by constraints
         unconstrained_data: DataFrame with remaining containers for scenarios
         constraint_summary: List of applied constraints with details
-        max_constrained_carriers: Set of carriers that have Maximum Container Count constraints
-                                   (these carriers should NOT receive additional volume in optimization)
+        max_constrained_carriers: List of dicts, each with 'carrier' and scope filters
+                                   (category, lane, port, week). None scope values mean global.
+                                   These carriers should NOT receive additional volume in optimization
+                                   for groups matching their constraint scope.
         carrier_facility_exclusions: Dict mapping carrier -> set of excluded facility codes
                                       (carriers cannot receive containers at these facilities)
     
@@ -292,7 +294,7 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     """
     
     if constraints_df is None or len(constraints_df) == 0:
-        return pd.DataFrame(), data.copy(), [], set(), {}, []
+        return pd.DataFrame(), data.copy(), [], [], {}, []
     
     constrained_records = []
     remaining_data = data.copy().reset_index(drop=True)
@@ -310,8 +312,10 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     allocated_containers_tracker = {}
     
     # Track carriers with MAXIMUM constraints (hard caps)
-    # These carriers should NOT receive additional volume in optimization scenarios
-    max_constrained_carriers = set()
+    # Each entry is a dict with the carrier name and the constraint's scope filters.
+    # None values mean "no filter on this dimension" (applies globally for that dimension).
+    # Example: {'carrier': 'HDDR', 'category': 'Import', 'lane': 'USNYCREWR', 'port': None, 'week': None}
+    max_constrained_carriers = []
     
     # ========== PRE-COLLECT ALL CARRIER+FACILITY EXCLUSIONS ==========
     # This ensures exclusions from ALL constraint rows are applied, even exclusion-only rows
@@ -648,7 +652,14 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             is_maximum_constraint = True  # This is a hard cap - carrier should not get more
             
             # Track this carrier as having a maximum constraint (hard cap)
-            max_constrained_carriers.add(target_carrier)
+            # Store scope filters so the optimizer only excludes in matching groups
+            max_constrained_carriers.append({
+                'carrier': target_carrier,
+                'category': constraint.get('Category') if is_valid_value(constraint.get('Category')) else None,
+                'lane': constraint.get('Lane') if is_valid_value(constraint.get('Lane')) else None,
+                'port': constraint.get('Port') if is_valid_value(constraint.get('Port')) else None,
+                'week': constraint.get('Week Number') if is_valid_value(constraint.get('Week Number')) else None,
+            })
             
             # CRITICAL: For maximum constraints, we need to remove ALL containers for this carrier
             # that match the filter criteria from the unconstrained pool
@@ -860,8 +871,13 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     
     # Log carriers with maximum constraints (hard caps)
     if max_constrained_carriers:
-        log_explanation(f"Carriers with Maximum Constraints (Hard Caps): {', '.join(sorted(max_constrained_carriers))}", 'info')
-        log_explanation(f"These carriers will NOT receive additional volume in optimization scenarios.", 'info')
+        carrier_names = sorted({mc['carrier'] for mc in max_constrained_carriers})
+        log_explanation(f"Carriers with Maximum Constraints (Hard Caps): {', '.join(carrier_names)}", 'info')
+        log_explanation(f"These carriers will NOT receive additional volume in matching optimization groups.", 'info')
+        for mc in max_constrained_carriers:
+            scope_parts = [f"{k}={v}" for k, v in mc.items() if k != 'carrier' and v is not None]
+            scope_desc = ', '.join(scope_parts) if scope_parts else 'Global'
+            log_explanation(f"  {mc['carrier']}: scope = {scope_desc}", 'info')
     
     # Log carrier+facility exclusions summary
     if carrier_facility_exclusions:

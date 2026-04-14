@@ -37,7 +37,7 @@ def cascading_allocate_with_constraints(
     lane_column: str = "Lane",
     week_column: str = "Week Number",
     category_column: str = "Category",
-    excluded_carriers: set = None,
+    excluded_carriers: list = None,
     historical_data: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
@@ -72,9 +72,11 @@ def cascading_allocate_with_constraints(
         Column with week numbers
     category_column : str
         Column identifying categories
-    excluded_carriers : set, optional
-        Set of carrier names to EXCLUDE from receiving any volume allocation.
-        These carriers have maximum constraints and should not get additional volume.
+    excluded_carriers : list, optional
+        List of dicts with 'carrier' and scope filters (category, lane, port, week).
+        None scope values mean the constraint applies globally for that dimension.
+        In each optimization group, only carriers whose constraint scope matches
+        the group's category/lane/week are excluded from receiving volume.
     historical_data : pd.DataFrame, optional
         Unfiltered data to use for calculating historical volume shares.
         If not provided, uses the main data parameter.
@@ -97,49 +99,28 @@ def cascading_allocate_with_constraints(
     # Use historical_data for volume share calculation if provided, otherwise use data
     hist_data_source = historical_data if historical_data is not None else data
     
-    # Default to empty set if not provided
+    # Default to empty list if not provided
     if excluded_carriers is None:
-        excluded_carriers = set()
+        excluded_carriers = []
     
-    # Separate excluded carrier data from allocatable data
-    excluded_data = pd.DataFrame()
-    if excluded_carriers:
-        original_count = len(data)
-        # Check both carrier column variations
-        carrier_cols_to_check = [carrier_column]
-        if 'Carrier' in data.columns and carrier_column != 'Carrier':
-            carrier_cols_to_check.append('Carrier')
-        
-        # Create mask for EXCLUDED carriers (these will be reallocated)
-        excluded_mask = pd.Series([False] * len(data), index=data.index)
-        for col in carrier_cols_to_check:
-            if col in data.columns:
-                excluded_mask |= data[col].isin(excluded_carriers)
-        
-        # Separate the data
-        excluded_data = data[excluded_mask].copy()
-        data = data[~excluded_mask].copy()
-        filtered_count = len(data)
-        
-        if len(excluded_data) > 0:
-            excluded_containers = excluded_data[container_column].sum()
-            valid_excluded = [c for c in excluded_carriers if pd.notna(c)]
-            logger.debug(f"🔒 Found {len(excluded_data)} rows ({excluded_containers:.0f} containers) from {len(excluded_carriers)} carriers with maximum constraints: {', '.join(sorted(valid_excluded))}")
-            logger.debug(f"   These containers will be reallocated to available carriers or marked as unallocatable.")
+    # ── IMPORTANT: Do NOT separate excluded carriers from data upfront. ──
+    # Max-constrained carriers are already capped in the constrained table.
+    # The unconstrained data we receive IS the pool available for optimization.
+    # If we remove excluded carriers and ALL carriers are excluded, the data
+    # becomes empty and nothing gets optimized.
+    #
+    # Instead, keep all carriers in the data for LP ranking and groupby,
+    # and let _cascading_allocate_single_group prefer non-excluded carriers
+    # when allocating volume.
     
-    # Determine grouping columns - must match data_processor.py grouping
-    # to prevent mixing containers from different groups
+    # Grouping for optimization: pool all containers going to the same
+    # lane in the same week so the optimizer can pick the best carrier.
+    # SSL, Vessel, Facility and Terminal are arrival-specific attributes
+    # that should NOT constrain which dray carrier picks up the container.
+    # This matches the LP optimization grouping in linear_programming.py.
     group_columns = [lane_column]
     if category_column in data.columns:
         group_columns.insert(0, category_column)
-    if 'SSL' in data.columns:
-        group_columns.insert(1, 'SSL')
-    if 'Vessel' in data.columns:
-        group_columns.insert(2, 'Vessel')
-    if 'Facility' in data.columns:
-        group_columns.append('Facility')
-    if 'Terminal' in data.columns:
-        group_columns.append('Terminal')
     if week_column in data.columns and week_column not in group_columns:
         group_columns.append(week_column)
     
@@ -159,7 +140,8 @@ def cascading_allocate_with_constraints(
         logger.debug(f"Warning: Could not calculate historical volume: {e}")
         historical_share = pd.DataFrame()
     
-    # Run LP optimization to get carrier rankings
+    # Run LP optimization to get carrier rankings on ALL data (including excluded carriers)
+    # This allows proper ranking even when all carriers are max-constrained
     try:
         lp_results = optimize_carrier_allocation(
             data,
@@ -175,18 +157,13 @@ def cascading_allocate_with_constraints(
     
     # Process each group independently
     result_rows = []
-    unallocatable_rows = []
     
     for group_key, group_data in data.groupby(group_columns, dropna=False):
-        # Check if there are excluded carrier containers for this group
-        excluded_group_data = pd.DataFrame()
-        if not excluded_data.empty:
-            # Filter excluded_data for this group
-            group_mask = pd.Series([True] * len(excluded_data), index=excluded_data.index)
-            for i, col in enumerate(group_columns):
-                if col in excluded_data.columns:
-                    group_mask &= (excluded_data[col] == group_key[i])
-            excluded_group_data = excluded_data[group_mask].copy()
+        # Determine which carriers are excluded for THIS group's scope
+        group_excluded = _get_excluded_carriers_for_group(
+            excluded_carriers, group_key, group_columns,
+            category_column, lane_column, week_column,
+        )
         
         allocated_group = _cascading_allocate_single_group(
             group_data=group_data,
@@ -199,8 +176,8 @@ def cascading_allocate_with_constraints(
             container_column=container_column,
             lane_column=lane_column,
             category_column=category_column,
-            excluded_carriers=excluded_carriers,
-            excluded_group_data=excluded_group_data,
+            excluded_carriers=group_excluded,
+            excluded_group_data=pd.DataFrame(),  # No longer separating excluded data
         )
         
         if allocated_group is not None and not allocated_group.empty:
@@ -212,6 +189,73 @@ def cascading_allocate_with_constraints(
     result = pd.concat(result_rows, ignore_index=True)
     
     return result
+
+
+def _get_excluded_carriers_for_group(
+    max_constrained_carriers: list,
+    group_key: Tuple,
+    group_columns: List[str],
+    category_column: str,
+    lane_column: str,
+    week_column: str,
+) -> Set[str]:
+    """
+    Determine which carriers are excluded for a specific optimization group.
+    
+    A max-constraint entry matches a group when every non-None scope filter
+    in the entry equals the corresponding group dimension. If a scope filter
+    is None, it matches any value (wildcard).
+    
+    Returns a set of carrier names excluded for this group.
+    """
+    if not max_constrained_carriers:
+        return set()
+    
+    # Build a dict of group dimension values for easy lookup
+    if not isinstance(group_key, tuple):
+        group_key = (group_key,)
+    group_vals = dict(zip(group_columns, group_key))
+    
+    excluded = set()
+    for mc in max_constrained_carriers:
+        carrier = mc.get('carrier')
+        if not carrier:
+            continue
+        
+        # Check each scope dimension: if the constraint specifies it (non-None),
+        # the group must match. If the constraint leaves it None, it's a wildcard.
+        matches = True
+        
+        # Category
+        mc_category = mc.get('category')
+        if mc_category is not None:
+            group_category = group_vals.get(category_column)
+            if group_category is not None and str(mc_category) != str(group_category):
+                matches = False
+        
+        # Lane
+        mc_lane = mc.get('lane')
+        if mc_lane is not None and matches:
+            group_lane = group_vals.get(lane_column)
+            if group_lane is not None and str(mc_lane) != str(group_lane):
+                matches = False
+        
+        # Week
+        mc_week = mc.get('week')
+        if mc_week is not None and matches:
+            group_week = group_vals.get(week_column)
+            if group_week is not None:
+                try:
+                    if float(mc_week) != float(group_week):
+                        matches = False
+                except (ValueError, TypeError):
+                    if str(mc_week) != str(group_week):
+                        matches = False
+        
+        if matches:
+            excluded.add(carrier)
+    
+    return excluded
 
 
 def _cascading_allocate_single_group(
@@ -232,51 +276,24 @@ def _cascading_allocate_single_group(
     Allocate containers for a single group using cascading logic.
     
     Internal function that handles allocation for one lane/week/category group.
-    Also handles reallocation of containers from excluded carriers.
+    excluded_carriers is kept for API compatibility but no longer hard-excludes;
+    max constraints are already enforced in the constrained table.
     """
     if group_data.empty:
         return None
     
-    # Calculate containers from allocatable carriers
+    # Calculate total containers in this group
     total_containers = group_data[container_column].sum()
     
-    # Add excluded carrier containers (these need to be reallocated)
-    excluded_containers = 0
-    excluded_container_numbers = []
-    if not excluded_group_data.empty:
-        excluded_containers = excluded_group_data[container_column].sum()
-        # Collect container numbers from excluded carriers
-        container_numbers_column = "Container Numbers"
-        if container_numbers_column in excluded_group_data.columns:
-            excluded_container_numbers = [
-                c.strip()
-                for s in excluded_group_data[container_numbers_column].dropna()
-                for c in str(s).split(',')
-                if c.strip()
-            ]
-    
-    # Total containers to allocate = allocatable + excluded (to be reallocated)
-    total_containers_to_allocate = total_containers + excluded_containers
+    total_containers_to_allocate = total_containers
     
     if total_containers_to_allocate == 0:
         return None
     
-    # Get carriers in this group (ONLY allocatable carriers)
+    # Get ALL carriers in this group
     carriers = group_data[carrier_column].unique().tolist()
     
     if len(carriers) == 0:
-        # No available carriers - create unallocatable record
-        if excluded_containers > 0:
-            unallocatable_row = excluded_group_data.iloc[0].copy()
-            unallocatable_row[container_column] = excluded_containers
-            unallocatable_row['Container Numbers'] = ", ".join(excluded_container_numbers) if excluded_container_numbers else ""
-            unallocatable_row['Carrier_Rank'] = 999
-            unallocatable_row['Historical_Allocation_Pct'] = 0
-            unallocatable_row['New_Allocation_Pct'] = 0
-            unallocatable_row['Allocation_Notes'] = f"⚠️ UNALLOCATABLE: {excluded_containers:.0f} containers cannot be assigned (all carriers have maximum constraints)"
-            unallocatable_row['Volume_Change'] = "❌ Blocked"
-            unallocatable_row['Growth_Constrained'] = "Max Constraint"
-            return pd.DataFrame([unallocatable_row])
         return None
     
     # Collect all Container Numbers for this group if the column exists
@@ -290,9 +307,6 @@ def _cascading_allocate_single_group(
             if c.strip()
         ]
     
-    # Add excluded container numbers to the pool
-    all_container_numbers.extend(excluded_container_numbers)
-    
     # Deduplicate container IDs within this group for clean assignment
     # (upstream dedup already handled cross-carrier dedup per lane/week)
     all_container_numbers = list(dict.fromkeys(all_container_numbers))  # Preserve order while deduplicating
@@ -300,11 +314,24 @@ def _cascading_allocate_single_group(
     # Use the summed Container Count as source of truth (already deduped upstream)
     # Don't override with len(all_container_numbers) as container IDs may not perfectly match counts
     
-    # Build carrier lookup
+    # Build carrier lookup — aggregate when a carrier appears in multiple rows
+    # (e.g. same carrier on different vessels within the same lane/week)
     carrier_data = {}
     for idx, row in group_data.iterrows():
         carrier = row[carrier_column]
-        carrier_data[carrier] = row.to_dict()
+        if carrier not in carrier_data:
+            carrier_data[carrier] = row.to_dict()
+        else:
+            # Sum container count across rows for same carrier
+            carrier_data[carrier][container_column] += row[container_column]
+            # Concatenate container numbers
+            if container_numbers_column in row.index and pd.notna(row.get(container_numbers_column)):
+                existing = carrier_data[carrier].get(container_numbers_column, '') or ''
+                new_nums = str(row[container_numbers_column]).strip()
+                if existing and new_nums:
+                    carrier_data[carrier][container_numbers_column] = existing + ', ' + new_nums
+                elif new_nums:
+                    carrier_data[carrier][container_numbers_column] = new_nums
     
     # Get LP-based ranking for carriers in this group
     carrier_ranks = _rank_carriers_from_lp(
@@ -460,11 +487,14 @@ def _rank_carriers_from_lp(
         valid_carriers = [c for c in carriers if pd.notna(c)]
         return {carrier: idx + 1 for idx, carrier in enumerate(sorted(valid_carriers))}
     
-    # Filter LP results to this group - use boolean indexing for efficiency
+    # Filter LP results to this group - only use LP's grouping columns (Lane, Week Number)
+    # The LP groups by Lane+Week only, so we can't filter by finer-grained columns
     lp_group = lp_results
-    for idx, col in enumerate(group_columns):
-        if col in lp_group.columns:
-            lp_group = lp_group[lp_group[col] == group_key[idx]]
+    lp_filter_cols = [lane_column, 'Week Number']
+    for col in lp_filter_cols:
+        if col in lp_group.columns and col in group_columns:
+            col_idx = group_columns.index(col)
+            lp_group = lp_group[lp_group[col] == group_key[col_idx]]
     
     if lp_group.empty:
         # No LP results for this group, rank alphabetically (filter out NaN values)
@@ -549,11 +579,18 @@ def _cascade_allocate_volume(
     """
     # Sort carriers by rank (best first), filter out NaN values
     valid_carriers = [c for c in carriers if pd.notna(c)]
-    sorted_carriers = sorted(valid_carriers, key=lambda c: carrier_ranks.get(c, 999))
+    # Separate excluded carriers — they keep containers in the pool but cannot receive allocation
+    allocatable_carriers = [c for c in valid_carriers if c not in excluded_carriers]
+    sorted_carriers = sorted(allocatable_carriers, key=lambda c: carrier_ranks.get(c, 999))
     
     allocations = {carrier: 0 for carrier in carriers}
     notes = {}
     remaining = total_containers
+    
+    # Mark excluded carriers in notes
+    for carrier in valid_carriers:
+        if carrier in excluded_carriers:
+            notes[carrier] = f"Rank #{carrier_ranks.get(carrier, 999)} | ⛔ Max constraint active — excluded from allocation in this group"
     
     # First pass: allocate up to historical + max_growth
     for carrier in sorted_carriers:
@@ -644,9 +681,9 @@ def _cascade_allocate_volume(
                         f"Allocated: {allocations[carrier]:.0f} containers (overflow from growth caps)"
                     )
     
-    # Third pass: if volume still remains, assign to rank 1 (best) carrier
+    # Third pass: if volume still remains, assign to rank 1 (best) allocatable carrier
     if remaining > 0.5 and sorted_carriers:  # Check for remaining (> 0.5 to handle rounding)
-        best_carrier = sorted_carriers[0]  # Rank 1 carrier
+        best_carrier = sorted_carriers[0]  # Rank 1 allocatable carrier
         allocations[best_carrier] += remaining
         
         # Determine if this is due to max constraints or normal cascading

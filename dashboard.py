@@ -99,7 +99,7 @@ def main():
         constrained_data = pd.DataFrame()
         unconstrained_data = final_filtered_data.copy()
         constraint_summary = []
-        max_constrained_carriers = set()  # Carriers with maximum constraints (hard caps)
+        max_constrained_carriers = []  # Carriers with maximum constraints (scoped)
         carrier_facility_exclusions = {}  # Carrier+facility exclusions
         
         explanation_logs = []  # For downloadable constraint explanations
@@ -130,8 +130,10 @@ def main():
         constrained_data, unconstrained_data, constraint_summary, peel_pile_carriers = apply_peel_pile_as_constraints(
             final_filtered_data, constrained_data, unconstrained_data, constraint_summary
         )
-        # Add peel pile carriers to the max_constrained set so optimization doesn't reassign them
-        max_constrained_carriers = max_constrained_carriers | peel_pile_carriers
+        # Add peel pile carriers to the max_constrained list so optimization doesn't reassign them
+        # Peel pile carriers are global (no scope filters)
+        for pp_carrier in peel_pile_carriers:
+            max_constrained_carriers.append({'carrier': pp_carrier})
     
     # ==================== DEDUPLICATE CONTAINERS ====================
     # A container can only belong to ONE carrier per lane/week (zero sum).

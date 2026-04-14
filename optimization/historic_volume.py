@@ -204,16 +204,12 @@ def calculate_carrier_volume_share(
         historical_data[container_column], errors="coerce"
     ).fillna(0)
     
-    # Determine grouping columns based on what's available
+    # Grouping for historical shares: carrier + category + lane only.
+    # SSL, Vessel, Terminal are arrival-specific and should NOT fragment
+    # the historical baseline — a carrier's share is per lane, not per vessel.
     group_columns = [carrier_column, lane_column]
     if category_column in historical_data.columns:
         group_columns.insert(1, category_column)
-    if 'SSL' in historical_data.columns:
-        group_columns.insert(2, 'SSL')
-    if 'Vessel' in historical_data.columns:
-        group_columns.insert(3, 'Vessel')
-    if 'Terminal' in historical_data.columns:
-        group_columns.append('Terminal')
     
     # Calculate carrier volume by lane (and category if present)
     carrier_volume = historical_data.groupby(group_columns).agg({
@@ -227,12 +223,6 @@ def calculate_carrier_volume_share(
     lane_group = [lane_column]
     if category_column in historical_data.columns:
         lane_group.insert(0, category_column)
-    if 'SSL' in historical_data.columns:
-        lane_group.insert(1, 'SSL')
-    if 'Vessel' in historical_data.columns:
-        lane_group.insert(2, 'Vessel')
-    if 'Terminal' in historical_data.columns:
-        lane_group.append('Terminal')
     
     lane_totals = historical_data.groupby(lane_group)[container_column].sum().reset_index()
     lane_totals.columns = [*lane_group, 'Lane_Total_Containers']

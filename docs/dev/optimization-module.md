@@ -50,8 +50,16 @@ Flow per group:
 1. Rank carriers using LP objective scores
 2. Look up each carrier's historical volume share (last N weeks)
 3. Allocate volume top-down, capping each carrier at `historical_share + max_growth_pct`
-4. Overflow goes to next-ranked carrier
+4. Overflow goes to next-ranked carrier (second pass allows all carriers, not just new ones)
 5. Final rounding uses largest-remainder method to preserve total container count
+
+**Critical: Grouping column mismatch between LP and cascading**
+
+The LP groups by `['Lane', 'Week Number']` only (defined in `performance_logic.DEFAULT_GROUP_COLUMNS`). The cascading logic groups by a finer-grained set: `['Category', 'SSL', 'Vessel', 'Lane', 'Facility', 'Terminal', 'Week Number']`.
+
+When `_rank_carriers_from_lp` looks up LP results for a cascading group, it must filter LP results by ONLY the LP's grouping columns (`Lane`, `Week Number`) — NOT by the cascading's extra columns. If you filter by all cascading columns, the LP results won't match (LP doesn't have separate rows per Facility/Vessel/etc.) and every carrier gets fallback rank 999, meaning no optimization happens.
+
+This was a real bug that caused the Optimized scenario to produce "No alternative carriers available" for every group.
 
 ### optimization/historic_volume.py — Historical Volume Analysis
 Calculates carrier market share from historical data.
@@ -76,6 +84,16 @@ Streamlit display for historical volume analysis:
 | Cost Weight | `opt_cost_weight` | 70 | % weight for cost in LP objective |
 | Performance Weight | `opt_performance_weight` | 30 | % weight for performance in LP objective |
 | Max Growth | `opt_max_growth_pct` | 30 | Max % a carrier can grow beyond historical share |
+
+## Known Pitfalls
+
+1. **LP vs Cascading grouping mismatch**: LP groups by `['Lane', 'Week Number']`. Cascading groups by `['Category', 'SSL', 'Vessel', 'Lane', 'Facility', 'Terminal', 'Week Number']`. When looking up LP ranks for a cascading group, only filter by Lane + Week Number. Filtering by all cascading columns produces empty results → rank 999 → no optimization.
+
+2. **Missing rates treated as free**: Carriers with `Base Rate = 0` or `NaN` get a penalty rate (10x max known rate) in the LP solver. Rows with missing rates are excluded from optimization entirely and passed through unchanged.
+
+3. **Container count preservation**: Both LP and cascading use largest-remainder rounding. Never override `Container Count` from `Container Numbers` after allocation — the allocation count is the source of truth.
+
+4. **Overflow allocation**: The cascading second pass must allow ALL carriers (not just new ones) to take overflow volume. Otherwise, when all carriers have historical data and hit their growth caps, remaining volume has nowhere to go except the rank-1 carrier in the third pass.
 
 ## Logging
 All `print()` statements replaced with `logging.getLogger(__name__).debug()`. Clean console by default.

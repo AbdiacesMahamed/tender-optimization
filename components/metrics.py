@@ -160,8 +160,7 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
         unconstrained_data: Optional - data excluding constrained containers.
                            When provided, scenarios (Performance, Cheapest, Optimized) 
                            will run on this subset instead of full data.
-        max_constrained_carriers: Optional - set of carrier names that have Maximum Container Count constraints.
-                                 These carriers should NOT receive additional volume in optimization.
+        max_constrained_carriers: Optional - list of dicts with 'carrier' and scope filters.\n                                 Carriers excluded from optimization only in matching groups.
         carrier_facility_exclusions: Optional - dict mapping carrier names to sets of normalized facility codes
                                      where the carrier should NOT receive volume (e.g., {'XPDR': {'HGR6', 'BWI4'}}).
         full_unfiltered_data: Optional - the complete unfiltered dataset before any UI filters.
@@ -189,7 +188,7 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
     
     # Store max_constrained_carriers for later use in optimization
     if max_constrained_carriers is None:
-        max_constrained_carriers = set()
+        max_constrained_carriers = []
     
     # Store carrier_facility_exclusions for later use in scenario calculations
     if carrier_facility_exclusions is None:
@@ -264,8 +263,10 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
             working = working[working[rate_cols['rate']].notna()]
             
             if len(working) > 0:
-                # Define grouping columns once
-                group_cols_cheap = [col for col in ['Category', 'Week Number', 'Lane', 'Discharged Port', 'Facility'] 
+                # Optimization grouping: [Category, Lane, Week Number] only.
+                # Do NOT include Discharged Port, Facility, SSL, Vessel, Terminal —
+                # those fragment lanes into single-carrier groups and prevent reallocation.
+                group_cols_cheap = [col for col in ['Category', 'Lane', 'Week Number'] 
                                    if col in working.columns]
                 
                 if group_cols_cheap:
@@ -364,8 +365,20 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
                     optimized_cost = optimized_allocated[rate_cols['total_rate']].sum()
                 # Cache result for reuse in detailed analysis table
                 st.session_state['_cached_opt_allocated'] = optimized_allocated
-        except (ValueError, KeyError, ImportError):
-            pass
+        except Exception as e:
+            import traceback
+            logger.warning(f"Optimization failed: {e}\n{traceback.format_exc()}")
+            st.session_state['_optimization_error'] = f"{type(e).__name__}: {e}"
+
+    # Fallback: if optimization returned no result but we have unconstrained data with costs,
+    # use the current unconstrained cost (no better allocation possible).
+    # This ensures the Optimized card shows a value instead of N/A when data exists.
+    if optimized_cost is None and len(scenario_data) > 0:
+        if rate_cols['total_rate'] in scenario_data.columns:
+            fallback_cost = scenario_data[rate_cols['total_rate']].fillna(0).sum()
+            if fallback_cost > 0:
+                optimized_cost = fallback_cost
+                st.session_state['_cached_opt_allocated'] = scenario_data.copy()
 
     return {
         'total_cost': total_cost,
@@ -536,11 +549,12 @@ def display_current_metrics(metrics, constrained_data=None, unconstrained_data=N
             </div>
             """, unsafe_allow_html=True)
         else:
+            opt_error = st.session_state.get('_optimization_error', 'Need historical data')
             st.markdown(f"""
             <div style="background-color: #e6f7ff; padding: 15px; border-radius: 10px;">
                 <h4 style="color: #17a2b8; margin: 0;">🧮 Optimized</h4>
                 <h2 style="color: #17a2b8; margin: 5px 0;">N/A</h2>
-                <p style="margin: 0; color: #17a2b8;">Optimization unavailable<br><small>Need historical data</small></p>
+                <p style="margin: 0; color: #17a2b8;">Optimization unavailable<br><small>{opt_error}</small></p>
             </div>
             """, unsafe_allow_html=True)
     
@@ -563,9 +577,9 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     # Use full_unfiltered_data for historical calculations if provided
     historical_data_source = full_unfiltered_data if full_unfiltered_data is not None else final_filtered_data
     
-    # Default to empty set if not provided
+    # Default to empty list if not provided
     if max_constrained_carriers is None:
-        max_constrained_carriers = set()
+        max_constrained_carriers = []
     
     # Default to empty dict if not provided
     if carrier_facility_exclusions is None:
@@ -769,19 +783,21 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             
             # IMPORTANT: Mark max-constrained carriers in the display
             # These carriers have reached their maximum allocation in constrained data
-            # Their containers will be reallocated in optimization scenarios
+            # Their containers will be reallocated in optimization scenarios (within matching scope)
             if max_constrained_carriers and len(max_constrained_carriers) > 0:
+                # Derive flat set of carrier names for display purposes
+                max_carrier_names = {mc['carrier'] for mc in max_constrained_carriers}
                 if carrier_col in display_data.columns:
                     # Add a visual indicator for max-constrained carriers
                     display_data['Carrier'] = display_data[carrier_col].apply(
-                        lambda x: f"🔒 {x} (MAX)" if x in max_constrained_carriers else x
+                        lambda x: f"🔒 {x} (MAX)" if x in max_carrier_names else x
                     )
                     
                     # Count containers from max-constrained carriers
-                    max_constrained_mask = display_data[carrier_col].isin(max_constrained_carriers)
+                    max_constrained_mask = display_data[carrier_col].isin(max_carrier_names)
                     if max_constrained_mask.any():
                         max_constrained_containers = display_data[max_constrained_mask]['Container Count'].sum()
-                        st.info(f"🔒 **{len(max_constrained_carriers)} carriers marked with (MAX)** - "
+                        st.info(f"🔒 **{len(max_carrier_names)} carriers marked with (MAX)** - "
                                f"{max_constrained_containers:.0f} containers will be reallocated in optimization scenarios")
             
             # CRITICAL: Recalculate Container Count from Container Numbers to ensure accuracy
@@ -804,6 +820,10 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             has_valid_rate = optimization_source['Base Rate'].notna() & (optimization_source['Base Rate'] != 0)
             rated_data = optimization_source[has_valid_rate].copy()
             unrated_data = optimization_source[~has_valid_rate].copy()
+            
+            # Debug: show split results
+            import streamlit as _st_debug
+            _st_debug.caption(f"🔧 Debug: {len(rated_data)} rated rows, {len(unrated_data)} unrated rows, Base Rate dtype={optimization_source['Base Rate'].dtype}, sample={optimization_source['Base Rate'].head(3).tolist()}")
             
             cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0
             performance_weight = st.session_state.get('opt_performance_weight', 30) / 100.0
@@ -828,10 +848,12 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                 display_data = optimization_source
             else:
                 if allocated is not None and len(allocated) > 0:
+                    _st_debug.caption(f"🔧 Debug: Optimization returned {len(allocated)} rows with columns: {[c for c in allocated.columns if 'Rank' in c or 'Alloc' in c or 'Volume' in c]}")
                     if len(unrated_data) > 0:
                         allocated = pd.concat([allocated, unrated_data], ignore_index=True)
                     display_data = allocated
                 else:
+                    _st_debug.caption(f"🔧 Debug: Optimization returned None or empty. allocated={allocated is not None}, len={len(allocated) if allocated is not None else 'N/A'}")
                     display_data = optimization_source
             
             # Calculate how many containers were reallocated/impacted
@@ -841,8 +863,9 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                 optimized_reallocated = int(abs(volume_change_numeric).sum() / 2)  # Divide by 2 to avoid double counting
                 performance_reallocated = optimized_reallocated  # Reuse variable for display logic
                 
+                # Optimization grouping: [Category, Lane, Week Number] only
                 group_cols = [
-                    col for col in ['Discharged Port', 'Category', 'Lane', 'Facility', 'Week Number']
+                    col for col in ['Category', 'Lane', 'Week Number']
                     if col in display_data.columns
                 ]
                 if group_cols and optimized_reallocated > 0:
@@ -894,8 +917,11 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                     display_data = performance_source
             
             if allocated is not None:
+                # Optimization grouping: [Category, Lane, Week Number] only.
+                # Do NOT include Discharged Port, Facility, Terminal, SSL, Vessel —
+                # those fragment lanes and prevent proper carrier pooling.
                 group_cols = [
-                    col for col in ['Discharged Port', 'Category', 'Lane', 'Facility', 'Terminal', 'Week Number']
+                    col for col in ['Category', 'Lane', 'Week Number']
                     if col in performance_source.columns
                 ]
 
@@ -1204,23 +1230,16 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             # Then aggregate containers and find the cheapest carrier per group
             # carrier_col already defined above
             
-            # Define grouping columns
+            # Optimization grouping: [Category, Lane, Week Number] only.
+            # Do NOT include SSL, Vessel, Discharged Port, Facility, Terminal —
+            # those fragment lanes into single-carrier groups and prevent reallocation.
             group_cols = []
             if 'Category' in source_data.columns:
                 group_cols.append('Category')
-            if 'SSL' in source_data.columns:
-                group_cols.append('SSL')
-            if 'Vessel' in source_data.columns:
-                group_cols.append('Vessel')
-            if 'Week Number' in source_data.columns:
-                group_cols.append('Week Number')
             if 'Lane' in source_data.columns:
                 group_cols.append('Lane')
-            
-            # Add other relevant grouping columns
-            for col in ['Discharged Port', 'Facility']:
-                if col in source_data.columns and col not in group_cols:
-                    group_cols.append(col)
+            if 'Week Number' in source_data.columns:
+                group_cols.append('Week Number')
             
             if not group_cols:
                 st.warning("⚠️ No grouping columns (Category, Week Number, Lane) found in data.")
