@@ -142,13 +142,7 @@ def perform_lane_analysis(Ratedata):
     # Show lanes with multiple rates
     duplicate_lanes = lane_analysis[lane_analysis['Rate_Count'] > 1]
     if len(duplicate_lanes) > 0:
-        logger.debug("Lanes with multiple rates:")
-        try:
-            logger.debug(duplicate_lanes.to_string())
-        except Exception:
-            logger.debug(duplicate_lanes)
-    else:
-        logger.debug("No duplicate lanes found")
+        logger.info(f"Found {len(duplicate_lanes)} lanes with multiple rates")
 
 @st.cache_data(show_spinner=False)
 def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
@@ -211,50 +205,6 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
                 )
 
     if container_col:
-        # DEBUG: Count containers BEFORE any processing - FOCUS ON WEEK 47
-        debug_all_containers_before = []
-        debug_wk47_containers_before = []
-        debug_container_counts_by_group = {}
-        debug_wk47_groups = {}
-        
-        for _, row in GVTdata.iterrows():
-            container_str = row.get(container_col, '')
-            week_num = row.get('Week Number', None)
-            
-            if pd.notna(container_str) and str(container_str).strip():
-                # Build group key
-                group_key_parts = [str(row.get(col, '')) for col in group_cols]
-                group_key = '|'.join(group_key_parts)
-                
-                # Parse containers
-                containers_in_row = [c.strip() for c in str(container_str).split(',') if c.strip() and c.strip().lower() != 'nan']
-                debug_all_containers_before.extend(containers_in_row)
-                
-                if group_key not in debug_container_counts_by_group:
-                    debug_container_counts_by_group[group_key] = []
-                debug_container_counts_by_group[group_key].extend(containers_in_row)
-                
-                # Track Week 47 specifically
-                if week_num == 47:
-                    debug_wk47_containers_before.extend(containers_in_row)
-                    if group_key not in debug_wk47_groups:
-                        debug_wk47_groups[group_key] = []
-                    debug_wk47_groups[group_key].extend(containers_in_row)
-        
-        logger.debug(f"\n{'='*80}")
-        logger.debug(f"🔍 DEBUG - WEEK 47 ANALYSIS - BEFORE GROUPING")
-        logger.debug(f"{'='*80}")
-        logger.debug(f"  📦 WEEK 47 Container entries in raw data: {len(debug_wk47_containers_before)}")
-        logger.debug(f"  📦 WEEK 47 Unique containers: {len(set(debug_wk47_containers_before))}")
-        logger.debug(f"  📦 WEEK 47 Number of groups: {len(debug_wk47_groups)}")
-        logger.debug(f"\n  First 10 WK47 containers: {debug_wk47_containers_before[:10]}")
-        logger.debug(f"  Last 10 WK47 containers: {debug_wk47_containers_before[-10:]}")
-        
-        logger.debug(f"\n  ALL DATA:")
-        logger.debug(f"  Total container entries in raw data: {len(debug_all_containers_before)}")
-        logger.debug(f"  Unique containers in raw data: {len(set(debug_all_containers_before))}")
-        logger.debug(f"  Number of groups: {len(debug_container_counts_by_group)}")
-        
         # Combine containers - keep all instances but remove duplicates WITHIN each group
         # This allows same container in different weeks, but not duplicated within same week/group
         def combine_containers_unique_per_group(x):
@@ -299,94 +249,6 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
         
         lane_count['Container Count'] = lane_count['Container Numbers'].apply(count_containers_from_string)
         
-        # DEBUG: Count containers AFTER grouping and aggregation - FOCUS ON WEEK 47
-        debug_all_containers_after = []
-        debug_wk47_containers_after = []
-        debug_duplicates_removed_per_group = []
-        debug_wk47_duplicates_removed = []
-        
-        for _, row in lane_count.iterrows():
-            container_str = row.get('Container Numbers', '')
-            week_num = row.get('Week Number', None)
-            
-            if pd.notna(container_str) and str(container_str).strip():
-                containers_in_row = [c.strip() for c in str(container_str).split(',') if c.strip() and c.strip().lower() != 'nan']
-                debug_all_containers_after.extend(containers_in_row)
-                
-                # Check how many were in this group before
-                group_key_parts = [str(row.get(col, '')) for col in group_cols]
-                group_key = '|'.join(group_key_parts)
-                
-                if group_key in debug_container_counts_by_group:
-                    original_count = len(debug_container_counts_by_group[group_key])
-                    after_count = len(containers_in_row)
-                    if original_count != after_count:
-                        duplicates_removed = original_count - after_count
-                        dup_info = {
-                            'group': group_key,
-                            'original': original_count,
-                            'after': after_count,
-                            'removed': duplicates_removed
-                        }
-                        debug_duplicates_removed_per_group.append(dup_info)
-                        if week_num == 47:
-                            debug_wk47_duplicates_removed.append(dup_info)
-                
-                # Track Week 47 specifically
-                if week_num == 47:
-                    debug_wk47_containers_after.extend(containers_in_row)
-        
-        logger.debug(f"\n{'='*80}")
-        logger.debug(f"🔍 DEBUG - WEEK 47 ANALYSIS - AFTER GROUPING")
-        logger.debug(f"{'='*80}")
-        logger.debug(f"  📦 WEEK 47 Containers after aggregation: {len(debug_wk47_containers_after)}")
-        logger.debug(f"  📦 WEEK 47 Unique containers: {len(set(debug_wk47_containers_after))}")
-        
-        wk47_rows = lane_count[lane_count['Week Number'] == 47]
-        logger.debug(f"  📦 WEEK 47 Container Count (sum): {wk47_rows['Container Count'].sum()}")
-        logger.debug(f"  📦 WEEK 47 Number of rows after grouping: {len(wk47_rows)}")
-        
-        if debug_wk47_duplicates_removed:
-            logger.debug(f"\n  ⚠️ WEEK 47 Duplicates removed within groups:")
-            for dup_info in debug_wk47_duplicates_removed:
-                logger.debug(f"    Group: {dup_info['group'][:100]}")
-                logger.debug(f"      Before: {dup_info['original']}, After: {dup_info['after']}, Removed: {dup_info['removed']}")
-        
-        # Check for missing containers in Week 47
-        wk47_before_set = set(debug_wk47_containers_before)
-        wk47_after_set = set(debug_wk47_containers_after)
-        missing_wk47_containers = wk47_before_set - wk47_after_set
-        
-        if missing_wk47_containers:
-            logger.debug(f"\n  ❌ WEEK 47 MISSING CONTAINERS ({len(missing_wk47_containers)}):")
-            for container in sorted(missing_wk47_containers):
-                logger.debug(f"    - {container}")
-                # Find which group this container was in
-                for group_key, containers in debug_wk47_groups.items():
-                    if container in containers:
-                        logger.debug(f"      Was in group: {group_key[:100]}")
-        else:
-            logger.debug(f"\n  ✅ No Week 47 containers missing during aggregation")
-        
-        logger.debug(f"\n  ALL DATA:")
-        logger.debug(f"  Total containers after aggregation: {len(debug_all_containers_after)}")
-        logger.debug(f"  Unique containers after aggregation: {len(set(debug_all_containers_after))}")
-        logger.debug(f"  Total Container Count (sum): {lane_count['Container Count'].sum()}")
-        
-        # Check for missing containers overall
-        containers_before_set = set(debug_all_containers_before)
-        containers_after_set = set(debug_all_containers_after)
-        missing_containers = containers_before_set - containers_after_set
-        
-        if missing_containers:
-            logger.debug(f"\n  ❌ ALL DATA MISSING CONTAINERS ({len(missing_containers)}):")
-            for container in sorted(missing_containers):
-                logger.debug(f"    - {container}")
-        else:
-            logger.debug(f"\n  ✅ No containers missing during aggregation")
-        
-        logger.debug(f"{'='*80}\n")
-        
     else:
         # Fallback if no Container column
         # Use dropna=False to include rows with blank Terminal or other NaN values
@@ -405,36 +267,7 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
 
     # Merge with performance data (only if available)
     if has_performance and len(performance_clean) > 0:
-        # DEBUG: Print carrier names from both datasets to identify mismatches
-        gvt_carriers = set(merged_data['Dray SCAC(FL)'].dropna().unique())
-        perf_carriers = set(performance_clean['Carrier'].dropna().unique())
-        
-        logger.debug(f"\n=== PERFORMANCE DATA MERGE DEBUG ===")
-        logger.debug(f"GVT carriers count: {len(gvt_carriers)}")
-        logger.debug(f"Performance carriers count: {len(perf_carriers)}")
-        logger.debug(f"GVT carriers sample: {sorted(list(gvt_carriers))[:10]}")
-        logger.debug(f"Performance carriers sample: {sorted(list(perf_carriers))[:10]}")
-        
-        # Check for exact matches
-        matching_carriers = gvt_carriers.intersection(perf_carriers)
-        logger.debug(f"Matching carriers (exact): {len(matching_carriers)}")
-        
-        # Check for case-insensitive matches
-        gvt_carriers_lower = {c.strip().upper() for c in gvt_carriers if isinstance(c, str)}
-        perf_carriers_lower = {c.strip().upper() for c in perf_carriers if isinstance(c, str)}
-        matching_case_insensitive = gvt_carriers_lower.intersection(perf_carriers_lower)
-        logger.debug(f"Matching carriers (case-insensitive): {len(matching_case_insensitive)}")
-        
-        # Show non-matching carriers
-        gvt_only = gvt_carriers - perf_carriers
-        perf_only = perf_carriers - gvt_carriers
-        if gvt_only:
-            logger.debug(f"Carriers in GVT but NOT in Performance: {sorted(list(gvt_only))[:10]}")
-        if perf_only:
-            logger.debug(f"Carriers in Performance but NOT in GVT: {sorted(list(perf_only))[:10]}")
-        
         # Normalize carrier names before merge to handle case/whitespace differences
-        # Create normalized versions for matching
         merged_data['_carrier_normalized'] = merged_data['Dray SCAC(FL)'].astype(str).str.strip().str.upper()
         performance_clean = performance_clean.copy()  # Avoid modifying cached data
         performance_clean['_carrier_normalized'] = performance_clean['Carrier'].astype(str).str.strip().str.upper()
@@ -442,21 +275,6 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
         # Ensure Week Number types match
         merged_data['Week Number'] = pd.to_numeric(merged_data['Week Number'], errors='coerce')
         performance_clean['Week Number'] = pd.to_numeric(performance_clean['Week Number'], errors='coerce')
-        
-        logger.debug(f"Week Number range in GVT: {merged_data['Week Number'].min()} - {merged_data['Week Number'].max()}")
-        logger.debug(f"Week Number range in Performance: {performance_clean['Week Number'].min()} - {performance_clean['Week Number'].max()}")
-        
-        # Check for week number overlap
-        gvt_weeks = set(merged_data['Week Number'].dropna().unique())
-        perf_weeks = set(performance_clean['Week Number'].dropna().unique())
-        overlapping_weeks = gvt_weeks.intersection(perf_weeks)
-        logger.debug(f"GVT weeks: {sorted(gvt_weeks)}")
-        logger.debug(f"Performance weeks: {sorted(perf_weeks)}")
-        logger.debug(f"Overlapping weeks: {sorted(overlapping_weeks)}")
-        
-        if not overlapping_weeks:
-            logger.debug("⚠️ WARNING: No overlapping weeks between GVT and Performance data!")
-            logger.debug("   This means no performance scores can be matched to any containers.")
         
         # Perform the merge using normalized carrier names
         merged_data = pd.merge(
@@ -472,15 +290,6 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
         
         # Ensure Performance_Score is numeric after merge
         merged_data['Performance_Score'] = pd.to_numeric(merged_data['Performance_Score'], errors='coerce')
-        
-        # DEBUG: Check merge results
-        non_null_scores = merged_data['Performance_Score'].notna().sum()
-        total_rows = len(merged_data)
-        logger.debug(f"After merge: {non_null_scores}/{total_rows} rows have performance scores ({non_null_scores/total_rows*100:.1f}%)")
-        if non_null_scores > 0:
-            logger.debug(f"Performance score range: {merged_data['Performance_Score'].min():.3f} - {merged_data['Performance_Score'].max():.3f}")
-            logger.debug(f"Unique performance scores: {merged_data['Performance_Score'].dropna().nunique()}")
-        logger.debug(f"=====================================\n")
         
     # NOW CALCULATE PROPER VOLUME-WEIGHTED PERFORMANCE SCORES
     merged_data = apply_volume_weighted_performance(merged_data)
@@ -523,48 +332,20 @@ def apply_volume_weighted_performance(merged_data):
     
     # Only process if we have performance data
     if 'Performance_Score' not in merged_data.columns:
-        logger.debug("⚠️ No Performance_Score column found in merged data - skipping performance calculations")
+        logger.info("No Performance_Score column found in merged data - skipping performance calculations")
         return merged_data
     
     # Count missing before processing
     missing_before = merged_data['Performance_Score'].isna().sum()
     total_records = len(merged_data)
     
-    # DEBUG: Show distribution of performance scores
-    print(f"\n=== APPLY VOLUME WEIGHTED PERFORMANCE DEBUG ===")
-    print(f"Total records: {total_records}")
-    print(f"Missing Performance_Score: {missing_before} ({missing_before/total_records*100:.1f}%)")
-    print(f"Non-missing Performance_Score: {total_records - missing_before}")
-    
     # Check if ALL performance scores are missing - this indicates a merge problem
     if missing_before == total_records:
-        logger.debug("❌ CRITICAL: ALL performance scores are NULL/NaN!")
-        logger.debug("   This indicates the performance data merge completely failed.")
-        logger.debug("   Likely causes:")
-        logger.debug("   1. Carrier names don't match between GVT and Performance data")
-        logger.debug("   2. Week numbers don't match between datasets")
-        logger.debug("   3. Performance data was not loaded correctly")
-        logger.debug("   Returning data without filling - check merge debug output above.")
-        logger.debug(f"=============================================\n")
+        logger.warning("All performance scores are NULL/NaN — performance data merge may have failed")
         return merged_data
     
-    if total_records - missing_before > 0:
-        non_null_scores = merged_data['Performance_Score'].dropna()
-        logger.debug(f"Score range: {non_null_scores.min():.3f} - {non_null_scores.max():.3f}")
-        logger.debug(f"Unique scores: {non_null_scores.nunique()}")
-        
-        # Show which carriers have data
-        carriers_with_scores = merged_data[merged_data['Performance_Score'].notna()]['Dray SCAC(FL)'].unique()
-        logger.debug(f"Carriers with performance data: {len(carriers_with_scores)}")
-        logger.debug(f"Carriers with data: {sorted(list(carriers_with_scores))[:10]}...")
-        
-        logger.debug(f"Score distribution:\n{non_null_scores.value_counts().head(10)}")
-    print(f"=============================================\n")
-    
-    # If no missing scores, nothing to do - keep existing performance data as-is
-    # Do NOT reset scores just because they're all the same value
+    # If no missing scores, nothing to do
     if missing_before == 0:
-        logger.debug("✓ All records have performance scores - no filling needed")
         return merged_data
     
     track_processing_step("Initial Assessment", f"Found {missing_before} missing performance scores")
@@ -640,13 +421,7 @@ def perform_lane_analysis(Ratedata):
     # Show lanes with multiple rates
     duplicate_lanes = lane_analysis[lane_analysis['Rate_Count'] > 1]
     if len(duplicate_lanes) > 0:
-        logger.debug("Lanes with multiple rates:")
-        try:
-            logger.debug(duplicate_lanes.to_string())
-        except Exception:
-            logger.debug(duplicate_lanes)
-    else:
-        logger.debug("No duplicate lanes found")
+        logger.info(f"Found {len(duplicate_lanes)} lanes with multiple rates")
 
 def create_comprehensive_data(merged_data):
     """Create comprehensive data table with additional calculated columns"""
@@ -683,7 +458,7 @@ def process_performance_data(Performancedata, has_performance):
                     continue
         
         if not week_columns:
-            logger.debug("Warning: No week columns (WK27, WK28, etc.) found in performance data.")
+            logger.info("No week columns (WK27, WK28, etc.) found in performance data.")
             return None, False
         
         # Create week mapping (WK27 -> 27, WK28 -> 28, etc.)
@@ -734,17 +509,17 @@ def process_performance_data(Performancedata, has_performance):
             missing_after = performance_filled['Performance_Score'].isna().sum()
             filled_count = missing_before - missing_after
             
-            logger.debug(f"Performance data processed: {len(performance_filled)} records from {len(week_columns)} weeks")
+            logger.info(f"Performance data processed: {len(performance_filled)} records from {len(week_columns)} weeks")
             if filled_count > 0:
-                logger.debug(f"Filled {filled_count} missing performance scores using volume-weighted averages")
+                logger.info(f"Filled {filled_count} missing performance scores using volume-weighted averages")
             
             return performance_filled, True
         else:
-            logger.debug("No valid performance data after processing")
+            logger.warning("No valid performance data after processing")
             return None, False
             
     except Exception as e:
-        logger.debug(f"Warning: Error processing performance data: {str(e)}. Continuing without performance metrics.")
+        logger.warning(f"Error processing performance data: {e}")
         return None, False
 
 def fill_missing_performance_scores(performance_data):

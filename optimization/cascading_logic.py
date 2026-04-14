@@ -24,6 +24,26 @@ from .historic_volume import calculate_carrier_volume_share
 
 DEFAULT_MAX_GROWTH_PCT = 0.30  # 30% maximum growth over historical allocation
 
+# ─────────────────────────────────────────────────────────────────────
+# CONSTRAINT SCOPE CONFIG
+# ─────────────────────────────────────────────────────────────────────
+# Maps each scope dimension to two things:
+#   constraint_key : the key name stored in the max-constrained dict
+#   group_column   : the column name used in optimization groups
+#
+# To add a new scope dimension (e.g. port), just add an entry here.
+# To remove one, delete or comment out the line.
+# The optimizer will automatically check all dimensions listed below.
+# ─────────────────────────────────────────────────────────────────────
+CONSTRAINT_SCOPE_DIMENSIONS = [
+    # ( constraint_key,  group_column   )
+    ("category",         "Category"     ),
+    ("lane",             "Lane"         ),
+    ("week",             "Week Number"  ),
+    # Uncomment to add port-level scoping:
+    # ("port",           "Discharged Port"),
+]
+
 
 def cascading_allocate_with_constraints(
     data: pd.DataFrame,
@@ -202,6 +222,7 @@ def _get_excluded_carriers_for_group(
     """
     Determine which carriers are excluded for a specific optimization group.
     
+    Uses CONSTRAINT_SCOPE_DIMENSIONS config to check each dimension.
     A max-constraint entry matches a group when every non-None scope filter
     in the entry equals the corresponding group dimension. If a scope filter
     is None, it matches any value (wildcard).
@@ -222,35 +243,24 @@ def _get_excluded_carriers_for_group(
         if not carrier:
             continue
         
-        # Check each scope dimension: if the constraint specifies it (non-None),
-        # the group must match. If the constraint leaves it None, it's a wildcard.
+        # Check every dimension defined in CONSTRAINT_SCOPE_DIMENSIONS
         matches = True
-        
-        # Category
-        mc_category = mc.get('category')
-        if mc_category is not None:
-            group_category = group_vals.get(category_column)
-            if group_category is not None and str(mc_category) != str(group_category):
-                matches = False
-        
-        # Lane
-        mc_lane = mc.get('lane')
-        if mc_lane is not None and matches:
-            group_lane = group_vals.get(lane_column)
-            if group_lane is not None and str(mc_lane) != str(group_lane):
-                matches = False
-        
-        # Week
-        mc_week = mc.get('week')
-        if mc_week is not None and matches:
-            group_week = group_vals.get(week_column)
-            if group_week is not None:
-                try:
-                    if float(mc_week) != float(group_week):
-                        matches = False
-                except (ValueError, TypeError):
-                    if str(mc_week) != str(group_week):
-                        matches = False
+        for constraint_key, group_col in CONSTRAINT_SCOPE_DIMENSIONS:
+            mc_val = mc.get(constraint_key)
+            if mc_val is None:
+                continue  # wildcard — skip this dimension
+            group_val = group_vals.get(group_col)
+            if group_val is None:
+                continue  # group doesn't have this dimension — skip
+            # Compare (numeric-safe for week numbers)
+            try:
+                if float(mc_val) != float(group_val):
+                    matches = False
+                    break
+            except (ValueError, TypeError):
+                if str(mc_val) != str(group_val):
+                    matches = False
+                    break
         
         if matches:
             excluded.add(carrier)

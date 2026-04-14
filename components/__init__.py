@@ -55,6 +55,16 @@ from .metrics import (
     apply_peel_pile_as_constraints
 )
 
+# Focused sub-modules (also importable directly)
+from .metrics_display import display_current_metrics          # noqa: F811
+from .peel_pile import show_peel_pile_analysis, apply_peel_pile_as_constraints  # noqa: F811
+from .scenario_strategies import (
+    apply_current_selection,
+    apply_optimized_strategy,
+    apply_performance_strategy,
+    apply_cheapest_strategy,
+)
+
 # Summary tables
 from .summary_tables import show_summary_tables
 

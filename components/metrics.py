@@ -1,6 +1,13 @@
 """
-Metrics and KPI calculation module for the Carrier Tender Optimization Dashboard
+Metrics and KPI calculation module for the Carrier Tender Optimization Dashboard.
+
+This is the orchestrator — calculation lives here, display and strategy logic
+are delegated to focused modules:
+  - metrics_display.py   → cost-card rendering
+  - scenario_strategies.py → Current / Optimized / Performance / Cheapest
+  - peel_pile.py          → peel pile analysis + constraints
 """
+import logging
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -13,41 +20,26 @@ from .utils import (
 from optimization.performance_logic import allocate_to_highest_performance
 from .container_tracer import add_detailed_carrier_flips_column, get_container_movement_summary
 
+# Re-export from new modules so existing imports keep working
+from .metrics_display import display_current_metrics          # noqa: F401
+from .peel_pile import (                                      # noqa: F401
+    show_peel_pile_analysis,
+    apply_peel_pile_as_constraints,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ==================== HELPER FUNCTIONS ====================
+
 def add_carrier_flips_column(current_data, original_data, carrier_col='Dray SCAC(FL)'):
     """
     Add 'Carrier Flips' column showing allocation changes per carrier in each group.
-    
-    For each group (Port+Category+Lane+Facility+Terminal+Week):
-    - Shows what THIS carrier had originally vs now
-    - We CANNOT trace which specific containers moved between which carriers
-    - We can only show before/after totals for THIS carrier
-    
-    Display formats:
-    - "✓ Had X, now Y (+Z)" - Carrier gained containers  
-    - "✓ Had X, now Y (-Z)" - Carrier lost containers
-    - "✓ Kept X" - No change
-    - "🔄 New: Y (was: [carriers])" - Carrier wasn't in group, now has containers
-    - "🆕 New group" - Group didn't exist originally
-    
-    Parameters:
-    -----------
-    current_data : pd.DataFrame
-        Current scenario data
-    original_data : pd.DataFrame  
-        Original "Current Selection" data
-    carrier_col : str
-        Column name for carrier identification
-        
-    Returns:
-    --------
-    pd.DataFrame
-        Data with added 'Carrier Flips' column
     """
     if original_data is None or original_data.empty:
         current_data['Carrier Flips'] = 'No baseline'
         return current_data
     
-    # Get grouping columns
     group_cols = get_grouping_columns(
         current_data, 
         base_cols=['Discharged Port', 'Lane', 'Facility', 'Week Number']
@@ -63,19 +55,16 @@ def add_carrier_flips_column(current_data, original_data, carrier_col='Dray SCAC
         key = tuple(row.get(col, '') for col in group_cols)
         carrier = row.get(carrier_col, 'Unknown')
         count = row.get('Container Count', 0)
-        
         if key not in original_state:
             original_state[key] = {}
         original_state[key][carrier] = original_state[key].get(carrier, 0) + count
     
-    # Process each current row
     flips = []
     for _, row in current_data.iterrows():
         key = tuple(row.get(col, '') for col in group_cols)
         curr_carrier = row.get(carrier_col, 'Unknown')
         curr_count = row.get('Container Count', 0)
         
-        # Check if this group existed originally
         if key not in original_state:
             flips.append("🆕 New group")
             continue
@@ -83,31 +72,23 @@ def add_carrier_flips_column(current_data, original_data, carrier_col='Dray SCAC
         orig_group = original_state[key]
         orig_own_count = orig_group.get(curr_carrier, 0)
         
-        # Case 1: Current carrier had ZERO in this group originally
         if orig_own_count == 0:
-            # This carrier is NEW to this group - show who had it before
             orig_carriers = [c for c, cnt in orig_group.items() if cnt > 0]
             if len(orig_carriers) == 0:
                 flips.append(f"🔄 New: {curr_count:.0f}")
             elif len(orig_carriers) == 1:
                 flips.append(f"🔄 New: {curr_count:.0f} (was {orig_carriers[0]})")
             elif len(orig_carriers) <= 3:
-                carriers_str = ', '.join(orig_carriers)
-                flips.append(f"🔄 New: {curr_count:.0f} (was {carriers_str})")
+                flips.append(f"🔄 New: {curr_count:.0f} (was {', '.join(orig_carriers)})")
             else:
                 flips.append(f"🔄 New: {curr_count:.0f} (was {len(orig_carriers)} carriers)")
-        
-        # Case 2: Current carrier had SOME in this group originally  
         else:
             diff = curr_count - orig_own_count
             if abs(diff) < 0.5:
-                # No change
                 flips.append(f"✓ Kept {orig_own_count:.0f}")
             elif diff > 0:
-                # Gained containers
                 flips.append(f"✓ Had {orig_own_count:.0f}, now {curr_count:.0f} (+{diff:.0f})")
             else:
-                # Lost containers
                 flips.append(f"✓ Had {orig_own_count:.0f}, now {curr_count:.0f} ({diff:.0f})")
     
     current_data['Carrier Flips'] = flips
@@ -115,7 +96,7 @@ def add_carrier_flips_column(current_data, original_data, carrier_col='Dray SCAC
 
 
 def add_missing_rate_rows(display_data, source_data, carrier_col='Dray SCAC(FL)'):
-    """Add back rows for missing rate data, preserving carrier information"""
+    """Add back rows for missing rate data, preserving carrier information."""
     if 'Missing_Rate' not in source_data.columns:
         return display_data
     
@@ -124,255 +105,69 @@ def add_missing_rate_rows(display_data, source_data, carrier_col='Dray SCAC(FL)'
         return display_data
     
     missing_rate_rows = missing_rate_rows.copy()
-    
-    # Keep carrier information - include carrier in grouping columns
     group_cols = get_grouping_columns(missing_rate_rows)
-    
-    # Add carrier to grouping to preserve carrier-level detail
     if carrier_col in missing_rate_rows.columns and carrier_col not in group_cols:
         group_cols.append(carrier_col)
     
-    # Optimize aggregation dictionary creation
-    numeric_cols = missing_rate_rows.select_dtypes(include=[np.number]).columns
     agg_dict = {col: 'first' for col in missing_rate_rows.columns if col not in group_cols}
-    
-    # Override specific columns with custom aggregation
     agg_dict['Container Count'] = 'sum'
     agg_dict['Container Numbers'] = lambda x: ', '.join(str(v) for v in x if pd.notna(v))
     
     missing_rate_rows = missing_rate_rows.groupby(group_cols, as_index=False).agg(agg_dict)
     
-    # Set rate-dependent columns to None/0 (but keep carrier as-is)
-    rate_cols = ['Base Rate', 'Total Rate', 'Performance_Score', 'CPC', 'Total CPC']
-    for col in rate_cols:
+    rate_cols_list = ['Base Rate', 'Total Rate', 'Performance_Score', 'CPC', 'Total CPC']
+    for col in rate_cols_list:
         if col in missing_rate_rows.columns:
             missing_rate_rows[col] = None if col in ['Base Rate', 'Performance_Score', 'CPC'] else 0
     
     return pd.concat([display_data, missing_rate_rows], ignore_index=True)
 
+
 # ==================== METRICS CALCULATION ====================
 
-def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_carriers=None, carrier_facility_exclusions=None, full_unfiltered_data=None):
-    """Calculate comprehensive metrics for the dashboard
-    
-    Args:
-        data: Full dataset (may include constrained + unconstrained data)
-        unconstrained_data: Optional - data excluding constrained containers.
-                           When provided, scenarios (Performance, Cheapest, Optimized) 
-                           will run on this subset instead of full data.
-        max_constrained_carriers: Optional - list of dicts with 'carrier' and scope filters.\n                                 Carriers excluded from optimization only in matching groups.
-        carrier_facility_exclusions: Optional - dict mapping carrier names to sets of normalized facility codes
-                                     where the carrier should NOT receive volume (e.g., {'XPDR': {'HGR6', 'BWI4'}}).
-        full_unfiltered_data: Optional - the complete unfiltered dataset before any UI filters.
-                              Used for calculating historical volume shares so they remain stable
-                              regardless of the current filter view.
-    """
+def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_carriers=None,
+                               carrier_facility_exclusions=None, full_unfiltered_data=None):
+    """Calculate comprehensive metrics for the dashboard."""
     if data is None or len(data) == 0:
         return None
     
-    # Store full_unfiltered_data for use in optimization
     historical_data_source = full_unfiltered_data if full_unfiltered_data is not None else data
-    
-    # Get rate columns based on selected rate type - cache this
     rate_cols = get_rate_columns()
-    
-    # Preserve a canonical total that INCLUDES rows with missing rates
     total_containers_all = data['Container Count'].sum()
-
-    # Use ALL data regardless of rate availability
     data_with_rates = data.copy()
-    
-    # For scenario calculations, use unconstrained_data if provided
-    # This ensures scenarios only manipulate unconstrained containers
     scenario_data = unconstrained_data.copy() if unconstrained_data is not None else data_with_rates.copy()
     
-    # Store max_constrained_carriers for later use in optimization
     if max_constrained_carriers is None:
         max_constrained_carriers = []
-    
-    # Store carrier_facility_exclusions for later use in scenario calculations
     if carrier_facility_exclusions is None:
         carrier_facility_exclusions = {}
 
-    # If there are no rows with rates, continue but note rate-based metrics will be zero/defaults
-    
-    # Basic metrics - use dynamic rate columns - vectorized operations
-    # For cost calculations, only sum rows that have valid rates (not NaN)
+    # Basic metrics
     if rate_cols['total_rate'] in data_with_rates.columns:
         total_cost = data_with_rates[rate_cols['total_rate']].fillna(0).sum()
     else:
         total_cost = 0
     total_containers_with_rates = data_with_rates['Container Count'].sum()
-
-    # Use vectorized operations for unique counts
     unique_carriers = data['Dray SCAC(FL)'].nunique() if 'Dray SCAC(FL)' in data.columns else 0
     unique_lanes = data['Lane'].nunique() if 'Lane' in data.columns else 0
     unique_ports = data['Discharged Port'].nunique() if 'Discharged Port' in data.columns else 0
     unique_facilities = data['Facility'].nunique() if 'Facility' in data.columns else 0
-
-    # Average rate should be based on rows that have rates
     avg_rate = total_cost / total_containers_with_rates if total_containers_with_rates > 0 else 0
-    
-    # Performance averages (for reference only)
     avg_performance = data_with_rates['Performance_Score'].mean() if 'Performance_Score' in data_with_rates.columns else None
 
-    # Calculate performance scenario cost using scenario_data (unconstrained only when constraints active)
-    # Apply carrier+facility exclusions to prevent excluded carriers from being selected at excluded facilities
-    performance_cost = None
-    if 'Performance_Score' in scenario_data.columns and len(scenario_data) > 0:
-        try:
-            carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
-            filtered_scenario_data = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
-            
-            # Split: only optimize rows with valid rates
-            has_valid_rate = filtered_scenario_data['Base Rate'].notna() & (filtered_scenario_data['Base Rate'] != 0)
-            rated_perf = filtered_scenario_data[has_valid_rate].copy()
-            unrated_perf = filtered_scenario_data[~has_valid_rate].copy()
-            
-            performance_allocated = allocate_to_highest_performance(
-                rated_perf,
-                carrier_column=carrier_col,
-                container_column='Container Count',
-                performance_column='Performance_Score',
-                container_numbers_column='Container Numbers',
-            )
-            # Recombine
-            if len(unrated_perf) > 0:
-                performance_allocated = pd.concat([performance_allocated, unrated_perf], ignore_index=True)
-            if rate_cols['total_rate'] in performance_allocated.columns:
-                performance_cost = performance_allocated[rate_cols['total_rate']].sum()
-            st.session_state['_cached_perf_allocated'] = performance_allocated
-        except (ValueError, KeyError):
-            pass
-    
-    # Calculate cheapest cost scenario using scenario_data - optimized with early numeric conversion
-    # Apply carrier+facility exclusions to prevent excluded carriers from being selected at excluded facilities
-    cheapest_cost = None
-    if len(scenario_data) > 0:
-        try:
-            carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
-            
-            # Filter out excluded carrier+facility combinations before allocation
-            working = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
-            
-            # Ensure numeric comparisons - do this once
-            working[rate_cols['rate']] = pd.to_numeric(working[rate_cols['rate']], errors='coerce')
-            working['Container Count'] = pd.to_numeric(working['Container Count'], errors='coerce').fillna(0)
-            
-            # Filter out rows with NaN/null rates
-            working = working[working[rate_cols['rate']].notna()]
-            
-            if len(working) > 0:
-                # Optimization grouping: [Category, Lane, Week Number] only.
-                # Do NOT include Discharged Port, Facility, SSL, Vessel, Terminal —
-                # those fragment lanes into single-carrier groups and prevent reallocation.
-                group_cols_cheap = [col for col in ['Category', 'Lane', 'Week Number'] 
-                                   if col in working.columns]
-                
-                if group_cols_cheap:
-                    # Sort by rate (cheapest first) - single sort operation
-                    working = working.sort_values(rate_cols['rate'], ascending=True)
-                    
-                    # Get cheapest carrier per group
-                    cheapest_per_group = working.groupby(group_cols_cheap, as_index=False).first()
-                    
-                    # If Container Numbers exists, concatenate them and recalculate Container Count
-                    if 'Container Numbers' in working.columns:
-                        # Concatenate all Container Numbers for each group with deduplication
-                        def concat_and_dedupe_containers(values):
-                            """Concatenate container numbers and remove duplicates."""
-                            all_containers = []
-                            for v in values:
-                                if pd.notna(v) and str(v).strip():
-                                    all_containers.extend([c.strip() for c in str(v).split(',') if c.strip()])
-                            # CRITICAL FIX: Deduplicate to prevent same container appearing multiple times
-                            unique_containers = list(dict.fromkeys(all_containers))
-                            return ', '.join(unique_containers)
-                        
-                        container_numbers_concat = (
-                            working.groupby(group_cols_cheap)['Container Numbers']
-                            .apply(concat_and_dedupe_containers)
-                            .reset_index(name='_container_numbers_all')
-                        )
-                        
-                        # Merge back to cheapest_per_group
-                        cheapest_per_group = cheapest_per_group.merge(container_numbers_concat, on=group_cols_cheap, how='left')
-                        
-                        # Recalculate Container Count from concatenated Container Numbers
-                        cheapest_per_group['Container Count'] = cheapest_per_group['_container_numbers_all'].apply(count_containers)
-                    else:
-                        # Fall back to summing Container Count if Container Numbers doesn't exist
-                        container_totals = working.groupby(group_cols_cheap)['Container Count'].sum()
-                        cheapest_per_group = cheapest_per_group.set_index(group_cols_cheap)
-                        cheapest_per_group['Container Count'] = container_totals
-                        cheapest_per_group = cheapest_per_group.reset_index()
-                    
-                    # Vectorized cost calculation using the corrected Container Count
-                    cheapest_per_group['Total Cost'] = (
-                        cheapest_per_group[rate_cols['rate']] * cheapest_per_group['Container Count']
-                    )
-                    
-                    cheapest_cost = cheapest_per_group['Total Cost'].sum()
-        except (ValueError, KeyError):
-            pass
+    # --- Performance scenario cost ---
+    performance_cost = _calc_performance_cost(scenario_data, carrier_facility_exclusions, rate_cols)
 
-    # Calculate optimized cost scenario using cascading logic with LP + historical constraints
-    # Uses scenario_data (unconstrained only when constraints active)
-    # Apply carrier+facility exclusions to prevent excluded carriers from being selected at excluded facilities
-    optimized_cost = None
-    if len(scenario_data) > 0:
-        try:
-            from optimization import cascading_allocate_with_constraints
-            
-            carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
-            
-            # Filter out excluded carrier+facility combinations before optimization
-            optimization_source = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
-            
-            # CRITICAL: Recalculate Container Count from Container Numbers to ensure consistency
-            if 'Container Numbers' in optimization_source.columns:
-                optimization_source['Container Count'] = optimization_source['Container Numbers'].apply(count_containers)
-            
-            # Split: only optimize rows with valid rates. Unrated rows pass through unchanged.
-            has_valid_rate = optimization_source['Base Rate'].notna() & (optimization_source['Base Rate'] != 0)
-            rated_data = optimization_source[has_valid_rate].copy()
-            unrated_data = optimization_source[~has_valid_rate].copy()
-            
-            # Get optimization parameters from session state
-            cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0
-            performance_weight = st.session_state.get('opt_performance_weight', 30) / 100.0
-            max_growth_pct = st.session_state.get('opt_max_growth_pct', 30) / 100.0
-            
-            optimized_allocated = None
-            if len(rated_data) > 0:
-                optimized_allocated = cascading_allocate_with_constraints(
-                    rated_data,
-                    max_growth_pct=max_growth_pct,
-                    cost_weight=cost_weight,
-                    performance_weight=performance_weight,
-                    n_historical_weeks=5,
-                    carrier_column=carrier_col,
-                    container_column='Container Count',
-                    excluded_carriers=max_constrained_carriers,
-                    historical_data=historical_data_source,
-                )
-            
-            # Recombine: optimized rated rows + unchanged unrated rows
-            if optimized_allocated is not None and len(optimized_allocated) > 0:
-                if len(unrated_data) > 0:
-                    optimized_allocated = pd.concat([optimized_allocated, unrated_data], ignore_index=True)
-                if rate_cols['total_rate'] in optimized_allocated.columns:
-                    optimized_cost = optimized_allocated[rate_cols['total_rate']].sum()
-                # Cache result for reuse in detailed analysis table
-                st.session_state['_cached_opt_allocated'] = optimized_allocated
-        except Exception as e:
-            import traceback
-            logger.warning(f"Optimization failed: {e}\n{traceback.format_exc()}")
-            st.session_state['_optimization_error'] = f"{type(e).__name__}: {e}"
+    # --- Cheapest cost scenario ---
+    cheapest_cost = _calc_cheapest_cost(scenario_data, carrier_facility_exclusions, rate_cols)
 
-    # Fallback: if optimization returned no result but we have unconstrained data with costs,
-    # use the current unconstrained cost (no better allocation possible).
-    # This ensures the Optimized card shows a value instead of N/A when data exists.
+    # --- Optimized cost scenario ---
+    optimized_cost = _calc_optimized_cost(
+        scenario_data, carrier_facility_exclusions, max_constrained_carriers,
+        historical_data_source, rate_cols,
+    )
+
+    # Fallback
     if optimized_cost is None and len(scenario_data) > 0:
         if rate_cols['total_rate'] in scenario_data.columns:
             fallback_cost = scenario_data[rate_cols['total_rate']].fillna(0).sum()
@@ -384,7 +179,7 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
         'total_cost': total_cost,
         'total_containers': total_containers_all,
         'unique_carriers': unique_carriers,
-        'unique_scacs': unique_carriers,  # Same as unique_carriers
+        'unique_scacs': unique_carriers,
         'unique_lanes': unique_lanes,
         'unique_ports': unique_ports,
         'unique_facilities': unique_facilities,
@@ -392,1014 +187,463 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
         'avg_performance': avg_performance,
         'performance_cost': performance_cost,
         'cheapest_cost': cheapest_cost,
-        'optimized_cost': optimized_cost
+        'optimized_cost': optimized_cost,
     }
 
-# ==================== DISPLAY FUNCTIONS ====================
 
-def display_current_metrics(metrics, constrained_data=None, unconstrained_data=None):
-    """Display main metrics dashboard
-    
-    Args:
-        metrics: Dictionary containing calculated metrics
-        constrained_data: DataFrame containing constrained/locked containers (optional)
-        unconstrained_data: DataFrame containing unconstrained containers (optional)
-    """
-    if metrics is None:
-        st.warning("⚠️ No data matches your selection.")
-        return
-    
-    # Determine if constraints are active
-    has_constraints = (
-        constrained_data is not None 
-        and len(constrained_data) > 0 
-        and unconstrained_data is not None
+# ---------------------------------------------------------------------------
+# calculate_enhanced_metrics helpers (private)
+# ---------------------------------------------------------------------------
+
+def _calc_performance_cost(scenario_data, carrier_facility_exclusions, rate_cols):
+    if 'Performance_Score' not in scenario_data.columns or len(scenario_data) == 0:
+        return None
+    try:
+        carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
+        filtered = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
+        has_valid_rate = filtered['Base Rate'].notna() & (filtered['Base Rate'] != 0)
+        rated_perf = filtered[has_valid_rate].copy()
+        unrated_perf = filtered[~has_valid_rate].copy()
+        allocated = allocate_to_highest_performance(
+            rated_perf, carrier_column=carrier_col, container_column='Container Count',
+            performance_column='Performance_Score', container_numbers_column='Container Numbers',
+        )
+        if len(unrated_perf) > 0:
+            allocated = pd.concat([allocated, unrated_perf], ignore_index=True)
+        cost = allocated[rate_cols['total_rate']].sum() if rate_cols['total_rate'] in allocated.columns else None
+        st.session_state['_cached_perf_allocated'] = allocated
+        return cost
+    except (ValueError, KeyError):
+        return None
+
+
+def _calc_cheapest_cost(scenario_data, carrier_facility_exclusions, rate_cols):
+    if len(scenario_data) == 0:
+        return None
+    try:
+        carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
+        working = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
+        working[rate_cols['rate']] = pd.to_numeric(working[rate_cols['rate']], errors='coerce')
+        working['Container Count'] = pd.to_numeric(working['Container Count'], errors='coerce').fillna(0)
+        working = working[working[rate_cols['rate']].notna()]
+        if len(working) == 0:
+            return None
+        group_cols = [col for col in ['Category', 'Lane', 'Week Number'] if col in working.columns]
+        if not group_cols:
+            return None
+        working = working.sort_values(rate_cols['rate'], ascending=True)
+        cheapest_per_group = working.groupby(group_cols, as_index=False).first()
+        if 'Container Numbers' in working.columns:
+            cn_concat = (
+                working.groupby(group_cols)['Container Numbers']
+                .apply(concat_and_dedupe_containers)
+                .reset_index(name='_cn_all')
+            )
+            cheapest_per_group = cheapest_per_group.merge(cn_concat, on=group_cols, how='left')
+            cheapest_per_group['Container Count'] = cheapest_per_group['_cn_all'].apply(count_containers)
+        else:
+            container_totals = working.groupby(group_cols)['Container Count'].sum()
+            cheapest_per_group = cheapest_per_group.set_index(group_cols)
+            cheapest_per_group['Container Count'] = container_totals
+            cheapest_per_group = cheapest_per_group.reset_index()
+        cheapest_per_group['Total Cost'] = cheapest_per_group[rate_cols['rate']] * cheapest_per_group['Container Count']
+        return cheapest_per_group['Total Cost'].sum()
+    except (ValueError, KeyError):
+        return None
+
+
+def _calc_optimized_cost(scenario_data, carrier_facility_exclusions,
+                         max_constrained_carriers, historical_data_source, rate_cols):
+    if len(scenario_data) == 0:
+        return None
+    try:
+        from optimization import cascading_allocate_with_constraints
+        carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
+        optimization_source = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
+        if 'Container Numbers' in optimization_source.columns:
+            optimization_source['Container Count'] = optimization_source['Container Numbers'].apply(count_containers)
+        has_valid_rate = optimization_source['Base Rate'].notna() & (optimization_source['Base Rate'] != 0)
+        rated_data = optimization_source[has_valid_rate].copy()
+        unrated_data = optimization_source[~has_valid_rate].copy()
+        cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0
+        performance_weight = st.session_state.get('opt_performance_weight', 30) / 100.0
+        max_growth_pct = st.session_state.get('opt_max_growth_pct', 30) / 100.0
+        optimized_allocated = None
+        if len(rated_data) > 0:
+            optimized_allocated = cascading_allocate_with_constraints(
+                rated_data, max_growth_pct=max_growth_pct, cost_weight=cost_weight,
+                performance_weight=performance_weight, n_historical_weeks=5,
+                carrier_column=carrier_col, container_column='Container Count',
+                excluded_carriers=max_constrained_carriers, historical_data=historical_data_source,
+            )
+        if optimized_allocated is not None and len(optimized_allocated) > 0:
+            if len(unrated_data) > 0:
+                optimized_allocated = pd.concat([optimized_allocated, unrated_data], ignore_index=True)
+            cost = optimized_allocated[rate_cols['total_rate']].sum() if rate_cols['total_rate'] in optimized_allocated.columns else None
+            st.session_state['_cached_opt_allocated'] = optimized_allocated
+            return cost
+        return None
+    except Exception as e:
+        import traceback
+        logger.warning(f"Optimization failed: {e}\n{traceback.format_exc()}")
+        st.session_state['_optimization_error'] = f"{type(e).__name__}: {e}"
+        return None
+
+
+# ==================== DETAILED ANALYSIS TABLE (ORCHESTRATOR) ====================
+
+def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data,
+                                  metrics=None, max_constrained_carriers=None,
+                                  carrier_facility_exclusions=None, full_unfiltered_data=None):
+    """Show detailed analysis table — delegates strategy logic to scenario_strategies.py."""
+    from .scenario_strategies import (
+        apply_current_selection, apply_optimized_strategy,
+        apply_performance_strategy, apply_cheapest_strategy,
     )
-    
-    # Get rate columns for cost calculations
-    rate_cols = get_rate_columns()
-    
-    # Calculate constrained cost once if constraints are active
-    constrained_cost = 0
-    if has_constraints:
-        constrained_cost = constrained_data[rate_cols['total_rate']].sum()
-    
-    # Get current rate type for display
-    rate_type = st.session_state.get('rate_type', 'Base Rate')
-    rate_type_label = f"({rate_type})" if rate_type == 'CPC' else ""
-    
-    section_header(f"📊 Cost Analysis Dashboard {rate_type_label}")
-    
-    # Cost comparison cards - now showing 4 strategies
-    st.markdown(f"### 💰 Cost Strategy Comparison {rate_type_label}")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    # Current Selection - sum constrained + unconstrained costs
-    with col1:
-        if has_constraints:
-            unconstrained_current_cost = unconstrained_data[rate_cols['total_rate']].sum()
-            total_current_cost = constrained_cost + unconstrained_current_cost
-        else:
-            total_current_cost = metrics['total_cost']
-        
-        st.markdown(f"""
-        <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px;">
-            <h4 style="color: #1f77b4; margin: 0;">📋 Current</h4>
-            <h2 style="color: #1f77b4; margin: 5px 0;">${total_current_cost:,.2f}</h2>
-            <p style="margin: 0; color: #666;">Your selections</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Performance scenario (calculated based on highest performance carriers)
-    with col2:
-        if metrics.get('performance_cost') is not None:
-            # Add constrained cost to scenario cost
-            perf_cost = constrained_cost + metrics['performance_cost'] if has_constraints else metrics['performance_cost']
-            perf_diff = perf_cost - total_current_cost
-            perf_diff_pct = (perf_diff / total_current_cost * 100) if total_current_cost > 0 else 0
-            
-            if perf_diff > 0:
-                diff_text = f"Cost ${perf_diff:,.2f} more ({perf_diff_pct:+.1f}%)"
-                diff_color = "#ff6b6b"
-            elif perf_diff < 0:
-                diff_text = f"Save ${abs(perf_diff):,.2f} ({abs(perf_diff_pct):.1f}%)"
-                diff_color = "#28a745"
-            else:
-                diff_text = "Same as current"
-                diff_color = "#666"
-            
-            st.markdown(f"""
-            <div style="background-color: #fff0e6; padding: 15px; border-radius: 10px;">
-                <h4 style="color: #ff8c00; margin: 0;">🏆 Performance</h4>
-                <h2 style="color: #ff8c00; margin: 5px 0;">${perf_cost:,.2f}</h2>
-                <p style="margin: 0; color: {diff_color};">{diff_text}</p>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div style="background-color: #fff0e6; padding: 15px; border-radius: 10px;">
-                <h4 style="color: #ff8c00; margin: 0;">🏆 Performance</h4>
-                <h2 style="color: #ff8c00; margin: 5px 0;">N/A</h2>
-                <p style="margin: 0; color: #ff8c00;">No performance data<br><small>Performance scores needed</small></p>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    # Cheapest Cost scenario
-    with col3:
-        if metrics.get('cheapest_cost') is not None:
-            # Add constrained cost to scenario cost
-            cheap_cost = constrained_cost + metrics['cheapest_cost'] if has_constraints else metrics['cheapest_cost']
-            cheap_diff = cheap_cost - total_current_cost
-            cheap_diff_pct = (cheap_diff / total_current_cost * 100) if total_current_cost > 0 else 0
-            
-            if cheap_diff > 0:
-                diff_text = f"Cost ${cheap_diff:,.2f} more ({cheap_diff_pct:+.1f}%)"
-                diff_color = "#ff6b6b"
-            elif cheap_diff < 0:
-                diff_text = f"Save ${abs(cheap_diff):,.2f} ({abs(cheap_diff_pct):.1f}%)"
-                diff_color = "#28a745"
-            else:
-                diff_text = "Same as current"
-                diff_color = "#666"
-            
-            st.markdown(f"""
-            <div style="background-color: #e8f5e9; padding: 15px; border-radius: 10px;">
-                <h4 style="color: #28a745; margin: 0;">💰 Cheapest</h4>
-                <h2 style="color: #28a745; margin: 5px 0;">${cheap_cost:,.2f}</h2>
-                <p style="margin: 0; color: {diff_color};">{diff_text}</p>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div style="background-color: #e8f5e9; padding: 15px; border-radius: 10px;">
-                <h4 style="color: #28a745; margin: 0;">💰 Cheapest</h4>
-                <h2 style="color: #28a745; margin: 5px 0;">N/A</h2>
-                <p style="margin: 0; color: #28a745;">No rate data<br><small>Valid rates needed</small></p>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    # Optimized scenario (calculated using cascading logic with LP + historical constraints)
-    with col4:
-        if metrics.get('optimized_cost') is not None:
-            # Add constrained cost to scenario cost
-            opt_cost = constrained_cost + metrics['optimized_cost'] if has_constraints else metrics['optimized_cost']
-            opt_diff = opt_cost - total_current_cost
-            opt_diff_pct = (opt_diff / total_current_cost * 100) if total_current_cost > 0 else 0
-            
-            # Get current slider settings for display
-            cost_pct = st.session_state.get('opt_cost_weight', 70)
-            perf_pct = st.session_state.get('opt_performance_weight', 30)
-            growth_pct = st.session_state.get('opt_max_growth_pct', 30)
-            
-            if opt_diff > 0:
-                diff_text = f"Cost ${opt_diff:,.2f} more ({opt_diff_pct:+.1f}%)"
-                diff_color = "#ff6b6b"
-            elif opt_diff < 0:
-                diff_text = f"Save ${abs(opt_diff):,.2f} ({abs(opt_diff_pct):.1f}%)"
-                diff_color = "#28a745"
-            else:
-                diff_text = "Matches current selections"
-                diff_color = "#666"
-            
-            st.markdown(f"""
-            <div style="background-color: #e6f7ff; padding: 15px; border-radius: 10px;">
-                <h4 style="color: #17a2b8; margin: 0;">🧮 Optimized</h4>
-                <h2 style="color: #17a2b8; margin: 5px 0;">${opt_cost:,.2f}</h2>
-                <p style="margin: 0; color: {diff_color};">{diff_text}<br><small>{cost_pct}/{perf_pct} • {growth_pct}% cap</small></p>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            opt_error = st.session_state.get('_optimization_error', 'Need historical data')
-            st.markdown(f"""
-            <div style="background-color: #e6f7ff; padding: 15px; border-radius: 10px;">
-                <h4 style="color: #17a2b8; margin: 0;">🧮 Optimized</h4>
-                <h2 style="color: #17a2b8; margin: 5px 0;">N/A</h2>
-                <p style="margin: 0; color: #17a2b8;">Optimization unavailable<br><small>{opt_error}</small></p>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    st.markdown("---")
 
-def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics=None, max_constrained_carriers=None, carrier_facility_exclusions=None, full_unfiltered_data=None):
-    """Show detailed analysis table - uses same data source as Cost Analysis Dashboard
-    
-    Args:
-        final_filtered_data: Complete filtered dataset
-        unconstrained_data: Data not locked by constraints
-        constrained_data: Data locked by constraints
-        metrics: Pre-calculated metrics (optional)
-        max_constrained_carriers: Set of carriers with maximum constraints (optional)
-        carrier_facility_exclusions: Dict mapping carrier names to sets of excluded facility codes (optional)
-        full_unfiltered_data: Complete unfiltered dataset for stable historical calculations (optional)
-    """
     section_header("📋 Detailed Analysis Table")
-    
-    # Use full_unfiltered_data for historical calculations if provided
+
     historical_data_source = full_unfiltered_data if full_unfiltered_data is not None else final_filtered_data
-    
-    # Default to empty list if not provided
     if max_constrained_carriers is None:
         max_constrained_carriers = []
-    
-    # Default to empty dict if not provided
     if carrier_facility_exclusions is None:
         carrier_facility_exclusions = {}
-    
-    # Get metrics if not provided
     if metrics is None:
         metrics = calculate_enhanced_metrics(final_filtered_data)
-    
     if metrics is None:
         st.warning("⚠️ No data available for analysis.")
         return
-    
-    # Check if constraints are active
+
     has_constraints = len(constrained_data) > 0 if isinstance(constrained_data, pd.DataFrame) else False
-    
-    # Show constraint status
+    rate_cols = get_rate_columns()
+    carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in final_filtered_data.columns else 'Carrier'
+
     if not has_constraints:
         st.info("ℹ️ **No constraints active** - All containers in the table below can be manipulated by scenarios")
-    
+
     # Strategy selector
-    strategy_options = ['Current Selection', 'Performance', 'Cheapest Cost', 'Optimized']
-    
-    selected = st.selectbox("📊 Select Strategy:", strategy_options)
-    
-    # Clean up cached scenario results not needed for the selected strategy
+    selected = st.selectbox("📊 Select Strategy:", ['Current Selection', 'Performance', 'Cheapest Cost', 'Optimized'])
     if selected != 'Performance':
         st.session_state.pop('_cached_perf_allocated', None)
     if selected != 'Optimized':
         st.session_state.pop('_cached_opt_allocated', None)
-    
-    # Show constraint info if applicable
-    if has_constraints:
-        # Recalculate constrained container count from Container Numbers for accuracy
-        if 'Container Numbers' in constrained_data.columns:
-            constrained_containers = constrained_data['Container Numbers'].apply(count_containers).sum()
-        else:
-            constrained_containers = constrained_data['Container Count'].sum()
-        
-        # Recalculate unconstrained container count from Container Numbers for accuracy
-        if 'Container Numbers' in unconstrained_data.columns:
-            unconstrained_containers = unconstrained_data['Container Numbers'].apply(count_containers).sum()
-        else:
-            unconstrained_containers = unconstrained_data['Container Count'].sum()
-        
-        st.info(f"""
-        🔒 **Constraints Active:** 
-        - {constrained_containers:,} containers locked by constraints
-        - {unconstrained_containers:,} containers available for optimization
-        - Total: {constrained_containers + unconstrained_containers:,} containers
-        
-        ℹ️ **How this works:**
-        - The **Constrained Allocations** table below shows containers that are locked and will NOT be changed by scenarios
-        - The **Unconstrained Data** table shows containers that WILL be manipulated based on your selected scenario
-        """)
-        
-        # Show constrained data section for ALL scenarios
-        st.markdown("---")
-        st.markdown("## 🔒 Constrained Allocations")
-        st.markdown("**✋ These allocations are LOCKED and NOT affected by scenario selection**")
-        
-        # Get dynamic rate columns
-        rate_cols = get_rate_columns()
-        
-        constrained_display = constrained_data.copy()
-        
-        # CRITICAL: Recalculate Container Count from Container Numbers to ensure accuracy
-        # This ensures container counts match the actual concatenated container IDs
-        if 'Container Numbers' in constrained_display.columns:
-            constrained_display['Container Count'] = constrained_display['Container Numbers'].apply(count_containers)
-        
-        # ADD CARRIER FLIPS COLUMN for constrained data
-        # Compare against original data (final_filtered_data) to show what changed due to constraints
-        carrier_col_c = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in constrained_display.columns else 'Carrier'
-        constrained_display = add_detailed_carrier_flips_column(constrained_display, final_filtered_data, carrier_col='Dray SCAC(FL)')
-        
-        # Rename column to just "Carrier Flips" for cleaner display
-        if 'Carrier Flips (Detailed)' in constrained_display.columns:
-            constrained_display.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
-        
-        # Keep a full copy (all columns) for the CSV download BEFORE column filtering
-        constrained_download_data = constrained_display.copy()
-        
-        # Prepare constrained data for display
-        cols_c = ['Discharged Port']
-        if 'Category' in constrained_display.columns:
-            cols_c.append('Category')
-        if 'SSL' in constrained_display.columns:
-            cols_c.append('SSL')
-        if 'Vessel' in constrained_display.columns:
-            cols_c.append('Vessel')
-        cols_c.extend([carrier_col_c, 'Lane', 'Facility'])
-        if 'Terminal' in constrained_display.columns:
-            cols_c.append('Terminal')
-        cols_c.append('Week Number')
-        if 'Ocean ETA' in constrained_display.columns:
-            cols_c.append('Ocean ETA')
-        if 'Container Numbers' in constrained_display.columns:
-            cols_c.append('Container Numbers')
-        
-        # Add Carrier Flips column (shows original count and movements)
-        if 'Carrier Flips' in constrained_display.columns:
-            cols_c.append('Carrier Flips')
-        
-        # Add selected rate columns
-        cols_c.append('Container Count')
-        if rate_cols['rate'] in constrained_display.columns:
-            cols_c.append(rate_cols['rate'])
-        if rate_cols['total_rate'] in constrained_display.columns:
-            cols_c.append(rate_cols['total_rate'])
-        
-        # Add constraint columns if they exist
-        if 'Constraint_Priority' in constrained_display.columns:
-            cols_c.append('Constraint_Priority')
-        if 'Constraint_Method' in constrained_display.columns:
-            cols_c.append('Constraint_Method')
-        if 'Constraint_Description' in constrained_display.columns:
-            cols_c.append('Constraint_Description')
-        
-        cols_c = [c for c in cols_c if c in constrained_display.columns]
-        constrained_display = constrained_display[cols_c].copy()
-        
-        # Rename columns
-        rename_dict_c = {
-            rate_cols['total_rate']: 'Total Cost'
-        }
-        
-        if 'Constraint_Priority' in constrained_display.columns:
-            rename_dict_c['Constraint_Priority'] = '🎯 Priority'
-        if 'Constraint_Method' in constrained_display.columns:
-            rename_dict_c['Constraint_Method'] = '📐 Method'
-        if 'Constraint_Description' in constrained_display.columns:
-            rename_dict_c['Constraint_Description'] = '📝 Description'
-        
-        if carrier_col_c == 'Dray SCAC(FL)':
-            rename_dict_c['Dray SCAC(FL)'] = 'NEW SCAC'
-        constrained_display = constrained_display.rename(columns=rename_dict_c)
-        
-        # Format constrained data
-        if rate_cols['rate'] in constrained_display.columns:
-            constrained_display[rate_cols['rate']] = constrained_display[rate_cols['rate']].apply(format_currency)
-        if 'Total Cost' in constrained_display.columns:
-            constrained_display['Total Cost'] = constrained_display['Total Cost'].apply(format_currency)
-        
-        st.dataframe(constrained_display, use_container_width=True, hide_index=True)
-        
-        # Constrained data metrics
-        col1, col2, col3 = st.columns(3)
-        col1.metric("📊 Constrained Records", len(constrained_data))
-        col2.metric("📦 Constrained Containers", f"{constrained_containers:,}")
-        col3.metric("💰 Constrained Cost", f"${constrained_data[rate_cols['total_rate']].sum():,.2f}")
-        
-        st.markdown("---")
-        st.markdown("---")
-        st.markdown(f"## 📋 Unconstrained Data - {selected}")
-        st.markdown(f"**🔄 These containers ARE manipulated by the '{selected}' scenario**")
-    
-    # Use unconstrained data for scenarios when constraints are active
-    display_data = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
-    
-    # SAFETY CHECK: Ensure Container Count column exists
-    # If Container Numbers exists but Container Count doesn't, calculate it
-    if 'Container Numbers' in display_data.columns and 'Container Count' not in display_data.columns:
-        display_data['Container Count'] = display_data['Container Numbers'].apply(count_containers)
-    elif 'Container Count' not in display_data.columns:
-        # If neither exists, set to 0 as fallback
-        display_data['Container Count'] = 0
 
-    # Use ALL data regardless of rate availability - no filtering
-    display_data_with_rates = display_data.copy()
-    missing_rate_rows = pd.DataFrame()  # Empty dataframe - not needed anymore
-    
-    # Verify Container Count matches Container Numbers
+    # Show constrained section (common to all strategies)
+    constrained_download_data = None
+    if has_constraints:
+        constrained_download_data = _render_constrained_section(
+            constrained_data, unconstrained_data, final_filtered_data,
+            rate_cols, carrier_col, selected,
+        )
+
+    # Prepare working data
+    display_data_raw = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
+    if 'Container Numbers' in display_data_raw.columns and 'Container Count' not in display_data_raw.columns:
+        display_data_raw['Container Count'] = display_data_raw['Container Numbers'].apply(count_containers)
+    elif 'Container Count' not in display_data_raw.columns:
+        display_data_raw['Container Count'] = 0
+
+    display_data_with_rates = display_data_raw.copy()
     if 'Container Numbers' in display_data_with_rates.columns:
-        _actual_ids = display_data_with_rates['Container Numbers'].apply(count_containers).sum()
-        if _actual_ids != int(display_data_with_rates['Container Count'].sum()):
+        _actual = display_data_with_rates['Container Numbers'].apply(count_containers).sum()
+        if _actual != int(display_data_with_rates['Container Count'].sum()):
             display_data_with_rates['Container Count'] = display_data_with_rates['Container Numbers'].apply(count_containers)
             if 'Base Rate' in display_data_with_rates.columns:
                 display_data_with_rates['Total Rate'] = display_data_with_rates['Base Rate'] * display_data_with_rates['Container Count']
             if 'CPC' in display_data_with_rates.columns:
                 display_data_with_rates['Total CPC'] = display_data_with_rates['CPC'] * display_data_with_rates['Container Count']
-    
-    # CAPTURE BASELINE DATA for Carrier Flips comparison
-    # This represents the "Current Selection" before any scenario transformations
+
     baseline_data = display_data_with_rates.copy()
-    
-    # Select and rename columns based on strategy
-    if selected in ('Current Selection', 'Performance', 'Optimized'):
-        # Get dynamic rate columns based on selection
-        rate_cols = get_rate_columns()
 
-        # Always prefer 'Dray SCAC(FL)' as it's the source column from GVT data
-        carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in display_data_with_rates.columns else 'Carrier'
+    # ---- Dispatch to strategy ----
+    performance_reallocated = 0
+    performance_groups_impacted = 0
 
-        performance_reallocated = 0
-        performance_groups_impacted = 0
-        
-        # For Current Selection, use the filtered data directly
+    if selected == 'Cheapest Cost':
+        source = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
+        display_data, download_data, desc, filename, rate_cols = apply_cheapest_strategy(
+            source, carrier_col, carrier_facility_exclusions,
+            has_constraints, constrained_data, metrics,
+            final_filtered_data, unconstrained_data,
+        )
+    else:
+        # Current Selection / Performance / Optimized share the same column pipeline
         if selected == 'Current Selection':
-            display_data = display_data_with_rates.copy()
-            
-            # IMPORTANT: Mark max-constrained carriers in the display
-            # These carriers have reached their maximum allocation in constrained data
-            # Their containers will be reallocated in optimization scenarios (within matching scope)
-            if max_constrained_carriers and len(max_constrained_carriers) > 0:
-                # Derive flat set of carrier names for display purposes
-                max_carrier_names = {mc['carrier'] for mc in max_constrained_carriers}
-                if carrier_col in display_data.columns:
-                    # Add a visual indicator for max-constrained carriers
-                    display_data['Carrier'] = display_data[carrier_col].apply(
-                        lambda x: f"🔒 {x} (MAX)" if x in max_carrier_names else x
-                    )
-                    
-                    # Count containers from max-constrained carriers
-                    max_constrained_mask = display_data[carrier_col].isin(max_carrier_names)
-                    if max_constrained_mask.any():
-                        max_constrained_containers = display_data[max_constrained_mask]['Container Count'].sum()
-                        st.info(f"🔒 **{len(max_carrier_names)} carriers marked with (MAX)** - "
-                               f"{max_constrained_containers:.0f} containers will be reallocated in optimization scenarios")
-            
-            # CRITICAL: Recalculate Container Count from Container Numbers to ensure accuracy
-            # This ensures container counts match the actual concatenated container IDs after grouping
-            if 'Container Numbers' in display_data.columns:
-                display_data['Container Count'] = display_data['Container Numbers'].apply(count_containers)
-        
-        # When viewing the optimized scenario, reallocate volume using cascading logic with LP + historical constraints
+            display_data, performance_reallocated, performance_groups_impacted = apply_current_selection(
+                display_data_with_rates, carrier_col, max_constrained_carriers,
+            )
         elif selected == 'Optimized':
-            # Skip cache to enable step-by-step debugging
-            st.session_state.pop('_cached_opt_allocated', None)
-            
-            from optimization import cascading_allocate_with_constraints
-            
-            optimization_source = display_data_with_rates.copy()
-            
-            optimization_source = filter_excluded_carrier_facility_rows(optimization_source, carrier_facility_exclusions, carrier_col)
-            
-            # Split: only optimize rows with valid rates
-            has_valid_rate = optimization_source['Base Rate'].notna() & (optimization_source['Base Rate'] != 0)
-            rated_data = optimization_source[has_valid_rate].copy()
-            unrated_data = optimization_source[~has_valid_rate].copy()
-            
-            # Debug: show split results
-            import streamlit as _st_debug
-            _st_debug.caption(f"🔧 Debug: {len(rated_data)} rated rows, {len(unrated_data)} unrated rows, Base Rate dtype={optimization_source['Base Rate'].dtype}, sample={optimization_source['Base Rate'].head(3).tolist()}")
-            
-            cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0
-            performance_weight = st.session_state.get('opt_performance_weight', 30) / 100.0
-            max_growth_pct = st.session_state.get('opt_max_growth_pct', 30) / 100.0
-            
-            try:
-                allocated = None
-                if len(rated_data) > 0:
-                    allocated = cascading_allocate_with_constraints(
-                        rated_data,
-                        max_growth_pct=max_growth_pct,
-                        cost_weight=cost_weight,
-                        performance_weight=performance_weight,
-                        n_historical_weeks=5,
-                        carrier_column=carrier_col,
-                        container_column='Container Count',
-                        excluded_carriers=max_constrained_carriers,
-                        historical_data=historical_data_source,
-                    )
-            except (ValueError, ImportError) as exc:
-                st.warning(f"Unable to build optimized scenario: {exc}")
-                display_data = optimization_source
-            else:
-                if allocated is not None and len(allocated) > 0:
-                    _st_debug.caption(f"🔧 Debug: Optimization returned {len(allocated)} rows with columns: {[c for c in allocated.columns if 'Rank' in c or 'Alloc' in c or 'Volume' in c]}")
-                    if len(unrated_data) > 0:
-                        allocated = pd.concat([allocated, unrated_data], ignore_index=True)
-                    display_data = allocated
-                else:
-                    _st_debug.caption(f"🔧 Debug: Optimization returned None or empty. allocated={allocated is not None}, len={len(allocated) if allocated is not None else 'N/A'}")
-                    display_data = optimization_source
-            
-            # Calculate how many containers were reallocated/impacted
-            if 'Volume_Change' in display_data.columns:
-                # Convert to numeric first in case it's a string
-                volume_change_numeric = pd.to_numeric(display_data['Volume_Change'], errors='coerce').fillna(0)
-                optimized_reallocated = int(abs(volume_change_numeric).sum() / 2)  # Divide by 2 to avoid double counting
-                performance_reallocated = optimized_reallocated  # Reuse variable for display logic
-                
-                # Optimization grouping: [Category, Lane, Week Number] only
-                group_cols = [
-                    col for col in ['Category', 'Lane', 'Week Number']
-                    if col in display_data.columns
-                ]
-                if group_cols and optimized_reallocated > 0:
-                    performance_groups_impacted = int(
-                        display_data.loc[
-                            volume_change_numeric != 0,
-                            group_cols
-                        ]
-                        .drop_duplicates()
-                        .shape[0]
-                    )
-            
-
-        # When viewing the performance scenario, reallocate volume using performance_logic
+            display_data, performance_reallocated, performance_groups_impacted = apply_optimized_strategy(
+                display_data_with_rates, carrier_col, max_constrained_carriers,
+                carrier_facility_exclusions, historical_data_source,
+            )
         elif selected == 'Performance':
-            performance_source = display_data_with_rates.copy()
-            if carrier_col in performance_source.columns:
-                performance_source['Original Carrier'] = performance_source[carrier_col]
-            
-            # Try cached result from calculate_enhanced_metrics (same deduped data)
-            cached_perf = st.session_state.pop('_cached_perf_allocated', None)
-            allocated = None
-            
-            if cached_perf is not None and len(cached_perf) > 0:
-                allocated = cached_perf
-            else:
-                perf_input = filter_excluded_carrier_facility_rows(performance_source.copy(), carrier_facility_exclusions, carrier_col)
-                if 'Container Numbers' in perf_input.columns:
-                    perf_input['Container Count'] = perf_input['Container Numbers'].apply(count_containers)
-                
-                # Split: only optimize rows with valid rates
-                has_valid_rate = perf_input['Base Rate'].notna() & (perf_input['Base Rate'] != 0)
-                rated_perf = perf_input[has_valid_rate].copy()
-                unrated_perf = perf_input[~has_valid_rate].copy()
-                
-                try:
-                    allocated = allocate_to_highest_performance(
-                        rated_perf,
-                        carrier_column=carrier_col,
-                        container_column='Container Count',
-                        performance_column='Performance_Score',
-                        container_numbers_column='Container Numbers',
-                    )
-                    # Recombine
-                    if len(unrated_perf) > 0:
-                        allocated = pd.concat([allocated, unrated_perf], ignore_index=True)
-                except ValueError as exc:
-                    st.warning(f"Unable to build performance scenario: {exc}")
-                    display_data = performance_source
-            
-            if allocated is not None:
-                # Optimization grouping: [Category, Lane, Week Number] only.
-                # Do NOT include Discharged Port, Facility, Terminal, SSL, Vessel —
-                # those fragment lanes and prevent proper carrier pooling.
-                group_cols = [
-                    col for col in ['Category', 'Lane', 'Week Number']
-                    if col in performance_source.columns
-                ]
+            display_data, performance_reallocated, performance_groups_impacted = apply_performance_strategy(
+                display_data_with_rates, carrier_col, carrier_facility_exclusions,
+            )
 
-                if not group_cols:
-                    group_cols = [col for col in ['Week Number'] if col in performance_source.columns]
-
-                # Build reference information so the table shows how volume changed
-                original_mix = (
-                    performance_source.groupby(group_cols)[carrier_col]
-                    .apply(lambda carriers: ', '.join(sorted({str(v) for v in carriers if pd.notna(v)})))
-                    .reset_index(name='Original Carrier Mix')
-                ) if group_cols else pd.DataFrame(columns=['Original Carrier Mix'])
-
-                original_carrier_totals = (
-                    performance_source.groupby(group_cols + [carrier_col])['Container Count']
-                    .sum()
-                    .reset_index(name='Original Carrier Containers')
-                ) if group_cols else pd.DataFrame(columns=['Original Carrier Containers'])
-
-                original_primary = (
-                    performance_source.sort_values(
-                        ['Container Count', 'Performance_Score'], ascending=[False, False]
-                    )
-                    .groupby(group_cols, as_index=False)
-                    .first()
-                ) if group_cols else pd.DataFrame()
-
-                display_data = allocated.merge(original_mix, on=group_cols, how='left') if not original_mix.empty else allocated
-                if not original_carrier_totals.empty:
-                    display_data = display_data.merge(
-                        original_carrier_totals,
-                        on=group_cols + [carrier_col],
-                        how='left'
-                    )
-                    display_data['Original Carrier Containers'] = (
-                        display_data['Original Carrier Containers'].fillna(0)
-                    )
-                    display_data['Reallocated Containers'] = (
-                        display_data['Container Count'] - display_data['Original Carrier Containers']
-                    )
-                else:
-                    display_data['Original Carrier Containers'] = 0
-                    display_data['Reallocated Containers'] = display_data['Container Count']
-
-                if not original_primary.empty:
-                    primary_cols = [col for col in group_cols]
-                    for col in ['Original Carrier', 'Container Count', 'Performance_Score']:
-                        if col in original_primary.columns:
-                            primary_cols.append(col)
-                    original_primary = original_primary[primary_cols].rename(
-                        columns={
-                            'Original Carrier': 'Original Primary Carrier',
-                            'Container Count': 'Original Primary Volume',
-                            'Performance_Score': 'Original Primary Performance',
-                        }
-                    )
-                    display_data = display_data.merge(original_primary, on=group_cols, how='left')
-
-                if 'Original Carrier Containers' in display_data.columns:
-                    display_data['Original Carrier Containers'] = (
-                        display_data['Original Carrier Containers'].round(0).astype(int)
-                    )
-                if 'Reallocated Containers' in display_data.columns:
-                    display_data['Reallocated Containers'] = (
-                        display_data['Reallocated Containers'].round(0).astype(int)
-                    )
-                    performance_reallocated = int(display_data['Reallocated Containers'].sum())
-                    if group_cols:
-                        performance_groups_impacted = int(
-                            display_data.loc[
-                                display_data['Reallocated Containers'] > 0,
-                                group_cols
-                            ]
-                            .drop_duplicates()
-                            .shape[0]
-                        )
-                    elif performance_reallocated:
-                        performance_groups_impacted = 1
-
-                if (
-                    'Original Primary Carrier' in display_data.columns
-                    and carrier_col in display_data.columns
-                ):
-                    display_data['Carrier Change'] = display_data[carrier_col].astype(str) + ' ← ' + display_data['Original Primary Carrier'].fillna('N/A').astype(str)
-
-        # ADD CARRIER FLIPS COLUMN for all scenarios
-        # This shows original carrier allocation vs current carrier after scenario transformation
-        # Using detailed container-level tracing (exact container movements with original counts)
+        # Carrier Flips (common to non-cheapest strategies)
         display_data = add_detailed_carrier_flips_column(display_data, baseline_data, carrier_col=carrier_col)
-        
-        # Rename column to just "Carrier Flips" for cleaner display
         if 'Carrier Flips (Detailed)' in display_data.columns:
             display_data.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
 
-        cols = ['Discharged Port']
-        if 'Category' in display_data.columns:
-            cols.append('Category')
-        if 'SSL' in display_data.columns:
-            cols.append('SSL')
-        if 'Vessel' in display_data.columns:
-            cols.append('Vessel')
-        cols.extend([carrier_col, 'Lane', 'Facility'])
-        if 'Terminal' in display_data.columns:
-            cols.append('Terminal')
-        cols.append('Week Number')
-        if 'Ocean ETA' in display_data.columns:
-            cols.append('Ocean ETA')
-        if 'Container Numbers' in display_data.columns:
-            cols.append('Container Numbers')
-        
-        # Add Carrier Flips column (shows original count and movements)
-        if 'Carrier Flips' in display_data.columns:
-            cols.append('Carrier Flips')
+        # Column selection & renaming
+        display_data, download_data, desc, filename = _build_columns_and_description(
+            display_data, selected, carrier_col, rate_cols, metrics,
+            has_constraints, constrained_data, unconstrained_data,
+            performance_reallocated, performance_groups_impacted,
+        )
 
-        # Add container count and selected rate columns
-        cols.append('Container Count')
-        if rate_cols['rate'] in display_data.columns:
-            cols.append(rate_cols['rate'])
-        if rate_cols['total_rate'] in display_data.columns:
-            cols.append(rate_cols['total_rate'])
-
-        # Add Performance Score
-        if 'Performance_Score' in display_data.columns:
-            cols.append('Performance_Score')
-
-        # Add Missing_Rate indicator if it exists
-        if 'Missing_Rate' in display_data.columns:
-            cols.append('Missing_Rate')
-
-        if 'Allocation Strategy' in display_data.columns:
-            cols.append('Allocation Strategy')
-
-        # Add columns specific to Optimized scenario (cascading logic)
-        if selected == 'Optimized':
-            if 'Carrier_Rank' in display_data.columns:
-                cols.append('Carrier_Rank')
-            if 'Historical_Allocation_Pct' in display_data.columns:
-                cols.append('Historical_Allocation_Pct')
-            if 'New_Allocation_Pct' in display_data.columns:
-                cols.append('New_Allocation_Pct')
-            if 'Volume_Change' in display_data.columns:
-                cols.append('Volume_Change')
-            if 'Growth_Constrained' in display_data.columns:
-                cols.append('Growth_Constrained')
-            if 'Allocation_Notes' in display_data.columns:
-                cols.append('Allocation_Notes')
-
-        # Add columns specific to Performance scenario
-        if selected == 'Performance':
-            if 'Original Carrier Mix' in display_data.columns:
-                cols.append('Original Carrier Mix')
-            if 'Original Carrier Containers' in display_data.columns:
-                cols.append('Original Carrier Containers')
-            if 'Reallocated Containers' in display_data.columns:
-                cols.append('Reallocated Containers')
-            if 'Original Primary Carrier' in display_data.columns:
-                cols.append('Original Primary Carrier')
-            if 'Original Primary Volume' in display_data.columns:
-                cols.append('Original Primary Volume')
-            if 'Original Primary Performance' in display_data.columns:
-                cols.append('Original Primary Performance')
-            if 'Carrier Change' in display_data.columns:
-                cols.append('Carrier Change')
-
-        # Select only existing columns
-        cols = [c for c in cols if c in display_data.columns]
-        # Keep a full copy (all columns) for the CSV download
-        download_data = display_data.copy()
-        display_data = display_data[cols].copy()
-
-        # Sort data based on scenario
-        if selected == 'Performance' and 'Reallocated Containers' in display_data.columns:
-            display_data = display_data.sort_values('Reallocated Containers', ascending=False)
-        elif selected == 'Optimized' and 'Carrier_Rank' in display_data.columns:
-            # Sort by carrier rank (best first) within each group
-            display_data = display_data.sort_values('Carrier_Rank', ascending=True)
-
-        # Calculate total cost before renaming for scenarios that adjust allocations
-        if selected in ('Performance', 'Optimized') and rate_cols['total_rate'] in display_data.columns:
-            scenario_cost = display_data[rate_cols['total_rate']].sum()
-            if has_constraints:
-                constrained_cost = constrained_data[rate_cols['total_rate']].sum()
-                total_cost = constrained_cost + scenario_cost
-                cost_breakdown = f" (Constrained: ${constrained_cost:,.2f} + Unconstrained: ${scenario_cost:,.2f})"
-            else:
-                total_cost = scenario_cost
-                cost_breakdown = ""
-        else:
-            # Use metrics for current cost
-            if has_constraints:
-                constrained_cost = constrained_data[rate_cols['total_rate']].sum()
-                unconstrained_cost = unconstrained_data[rate_cols['total_rate']].sum()
-                total_cost = constrained_cost + unconstrained_cost
-                cost_breakdown = f" (Constrained: ${constrained_cost:,.2f} + Unconstrained: ${unconstrained_cost:,.2f})"
-            else:
-                total_cost = metrics['total_cost']
-                cost_breakdown = ""
-
-        # Rename columns dynamically based on rate type
-        rename_dict = {
-            rate_cols['total_rate']: 'Total Cost',
-            'Performance_Score': 'Performance',
-            'Original Primary Performance': 'Original Lead Performance'
-        }
-        # Always rename carrier column to 'NEW SCAC' for consistency with downstream analysis
-        if carrier_col in display_data.columns:
-            rename_dict[carrier_col] = 'NEW SCAC'
-        if 'Missing_Rate' in display_data.columns:
-            rename_dict['Missing_Rate'] = '⚠️ No Rate'
-        if 'Allocation Strategy' in display_data.columns:
-            rename_dict['Allocation Strategy'] = 'Strategy'
-        
-        # Performance scenario renames
-        if 'Original Carrier Containers' in display_data.columns:
-            rename_dict['Original Carrier Containers'] = 'Volume Before Reallocation'
-        if 'Reallocated Containers' in display_data.columns:
-            rename_dict['Reallocated Containers'] = 'Containers Reallocated'
-        if 'Original Primary Carrier' in display_data.columns:
-            rename_dict['Original Primary Carrier'] = 'Original Lead Carrier'
-        if 'Original Primary Volume' in display_data.columns:
-            rename_dict['Original Primary Volume'] = 'Original Lead Volume'
-        
-        # Optimized (cascading) scenario renames
-        if 'Carrier_Rank' in display_data.columns:
-            rename_dict['Carrier_Rank'] = '🏅 Rank'
-        if 'Historical_Allocation_Pct' in display_data.columns:
-            rename_dict['Historical_Allocation_Pct'] = '📊 Historical %'
-        if 'New_Allocation_Pct' in display_data.columns:
-            rename_dict['New_Allocation_Pct'] = '🆕 New %'
-        if 'Volume_Change' in display_data.columns:
-            rename_dict['Volume_Change'] = '📈 Volume Change'
-        if 'Growth_Constrained' in display_data.columns:
-            rename_dict['Growth_Constrained'] = '🔒 Capped'
-        if 'Allocation_Notes' in display_data.columns:
-            rename_dict['Allocation_Notes'] = '📝 Allocation Details'
-            
-        display_data = display_data.rename(columns=rename_dict)
-        download_data = download_data.rename(columns=rename_dict)
-        
-        # No need to add back missing rate rows since we're keeping all data now
-
-        # Get rate type label for description
-        rate_type_label = st.session_state.get('rate_type', 'Base Rate')
-        if selected == 'Optimized':
-            # Get current slider settings
-            cost_pct = st.session_state.get('opt_cost_weight', 70)
-            perf_pct = st.session_state.get('opt_performance_weight', 30)
-            growth_pct = st.session_state.get('opt_max_growth_pct', 30)
-            
-            reallocation_note = ""
-            if performance_reallocated:
-                change_note_parts = [f"{performance_reallocated:,} containers reallocated"]
-                if performance_groups_impacted:
-                    lane_label = "lane" if performance_groups_impacted == 1 else "lanes"
-                    change_note_parts.append(f"across {performance_groups_impacted} {lane_label}")
-                reallocation_note = " • " + " | ".join(change_note_parts)
-            desc = (
-                f"🧮 Optimized with LP + Historical Constraints ({rate_type_label}) - "
-                f"{cost_pct}% cost, {perf_pct}% performance, max {growth_pct}% growth - Total: ${total_cost:,.2f}{cost_breakdown}{reallocation_note}"
-            )
-            filename = 'optimized_cascading.csv'
-        elif selected == 'Performance':
-            reallocation_note = ""
-            if performance_reallocated:
-                change_note_parts = [f"{performance_reallocated:,} containers reallocated"]
-                if performance_groups_impacted:
-                    lane_label = "lane" if performance_groups_impacted == 1 else "lanes"
-                    change_note_parts.append(f"across {performance_groups_impacted} {lane_label}")
-                reallocation_note = " • " + " | ".join(change_note_parts)
-            desc = (
-                f"🏆 Highest performance carrier scenario ({rate_type_label}) - Total: ${total_cost:,.2f}{cost_breakdown}{reallocation_note}"
-            )
-            filename = 'performance.csv'
-        else:
-            desc = f"📊 Your current selections ({rate_type_label}) - Total: ${total_cost:,.2f}{cost_breakdown}"
-            filename = 'current_selection.csv'
-        
-    elif selected == 'Cheapest Cost':
-        # Get dynamic rate columns
-        rate_cols = get_rate_columns()
-        
-        # Use unconstrained data when constraints are active
-        source_data = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
-        
-        # Determine carrier column early for exclusion filtering
-        carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in source_data.columns else 'Carrier'
-        
-        # APPLY CARRIER+FACILITY EXCLUSIONS: Filter out rows where a carrier is excluded from a specific facility
-        # This prevents excluded carriers from being selected as options at their excluded facilities
-        source_data = filter_excluded_carrier_facility_rows(source_data, carrier_facility_exclusions, carrier_col)
-        
-        # Recalculate Container Count from Container Numbers to fix input data mismatches
-        if 'Container Numbers' in source_data.columns:
-            source_data['Container Count'] = source_data['Container Numbers'].apply(count_containers)
-        
-        # Keep ALL carriers regardless of rate availability
-        # Ensure rate column is numeric but don't filter out NaN values yet
-        if rate_cols['rate'] in source_data.columns:
-            source_data[rate_cols['rate']] = pd.to_numeric(source_data[rate_cols['rate']], errors='coerce')
-        
-        if len(source_data) == 0:
-            st.warning("⚠️ No carriers with valid rates found for cheapest cost analysis.")
-            display_data = pd.DataFrame()
-        else:
-            # Group by Category, Week Number, and Lane
-            # Then aggregate containers and find the cheapest carrier per group
-            # carrier_col already defined above
-            
-            # Optimization grouping: [Category, Lane, Week Number] only.
-            # Do NOT include SSL, Vessel, Discharged Port, Facility, Terminal —
-            # those fragment lanes into single-carrier groups and prevent reallocation.
-            group_cols = []
-            if 'Category' in source_data.columns:
-                group_cols.append('Category')
-            if 'Lane' in source_data.columns:
-                group_cols.append('Lane')
-            if 'Week Number' in source_data.columns:
-                group_cols.append('Week Number')
-            
-            if not group_cols:
-                st.warning("⚠️ No grouping columns (Category, Week Number, Lane) found in data.")
-                display_data = source_data.copy()
-            else:
-                # For each group, find the carrier with the minimum rate
-                # First, sort by rate to ensure we get the cheapest carrier
-                working = source_data.copy()
-                
-                # Ensure numeric comparisons
-                working['Container Count'] = pd.to_numeric(working['Container Count'], errors='coerce').fillna(0)
-                
-                # Sort by rate (cheapest first) and carrier name for tie-breaking
-                working['_rate_sort'] = working[rate_cols['rate']].fillna(float('inf'))
-                working['_carrier_sort'] = working[carrier_col].astype(str)
-                working = working.sort_values(['_rate_sort', '_carrier_sort'], ascending=[True, True])
-                
-                # Get the first (cheapest) carrier for each group
-                cheapest_per_group = working.groupby(group_cols, as_index=False).first()
-            
-            # Sum all containers in each group
-            container_totals = (
-                working.groupby(group_cols, as_index=False)['Container Count']
-                .sum()
-                .rename(columns={'Container Count': '_total_containers'})
-            )
-            
-            # Concatenate all container numbers in each group
-            # Concatenate all container numbers if present
-            if 'Container Numbers' in working.columns:
-                def concat_and_dedupe_containers(values):
-                    """Concatenate container numbers and remove duplicates."""
-                    all_containers = []
-                    for v in values:
-                        if pd.notna(v) and str(v).strip():
-                            all_containers.extend([c.strip() for c in str(v).split(',') if c.strip()])
-                    # CRITICAL FIX: Deduplicate to prevent same container appearing multiple times
-                    unique_containers = list(dict.fromkeys(all_containers))
-                    return ', '.join(unique_containers)
-                
-                container_numbers = (
-                    working.groupby(group_cols)['Container Numbers']
-                    .apply(concat_and_dedupe_containers)
-                    .reset_index(name='_container_numbers')
-                )
-                cheapest_per_group = cheapest_per_group.merge(container_numbers, on=group_cols, how='left')
-                cheapest_per_group['Container Numbers'] = cheapest_per_group['_container_numbers'].fillna('')
-                
-                # Recalculate Container Count based on actual container IDs in the concatenated string
-                # This ensures Container Count matches the number of containers listed in Container Numbers
-                cheapest_per_group['_actual_container_count'] = cheapest_per_group['Container Numbers'].apply(count_containers)
-            
-            # Assign total containers to the cheapest carrier
-            cheapest_per_group = cheapest_per_group.merge(container_totals, on=group_cols, how='left')
-            
-            # Use the actual count from Container Numbers if available, otherwise use the sum
-            if 'Container Numbers' in working.columns and '_actual_container_count' in cheapest_per_group.columns:
-                # Use the corrected count
-                cheapest_per_group['Container Count'] = cheapest_per_group['_actual_container_count']
-            else:
-                cheapest_per_group['Container Count'] = cheapest_per_group['_total_containers'].fillna(0)
-            
-            # Calculate total cost using the cheapest carrier's rate
-            cheapest_per_group['Total Cost'] = (
-                cheapest_per_group[rate_cols['rate']].fillna(0) * 
-                cheapest_per_group['Container Count']
-            )
-            
-            # Calculate current total cost for comparison
-            current_cost_per_group = working.groupby(group_cols)[rate_cols['total_rate']].sum().reset_index()
-            current_cost_per_group = current_cost_per_group.rename(columns={rate_cols['total_rate']: '_current_total_cost'})
-            cheapest_per_group = cheapest_per_group.merge(current_cost_per_group, on=group_cols, how='left')
-            
-            # Calculate potential savings
-            cheapest_per_group['Potential Savings'] = (
-                cheapest_per_group['_current_total_cost'].fillna(0) - 
-                cheapest_per_group['Total Cost']
-            )
-            cheapest_per_group['Savings Percentage'] = cheapest_per_group.apply(
-                lambda row: (
-                    row['Potential Savings'] / row['_current_total_cost'] * 100
-                ) if row['_current_total_cost'] > 0 else 0,
-                axis=1
-            )
-            
-            # Clean up helper columns
-            for col in ['_rate_sort', '_carrier_sort', '_total_containers', '_container_numbers', '_current_total_cost', '_actual_container_count', '_summed_count']:
-                if col in cheapest_per_group.columns:
-                    cheapest_per_group = cheapest_per_group.drop(columns=col)
-            
-            display_data = cheapest_per_group
-        
-        # Select and rename columns for display
-        cols = group_cols.copy()
-        cols.insert(0, carrier_col)
-        if 'Ocean ETA' in display_data.columns:
-            cols.append('Ocean ETA')
-        if 'Container Numbers' in display_data.columns:
-            cols.append('Container Numbers')
-        cols.extend(['Container Count', rate_cols['rate'], 'Total Cost', 'Potential Savings', 'Savings Percentage'])
-        
-        # Add Missing_Rate indicator if it exists
-        if 'Missing_Rate' in display_data.columns:
-            cols.append('Missing_Rate')
-        
-        # Keep a full copy (all columns) for the CSV download
-        download_data = display_data.copy()
-        display_data = display_data[[c for c in cols if c in display_data.columns]].copy()
-        
-        # ADD CARRIER FLIPS COLUMN for Cheapest Cost scenario (consistent with other scenarios)
-        # Compare against the same baseline as other scenarios (unconstrained data)
-        cheapest_baseline = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
-        display_data = add_detailed_carrier_flips_column(display_data, cheapest_baseline, carrier_col=carrier_col)
-        download_data = add_detailed_carrier_flips_column(download_data, cheapest_baseline, carrier_col=carrier_col)
-        
-        # Rename column to just "Carrier Flips" for cleaner display
-        if 'Carrier Flips (Detailed)' in display_data.columns:
-            display_data.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
-        if 'Carrier Flips (Detailed)' in download_data.columns:
-            download_data.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
-        
-        display_data = display_data.rename(columns={
-            'Savings Percentage': 'Savings %',
-            carrier_col: 'NEW SCAC',
-            'Missing_Rate': '⚠️ No Rate'
-        }).sort_values('Potential Savings', ascending=False)
-        download_data = download_data.rename(columns={
-            'Savings Percentage': 'Savings %',
-            carrier_col: 'NEW SCAC',
-            'Missing_Rate': '⚠️ No Rate'
-        })
-        
-        # Calculate total cost from the display data
-        cheapest_cost = display_data['Total Cost'].sum() if 'Total Cost' in display_data.columns else 0
-        if has_constraints:
-            constrained_cost = constrained_data[rate_cols['total_rate']].sum()
-            total_cost = constrained_cost + cheapest_cost
-            cost_breakdown = f" (Constrained: ${constrained_cost:,.2f} + Unconstrained: ${cheapest_cost:,.2f})"
-        else:
-            total_cost = cheapest_cost
-            cost_breakdown = ""
-        
-        rate_type_label = st.session_state.get('rate_type', 'Base Rate')
-        desc = f"💰 Cheapest carrier per lane/week/category ({rate_type_label}) - Total: ${total_cost:,.2f}{cost_breakdown}"
-        filename = 'cheapest_cost.csv'
-        
-        # ADD BACK MISSING RATE ROWS for Cheapest Cost scenario to maintain consistent container counts
-        if len(missing_rate_rows) > 0:
-            display_data = pd.concat([display_data, missing_rate_rows], ignore_index=True)
-            download_data = pd.concat([download_data, missing_rate_rows], ignore_index=True)
-        
+    # ---- Render table ----
     st.info(desc)
-    # Format columns for display - use dynamic rate columns
-    rate_cols = get_rate_columns()
-    display_formatted = display_data.copy()
+    display_formatted = _format_display(display_data, rate_cols)
+    st.dataframe(display_formatted, use_container_width=True, hide_index=True)
+
+    # Metrics row
+    _render_table_metrics(display_data, has_constraints, rate_cols)
+
+    # Downloads
+    csv = download_data.to_csv(index=False)
+    label_suffix = " (Unconstrained)" if has_constraints else ""
+    download_filename = f"unconstrained_{filename}" if has_constraints else filename
+    st.download_button(label=f"📥 Download {selected}{label_suffix}", data=csv,
+                       file_name=download_filename, mime='text/csv', use_container_width=True)
+    if has_constraints and constrained_download_data is not None:
+        st.download_button(label="📥 Download Constrained Allocations",
+                           data=constrained_download_data.to_csv(index=False),
+                           file_name='constrained_allocations.csv', mime='text/csv',
+                           use_container_width=True, key='download_constrained')
+
+    # Peel pile
+    show_peel_pile_analysis(final_filtered_data)
+
+
+# ---------------------------------------------------------------------------
+# show_detailed_analysis_table helpers (private)
+# ---------------------------------------------------------------------------
+
+def _render_constrained_section(constrained_data, unconstrained_data,
+                                final_filtered_data, rate_cols, carrier_col, selected):
+    """Render the constrained-allocations table. Returns download_data."""
+    if 'Container Numbers' in constrained_data.columns:
+        constrained_containers = constrained_data['Container Numbers'].apply(count_containers).sum()
+    else:
+        constrained_containers = constrained_data['Container Count'].sum()
+    if 'Container Numbers' in unconstrained_data.columns:
+        unconstrained_containers = unconstrained_data['Container Numbers'].apply(count_containers).sum()
+    else:
+        unconstrained_containers = unconstrained_data['Container Count'].sum()
+
+    st.info(f"""
+    🔒 **Constraints Active:** 
+    - {constrained_containers:,} containers locked by constraints
+    - {unconstrained_containers:,} containers available for optimization
+    - Total: {constrained_containers + unconstrained_containers:,} containers
     
-    # Format the active rate column (either Base Rate or CPC)
+    ℹ️ **How this works:**
+    - The **Constrained Allocations** table below shows containers that are locked and will NOT be changed by scenarios
+    - The **Unconstrained Data** table shows containers that WILL be manipulated based on your selected scenario
+    """)
+
+    st.markdown("---")
+    st.markdown("## 🔒 Constrained Allocations")
+    st.markdown("**✋ These allocations are LOCKED and NOT affected by scenario selection**")
+
+    constrained_display = constrained_data.copy()
+    if 'Container Numbers' in constrained_display.columns:
+        constrained_display['Container Count'] = constrained_display['Container Numbers'].apply(count_containers)
+
+    constrained_display = add_detailed_carrier_flips_column(constrained_display, final_filtered_data, carrier_col='Dray SCAC(FL)')
+    if 'Carrier Flips (Detailed)' in constrained_display.columns:
+        constrained_display.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
+
+    constrained_download_data = constrained_display.copy()
+
+    # Build display columns
+    cols_c = ['Discharged Port']
+    for col in ['Category', 'SSL', 'Vessel']:
+        if col in constrained_display.columns:
+            cols_c.append(col)
+    cols_c.extend([carrier_col, 'Lane', 'Facility'])
+    for col in ['Terminal', 'Week Number', 'Ocean ETA', 'Container Numbers', 'Carrier Flips']:
+        if col in constrained_display.columns:
+            cols_c.append(col)
+    cols_c.append('Container Count')
+    for col in [rate_cols['rate'], rate_cols['total_rate']]:
+        if col in constrained_display.columns:
+            cols_c.append(col)
+    for col in ['Constraint_Priority', 'Constraint_Method', 'Constraint_Description']:
+        if col in constrained_display.columns:
+            cols_c.append(col)
+
+    cols_c = [c for c in cols_c if c in constrained_display.columns]
+    constrained_display = constrained_display[cols_c].copy()
+
+    rename_dict_c = {rate_cols['total_rate']: 'Total Cost'}
+    if 'Constraint_Priority' in constrained_display.columns:
+        rename_dict_c['Constraint_Priority'] = '🎯 Priority'
+    if 'Constraint_Method' in constrained_display.columns:
+        rename_dict_c['Constraint_Method'] = '📐 Method'
+    if 'Constraint_Description' in constrained_display.columns:
+        rename_dict_c['Constraint_Description'] = '📝 Description'
+    if carrier_col == 'Dray SCAC(FL)':
+        rename_dict_c['Dray SCAC(FL)'] = 'NEW SCAC'
+    constrained_display = constrained_display.rename(columns=rename_dict_c)
+
+    if rate_cols['rate'] in constrained_display.columns:
+        constrained_display[rate_cols['rate']] = constrained_display[rate_cols['rate']].apply(format_currency)
+    if 'Total Cost' in constrained_display.columns:
+        constrained_display['Total Cost'] = constrained_display['Total Cost'].apply(format_currency)
+
+    st.dataframe(constrained_display, use_container_width=True, hide_index=True)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("📊 Constrained Records", len(constrained_data))
+    col2.metric("📦 Constrained Containers", f"{constrained_containers:,}")
+    col3.metric("💰 Constrained Cost", f"${constrained_data[rate_cols['total_rate']].sum():,.2f}")
+
+    st.markdown("---")
+    st.markdown("---")
+    st.markdown(f"## 📋 Unconstrained Data - {selected}")
+    st.markdown(f"**🔄 These containers ARE manipulated by the '{selected}' scenario**")
+
+    return constrained_download_data
+
+
+def _build_columns_and_description(display_data, selected, carrier_col, rate_cols,
+                                    metrics, has_constraints, constrained_data,
+                                    unconstrained_data, performance_reallocated,
+                                    performance_groups_impacted):
+    """Pick display columns, rename, build description string. Returns (display_data, download_data, desc, filename)."""
+    cols = ['Discharged Port']
+    for col in ['Category', 'SSL', 'Vessel']:
+        if col in display_data.columns:
+            cols.append(col)
+    cols.extend([carrier_col, 'Lane', 'Facility'])
+    for col in ['Terminal', 'Week Number', 'Ocean ETA', 'Container Numbers', 'Carrier Flips']:
+        if col in display_data.columns:
+            cols.append(col)
+    cols.append('Container Count')
+    for col in [rate_cols['rate'], rate_cols['total_rate']]:
+        if col in display_data.columns:
+            cols.append(col)
+    if 'Performance_Score' in display_data.columns:
+        cols.append('Performance_Score')
+    if 'Missing_Rate' in display_data.columns:
+        cols.append('Missing_Rate')
+    if 'Allocation Strategy' in display_data.columns:
+        cols.append('Allocation Strategy')
+
+    # Scenario-specific columns
+    if selected == 'Optimized':
+        for col in ['Carrier_Rank', 'Historical_Allocation_Pct', 'New_Allocation_Pct',
+                     'Volume_Change', 'Growth_Constrained', 'Allocation_Notes']:
+            if col in display_data.columns:
+                cols.append(col)
+    if selected == 'Performance':
+        for col in ['Original Carrier Mix', 'Original Carrier Containers', 'Reallocated Containers',
+                     'Original Primary Carrier', 'Original Primary Volume', 'Original Primary Performance',
+                     'Carrier Change']:
+            if col in display_data.columns:
+                cols.append(col)
+
+    cols = [c for c in cols if c in display_data.columns]
+    download_data = display_data.copy()
+    display_data = display_data[cols].copy()
+
+    # Sort
+    if selected == 'Performance' and 'Reallocated Containers' in display_data.columns:
+        display_data = display_data.sort_values('Reallocated Containers', ascending=False)
+    elif selected == 'Optimized' and 'Carrier_Rank' in display_data.columns:
+        display_data = display_data.sort_values('Carrier_Rank', ascending=True)
+
+    # Calculate total cost
+    if selected in ('Performance', 'Optimized') and rate_cols['total_rate'] in display_data.columns:
+        scenario_cost = display_data[rate_cols['total_rate']].sum()
+        if has_constraints:
+            c_cost = constrained_data[rate_cols['total_rate']].sum()
+            total_cost = c_cost + scenario_cost
+            cost_breakdown = f" (Constrained: ${c_cost:,.2f} + Unconstrained: ${scenario_cost:,.2f})"
+        else:
+            total_cost = scenario_cost
+            cost_breakdown = ""
+    else:
+        if has_constraints:
+            c_cost = constrained_data[rate_cols['total_rate']].sum()
+            u_cost = unconstrained_data[rate_cols['total_rate']].sum()
+            total_cost = c_cost + u_cost
+            cost_breakdown = f" (Constrained: ${c_cost:,.2f} + Unconstrained: ${u_cost:,.2f})"
+        else:
+            total_cost = metrics['total_cost']
+            cost_breakdown = ""
+
+    # Rename columns
+    rename_dict = {
+        rate_cols['total_rate']: 'Total Cost',
+        'Performance_Score': 'Performance',
+        'Original Primary Performance': 'Original Lead Performance',
+    }
+    if carrier_col in display_data.columns:
+        rename_dict[carrier_col] = 'NEW SCAC'
+    if 'Missing_Rate' in display_data.columns:
+        rename_dict['Missing_Rate'] = '⚠️ No Rate'
+    if 'Allocation Strategy' in display_data.columns:
+        rename_dict['Allocation Strategy'] = 'Strategy'
+    # Performance renames
+    for old, new in [('Original Carrier Containers', 'Volume Before Reallocation'),
+                     ('Reallocated Containers', 'Containers Reallocated'),
+                     ('Original Primary Carrier', 'Original Lead Carrier'),
+                     ('Original Primary Volume', 'Original Lead Volume')]:
+        if old in display_data.columns:
+            rename_dict[old] = new
+    # Optimized renames
+    for old, new in [('Carrier_Rank', '🏅 Rank'), ('Historical_Allocation_Pct', '📊 Historical %'),
+                     ('New_Allocation_Pct', '🆕 New %'), ('Volume_Change', '📈 Volume Change'),
+                     ('Growth_Constrained', '🔒 Capped'), ('Allocation_Notes', '📝 Allocation Details')]:
+        if old in display_data.columns:
+            rename_dict[old] = new
+
+    display_data = display_data.rename(columns=rename_dict)
+    download_data = download_data.rename(columns=rename_dict)
+
+    # Build description
+    rate_type_label = st.session_state.get('rate_type', 'Base Rate')
+    reallocation_note = _reallocation_note(performance_reallocated, performance_groups_impacted)
+
+    if selected == 'Optimized':
+        cost_pct = st.session_state.get('opt_cost_weight', 70)
+        perf_pct = st.session_state.get('opt_performance_weight', 30)
+        growth_pct = st.session_state.get('opt_max_growth_pct', 30)
+        desc = (f"🧮 Optimized with LP + Historical Constraints ({rate_type_label}) - "
+                f"{cost_pct}% cost, {perf_pct}% performance, max {growth_pct}% growth - "
+                f"Total: ${total_cost:,.2f}{cost_breakdown}{reallocation_note}")
+        filename = 'optimized_cascading.csv'
+    elif selected == 'Performance':
+        desc = (f"🏆 Highest performance carrier scenario ({rate_type_label}) - "
+                f"Total: ${total_cost:,.2f}{cost_breakdown}{reallocation_note}")
+        filename = 'performance.csv'
+    else:
+        desc = f"📊 Your current selections ({rate_type_label}) - Total: ${total_cost:,.2f}{cost_breakdown}"
+        filename = 'current_selection.csv'
+
+    return display_data, download_data, desc, filename
+
+
+def _reallocation_note(reallocated, groups_impacted):
+    if not reallocated:
+        return ""
+    parts = [f"{reallocated:,} containers reallocated"]
+    if groups_impacted:
+        label = "lane" if groups_impacted == 1 else "lanes"
+        parts.append(f"across {groups_impacted} {label}")
+    return " • " + " | ".join(parts)
+
+
+def _format_display(display_data, rate_cols):
+    """Format columns for human-readable display."""
+    display_formatted = display_data.copy()
     if rate_cols['rate'] in display_formatted.columns:
         display_formatted[rate_cols['rate']] = display_formatted[rate_cols['rate']].apply(format_currency)
-    
     if 'Total Cost' in display_formatted.columns:
         display_formatted['Total Cost'] = display_formatted['Total Cost'].apply(format_currency)
     if 'Performance' in display_formatted.columns:
@@ -1417,699 +661,153 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             display_formatted[col] = display_formatted[col].apply(
                 lambda v: f"{int(n):,}" if (n := safe_numeric(v)) != 0 else "0"
             )
-    
-    # Show table
-    st.dataframe(display_formatted, use_container_width=True, hide_index=True)
-    
-    # Metrics (use correct container counts from displayed data)
+    return display_formatted
+
+
+def _render_table_metrics(display_data, has_constraints, rate_cols):
+    """Show the 3-column metrics row below the table."""
     col1, col2, col3 = st.columns(3)
-    
-    # Always show container count from display_data to match what's shown in the table
-    # Round to integer to avoid decimal display
-    total_displayed_containers = int(round(display_data['Container Count'].sum()))
-    
-    # Calculate actual cost from the displayed data (includes both optimized/modified rows AND missing-rate rows)
-    rate_cols = get_rate_columns()
+    total_containers = int(round(display_data['Container Count'].sum()))
     if 'Total Cost' in display_data.columns:
-        # Already renamed - convert back to calculate
-        actual_displayed_cost = display_data['Total Cost'].apply(lambda x: float(str(x).replace('$', '').replace(',', '')) if pd.notna(x) and x != 'N/A' else 0).sum()
+        actual_cost = display_data['Total Cost'].apply(
+            lambda x: float(str(x).replace('$', '').replace(',', '')) if pd.notna(x) and x != 'N/A' else 0
+        ).sum()
     elif rate_cols['total_rate'] in display_data.columns:
-        actual_displayed_cost = display_data[rate_cols['total_rate']].sum()
+        actual_cost = display_data[rate_cols['total_rate']].sum()
     else:
-        actual_displayed_cost = 0
-    
-    if has_constraints:
-        col1.metric("📊 Unconstrained Records", len(display_data))
-        col2.metric("📦 Unconstrained Containers", f"{total_displayed_containers:,}")
-        col3.metric("💰 Unconstrained Cost", f"${actual_displayed_cost:,.2f}")
-    else:
-        col1.metric("📊 Records", len(display_data))
-        col2.metric("📦 Total Containers", f"{total_displayed_containers:,}")
-        col3.metric("💰 Total Cost", f"${actual_displayed_cost:,.2f}")
-    
-    # Download - use full data (all columns) instead of trimmed display data
-    csv = download_data.to_csv(index=False)
-    label_suffix = " (Unconstrained)" if has_constraints else ""
-    download_filename = f"unconstrained_{filename}" if has_constraints else filename
-    st.download_button(
-        label=f"📥 Download {selected}{label_suffix}",
-        data=csv,
-        file_name=download_filename,
-        mime='text/csv',
-        use_container_width=True
-    )
-    
-    # Option to download constrained data separately
-    if has_constraints:
-        constrained_csv = constrained_download_data.to_csv(index=False)
-        st.download_button(
-            label=f"📥 Download Constrained Allocations",
-            data=constrained_csv,
-            file_name='constrained_allocations.csv',
-            mime='text/csv',
-            use_container_width=True,
-            key='download_constrained'
-        )
-    
-    # ==================== PEEL PILE ANALYSIS ====================
-    # Show SSL containers that qualify as Peel Pile (30+ containers)
-    show_peel_pile_analysis(final_filtered_data)
+        actual_cost = 0
+
+    label = "Unconstrained" if has_constraints else ""
+    col1.metric(f"📊 {label} Records".strip(), len(display_data))
+    col2.metric(f"📦 {label} Containers".strip(), f"{total_containers:,}")
+    col3.metric(f"💰 {label} Cost".strip(), f"${actual_cost:,.2f}")
 
 
-def show_peel_pile_analysis(data):
-    """
-    Show Peel Pile Analysis table and allocation UI.
-    This is the display-only portion. The actual constraint application
-    happens via apply_peel_pile_as_constraints() in the dashboard pipeline.
-    
-    Args:
-        data: DataFrame containing container data with Vessel column (should be filtered data)
-    """
-    if 'Vessel' not in data.columns:
-        return  # Vessel column not available, skip this analysis
-    
-    st.markdown("---")
-    section_header("📦 Peel Pile Analysis")
-    
-    # Initialize peel pile allocations in session state
-    if 'peel_pile_allocations' not in st.session_state:
-        st.session_state.peel_pile_allocations = {}
-    
-    # Calculate container count per Vessel
-    if 'Container Numbers' in data.columns:
-        data_copy = data.copy()
-        data_copy['_container_count'] = data_copy['Container Numbers'].apply(count_containers)
-    else:
-        data_copy = data.copy()
-        data_copy['_container_count'] = data_copy['Container Count']
-    
-    # Build grouping columns: Vessel + Week + Port + Terminal
-    group_cols = ['Vessel']
-    if 'Category' in data_copy.columns:
-        group_cols.append('Category')
-    if 'Week Number' in data_copy.columns:
-        group_cols.append('Week Number')
-    if 'Discharged Port' in data_copy.columns:
-        group_cols.append('Discharged Port')
-    if 'Terminal' in data_copy.columns:
-        group_cols.append('Terminal')
-    
-    # Group by Vessel + Week + Port + Terminal and sum containers
-    vessel_summary = data_copy.groupby(group_cols).agg({
-        '_container_count': 'sum',
-    }).reset_index()
-    vessel_summary = vessel_summary.rename(columns={'_container_count': 'Container Count'})
-    
-    # Filter for peel pile (30+ containers)
-    peel_pile = vessel_summary[vessel_summary['Container Count'] >= 30].copy()
-    peel_pile = peel_pile.sort_values('Container Count', ascending=False)
-    
-    if len(peel_pile) == 0:
-        st.info("ℹ️ No Vessel groups meet the peel pile threshold (30+ containers per Week/Port).")
-        return
-    
-    # Get available carriers from the data
-    carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in data.columns else 'Carrier'
-    all_carriers = sorted([c for c in data[carrier_col].dropna().unique() if str(c).strip()])
-    
-    # Add "Assigned Carrier" column to display based on session state
-    display_cols = group_cols + ['Container Count']
-    display_peel = peel_pile[display_cols].copy()
-    
-    # Build allocation key for each row and add assigned carrier info
-    assigned_carriers = []
-    split_info = []
-    for _, row in peel_pile.iterrows():
-        key = _peel_pile_key(row, group_cols)
-        assigned = st.session_state.peel_pile_allocations.get(key, None)
-        # Normalize legacy single-carrier strings to list
-        if isinstance(assigned, str):
-            assigned = [assigned]
-        if assigned and len(assigned) > 0:
-            assigned_carriers.append(', '.join(assigned))
-            total = int(row['Container Count'])
-            n = len(assigned)
-            per_carrier = total // n
-            remainder = total % n
-            if n == 1:
-                split_info.append(f"All {total}")
-            elif remainder == 0:
-                split_info.append(f"{per_carrier} each ({n}-way)")
-            else:
-                # First {remainder} carriers get per_carrier+1, rest get per_carrier
-                split_info.append(f"{per_carrier+1}/{per_carrier} ({n}-way)")
-        else:
-            assigned_carriers.append('—')
-            split_info.append('—')
-    display_peel['Assigned Carrier'] = assigned_carriers
-    display_peel['Split'] = split_info
-    
-    # Format container count for display
-    display_fmt = display_peel.copy()
-    display_fmt['Container Count'] = display_fmt['Container Count'].apply(lambda x: f"{x:,.0f}")
-    
-    st.dataframe(display_fmt, use_container_width=True, hide_index=True)
-    
-    # Show how many are actively constraining
-    active_count = sum(1 for v in st.session_state.peel_pile_allocations.values() if v and (len(v) > 0 if isinstance(v, list) else True))
-    if active_count > 0:
-        st.success(f"🔒 {active_count} peel pile allocation(s) active — these are applied as constraints in the analysis above.")
-    
-    # ==================== ALLOCATION UI (fragment — reruns independently) ====================
-    @st.fragment
-    def _peel_pile_allocation_ui():
-        st.markdown("#### 🚛 Allocate Peel Pile to Carrier(s)")
-        st.caption("Pick a peel pile group and one or more carriers, then click 'Add to Queue'. Containers are split equally across selected carriers. Queue up as many as you need, then click 'Apply All' to lock them as constraints.")
-        
-        # Initialize pending queue in session state (not yet applied)
-        if 'peel_pile_pending' not in st.session_state:
-            st.session_state.peel_pile_pending = {}
-        
-        # Build human-readable labels and keys for each peel pile row
-        _label_map = {
-            'Vessel': lambda r: f"Vessel: {r['Vessel']}",
-            'Category': lambda r: f"Cat: {r['Category']}",
-            'Week Number': lambda r: f"Wk {int(r['Week Number'])}",
-            'Discharged Port': lambda r: f"Port: {r['Discharged Port']}",
-            'Terminal': lambda r: f"Terminal: {r['Terminal']}",
-        }
-        peel_labels_inner = []
-        peel_keys_inner = []
-        for _, row in peel_pile.iterrows():
-            parts = [_label_map[col](row) for col in group_cols if col in _label_map]
-            parts.append(f"({int(row['Container Count'])} containers)")
-            peel_labels_inner.append(" | ".join(parts))
-            peel_keys_inner.append(_peel_pile_key(row, group_cols))
-        
-        # Dropdowns
-        col1, col2 = st.columns([3, 2])
-        
-        with col1:
-            selected_idx = st.selectbox(
-                "Select Peel Pile Group",
-                range(len(peel_labels_inner)),
-                format_func=lambda i: peel_labels_inner[i],
-                key="peel_pile_select"
-            )
-        
-        with col2:
-            selected_carriers = st.multiselect(
-                "Assign to Carrier(s) (SCAC)",
-                all_carriers,
-                key="peel_pile_carrier"
-            )
-        
-        # Add to Queue — only reruns this fragment, not the full page
-        if st.button("➕ Add to Queue", use_container_width=True, key="peel_pile_queue"):
-            if selected_carriers:
-                key = peel_keys_inner[selected_idx]
-                st.session_state.peel_pile_pending[key] = selected_carriers
-            else:
-                st.warning("⚠️ Select at least one carrier.")
-        
-        # Show the pending queue
-        combined_queue = dict(st.session_state.peel_pile_allocations)
-        combined_queue.update(st.session_state.peel_pile_pending)
-        
-        if combined_queue:
-            st.markdown("**📋 Queued Assignments:**")
-            queue_rows = []
-            for key, carriers in combined_queue.items():
-                # Normalize legacy single-carrier strings to list
-                if isinstance(carriers, str):
-                    carriers = [carriers]
-                label = None
-                for k, lbl in zip(peel_keys_inner, peel_labels_inner):
-                    if k == key:
-                        label = lbl
-                        break
-                if label is None:
-                    label = ' | '.join(str(v) for v in key)
-                is_new = key in st.session_state.peel_pile_pending
-                is_existing = key in st.session_state.peel_pile_allocations
-                if is_new and not is_existing:
-                    status = '🆕 New'
-                elif is_new and is_existing and st.session_state.peel_pile_allocations.get(key) != carriers:
-                    status = '✏️ Changed'
-                else:
-                    status = '✅ Applied'
-                carrier_display = ', '.join(carriers)
-                split_label = f"Equal {len(carriers)}-way" if len(carriers) > 1 else "100%"
-                queue_rows.append({'Peel Pile Group': label, 'Carriers': carrier_display, 'Split': split_label, 'Status': status})
-            
-            queue_df = pd.DataFrame(queue_rows)
-            st.dataframe(queue_df, use_container_width=True, hide_index=True)
-        
-        # Action buttons
-        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
-        
-        with btn_col1:
-            if st.button("✅ Apply All", type="primary", use_container_width=True, key="peel_pile_apply"):
-                st.session_state.peel_pile_allocations.update(st.session_state.peel_pile_pending)
-                st.session_state.peel_pile_pending = {}
-                st.rerun()  # full rerun to recalculate pipeline
-        
-        with btn_col2:
-            if st.button("🗑️ Clear Queue", use_container_width=True, key="peel_pile_clear_queue"):
-                st.session_state.peel_pile_pending = {}
-                st.rerun(scope="fragment")
-        
-        with btn_col3:
-            if st.button("🗑️ Clear All", use_container_width=True, key="peel_pile_clear_all"):
-                st.session_state.peel_pile_allocations = {}
-                st.session_state.peel_pile_pending = {}
-                st.rerun()  # full rerun to recalculate pipeline
-    
-    _peel_pile_allocation_ui()
-    
-    # ==================== EXPORT ====================
-    export_peel = peel_pile.copy()
-    assigned_export = []
-    split_export = []
-    for _, row in peel_pile.iterrows():
-        key = _peel_pile_key(row, group_cols)
-        carriers = st.session_state.peel_pile_allocations.get(key, None)
-        if isinstance(carriers, str):
-            carriers = [carriers]
-        if carriers and len(carriers) > 0:
-            assigned_export.append(', '.join(carriers))
-            total = int(row['Container Count'])
-            n = len(carriers)
-            per_carrier = total // n
-            remainder = total % n
-            if n == 1:
-                split_export.append(f"All {total}")
-            elif remainder == 0:
-                split_export.append(f"{per_carrier} each ({n}-way)")
-            else:
-                split_export.append(f"{per_carrier+1}/{per_carrier} ({n}-way)")
-        else:
-            assigned_export.append('')
-            split_export.append('')
-    export_peel['Assigned Carriers'] = assigned_export
-    export_peel['Split'] = split_export
-    
-    csv = export_peel.to_csv(index=False)
-    st.download_button(
-        label="📥 Download Peel Pile",
-        data=csv,
-        file_name='peel_pile.csv',
-        mime='text/csv',
-        use_container_width=True
-    )
-
-
-def apply_peel_pile_as_constraints(filtered_data, constrained_data, unconstrained_data, constraint_summary):
-    """
-    Apply peel pile allocations from session state as constraints.
-    
-    Supports splitting a peel pile group across multiple carriers with equal split.
-    Matching rows are divided evenly among the selected carriers. Any remainder
-    rows (from integer division) stay in the unconstrained pool.
-    
-    This mirrors the constraint processor behavior:
-    - Matching rows are moved from unconstrained_data to constrained_data
-    - The carrier on those rows is reassigned to the chosen SCAC(s)
-    - Each carrier is added to max_constrained_carriers so optimization skips it
-    
-    Args:
-        filtered_data: Full filtered dataset (for reference)
-        constrained_data: Existing constrained DataFrame (may be empty)
-        unconstrained_data: Existing unconstrained DataFrame
-        constraint_summary: Existing constraint summary list
-    
-    Returns:
-        tuple: (constrained_data, unconstrained_data, constraint_summary, peel_pile_carriers)
-               peel_pile_carriers is a set of carrier names that were assigned peel pile volume
-    """
-    peel_pile_allocations = st.session_state.get('peel_pile_allocations', {})
-    peel_pile_carriers = set()
-    
-    if not peel_pile_allocations:
-        return constrained_data, unconstrained_data, constraint_summary, peel_pile_carriers
-    
-    carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in unconstrained_data.columns else 'Carrier'
-    
-    # Work on copies
-    remaining = unconstrained_data.copy()
-    new_constrained_rows = []
-    
-    for alloc_key, target_carriers in peel_pile_allocations.items():
-        if not target_carriers:
-            continue
-        
-        # Normalize legacy single-carrier strings to list
-        if isinstance(target_carriers, str):
-            target_carriers = [target_carriers]
-        
-        # Parse the key back into filter values
-        # New format: ((col_name, value), (col_name, value), ...)
-        # Legacy format: (value, value, ...) — plain strings, positional order
-        key_pairs = list(alloc_key)
-        
-        # Detect legacy keys: if the first element is a string instead of a tuple
-        if key_pairs and isinstance(key_pairs[0], str):
-            # Legacy positional format — map to named pairs using the old column order
-            _legacy_cols = ['Vessel', 'Week Number', 'Discharged Port', 'Terminal']
-            key_pairs = [(col, val) for col, val in zip(_legacy_cols[:len(key_pairs)], key_pairs)]
-        
-        key_values = [v for _, v in key_pairs]
-        
-        # Build mask to find matching rows in unconstrained data
-        mask = pd.Series(True, index=remaining.index)
-        
-        for col_name, col_value in key_pairs:
-            if col_name not in remaining.columns:
-                continue
-            if col_name == 'Week Number':
-                try:
-                    week_val = float(col_value)
-                    mask &= remaining['Week Number'] == week_val
-                except (ValueError, TypeError):
-                    mask &= remaining['Week Number'].astype(str) == col_value
-            else:
-                mask &= remaining[col_name].astype(str) == col_value
-        
-        matched_rows = remaining[mask]
-        
-        if len(matched_rows) == 0:
-            continue
-        
-        num_carriers = len(target_carriers)
-        total_rows = len(matched_rows)
-        base_per_carrier = total_rows // num_carriers
-        remainder_count = total_rows % num_carriers
-        
-        # Build description parts for constraint summary
-        _short_names = {'Vessel': 'Vessel', 'Category': 'Cat', 'Week Number': 'Wk', 'Discharged Port': 'Port', 'Terminal': 'Terminal'}
-        desc_parts = [f"{_short_names.get(c, c)}={v}" for c, v in key_pairs]
-        
-        # Split matched rows across carriers. First {remainder_count} carriers
-        # each get one extra row so all containers are assigned.
-        matched_indices = matched_rows.index.tolist()
-        assigned_indices = set()
-        offset = 0
-        
-        for i, carrier in enumerate(target_carriers):
-            count_for_carrier = base_per_carrier + (1 if i < remainder_count else 0)
-            carrier_indices = matched_indices[offset:offset + count_for_carrier]
-            offset += count_for_carrier
-            
-            if not carrier_indices:
-                continue
-            
-            carrier_rows = remaining.loc[carrier_indices]
-            
-            # Move these rows to constrained, reassigning carrier
-            for idx in carrier_indices:
-                row = remaining.loc[idx]
-                constrained_row = row.copy()
-                constrained_row[carrier_col] = carrier
-                if 'Carrier' in constrained_row.index and carrier_col != 'Carrier':
-                    constrained_row['Carrier'] = carrier
-                
-                # The row keeps its existing rate — the user is choosing the carrier, not the rate
-                split_desc = f" (equal split {num_carriers}-way)" if num_carriers > 1 else ""
-                constrained_row['Constraint_Description'] = f"Peel Pile: {key_values[0]} → {carrier}{split_desc}"
-                new_constrained_rows.append(constrained_row)
-                assigned_indices.add(idx)
-            
-            container_count = carrier_rows['Container Count'].sum()
-            peel_pile_carriers.add(carrier)
-            
-            # Add per-carrier constraint summary entry
-            if num_carriers > 1:
-                method_desc = f'Equal Split {num_carriers}-way'
-                carrier_desc = f"Peel Pile: {', '.join(desc_parts)} → {carrier} ({i+1}/{num_carriers})"
-            else:
-                method_desc = '100% Allocation'
-                carrier_desc = f"Peel Pile: {', '.join(desc_parts)} → {carrier}"
-            
-            constraint_summary.append({
-                'priority': 'Peel Pile',
-                'description': carrier_desc,
-                'method': method_desc,
-                'status': 'Applied',
-                'containers_allocated': int(container_count),
-                'target_containers': int(container_count),
-            })
-        
-        # Remove all assigned rows from remaining (all containers are assigned)
-        remaining = remaining.drop(index=list(assigned_indices))
-    
-    # Merge new constrained rows with existing constrained data
-    if new_constrained_rows:
-        new_constrained_df = pd.DataFrame(new_constrained_rows)
-        if len(constrained_data) > 0:
-            constrained_data = pd.concat([constrained_data, new_constrained_df], ignore_index=True)
-        else:
-            constrained_data = new_constrained_df
-    
-    return constrained_data, remaining, constraint_summary, peel_pile_carriers
-
-
-def _peel_pile_key(row, group_cols):
-    """Build a hashable key for a peel pile row from its group column values.
-    
-    Returns a tuple of (column_name, value) pairs so the apply function
-    can match columns dynamically without positional assumptions.
-    """
-    return tuple((col, str(row.get(col, ''))) for col in group_cols)
-
+# ==================== SMALL DISPLAY FUNCTIONS ====================
 
 def show_top_savings_opportunities(final_filtered_data):
-    """Show top 10 savings opportunities - DEPRECATED
-    
-    This function has been deprecated as it relied on pre-calculated 
-    'Cheapest Base Rate' and 'Potential Savings' columns that are 
-    no longer generated in the data processing pipeline.
-    """
+    """DEPRECATED — use 'Cheapest Cost' scenario in the Detailed Analysis Table."""
     st.info("💡 Top Savings Opportunities feature has been deprecated. Use the 'Cheapest Cost' scenario in the Detailed Analysis Table to see savings opportunities.")
 
+
 def show_complete_data_export(final_filtered_data):
-    """Complete data export section"""
+    """Complete data export section."""
     section_header("📄 Complete Data Export")
-    
     if len(final_filtered_data) > 0:
         csv = final_filtered_data.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Complete Data",
-            data=csv,
-            file_name='comprehensive_data.csv',
-            mime='text/csv',
-            use_container_width=True
-        )
+        st.download_button(label="📥 Download Complete Data", data=csv,
+                           file_name='comprehensive_data.csv', mime='text/csv', use_container_width=True)
+
 
 def show_performance_score_analysis(final_filtered_data):
-    """Show performance score analysis and distribution"""
+    """Show performance score analysis and distribution."""
     if 'Performance_Score' not in final_filtered_data.columns:
         return
-    
     section_header("📈 Performance Score Analysis")
-    
     perf_data = final_filtered_data[final_filtered_data['Performance_Score'].notna()].copy()
-    
     if len(perf_data) == 0:
         st.info("No performance data available for analysis.")
         return
-    
     col1, col2, col3 = st.columns(3)
-    
     with col1:
         st.metric("📊 Average Performance", f"{perf_data['Performance_Score'].mean():.1%}")
     with col2:
         st.metric("⬇️ Lowest Performance", f"{perf_data['Performance_Score'].min():.1%}")
     with col3:
         st.metric("⬆️ Highest Performance", f"{perf_data['Performance_Score'].max():.1%}")
-    
     st.subheader("Performance by Carrier")
     carrier_perf = perf_data.groupby('Dray SCAC(FL)').agg({
         'Performance_Score': ['mean', 'min', 'max', 'count'],
         'Container Count': 'sum'
     }).round(3)
-    
     carrier_perf.columns = ['Avg Performance', 'Min Performance', 'Max Performance', 'Records', 'Total Containers']
     carrier_perf = carrier_perf.sort_values('Avg Performance', ascending=False)
-    
     for col in ['Avg Performance', 'Min Performance', 'Max Performance']:
         carrier_perf[col] = carrier_perf[col].apply(lambda x: f"{x:.1%}")
-    
     st.dataframe(carrier_perf, use_container_width=True)
 
+
 def show_carrier_performance_matrix(final_filtered_data):
-    """Show carrier performance matrix"""
+    """Show carrier performance matrix."""
     if 'Performance_Score' not in final_filtered_data.columns:
         return
-    
     section_header("🎯 Carrier Performance Matrix")
-    
     perf_data = final_filtered_data[final_filtered_data['Performance_Score'].notna()].copy()
-    
     if len(perf_data) == 0:
         st.info("No performance data available for matrix analysis.")
         return
-    
     matrix_data = perf_data.groupby(['Dray SCAC(FL)', 'Lane']).agg({
-        'Performance_Score': 'mean',
-        'Base Rate': 'mean'
+        'Performance_Score': 'mean', 'Base Rate': 'mean'
     }).reset_index()
-    
     perf_matrix = matrix_data.pivot(index='Dray SCAC(FL)', columns='Lane', values='Performance_Score')
-    
     st.subheader("Performance Score Matrix (by Carrier & Lane)")
     st.dataframe(perf_matrix.applymap(lambda x: f"{x:.1%}" if pd.notna(x) else "-"), use_container_width=True)
-    
     rate_matrix = matrix_data.pivot(index='Dray SCAC(FL)', columns='Lane', values='Base Rate')
-    
     st.subheader("Average Rate Matrix (by Carrier & Lane)")
     st.dataframe(rate_matrix.applymap(lambda x: f"${x:,.2f}" if pd.notna(x) else "-"), use_container_width=True)
 
 
 def show_container_movement_summary(current_data, baseline_data, carrier_col='Dray SCAC(FL)'):
-    """
-    Display comprehensive summary of container movements between carriers.
-    
-    Shows:
-    - Total containers kept vs flipped
-    - Top carrier-to-carrier flows
-    - Visual breakdown of movements
-    
-    Parameters:
-    -----------
-    current_data : pd.DataFrame
-        Current scenario data
-    baseline_data : pd.DataFrame
-        Original baseline data
-    carrier_col : str
-        Column name for carrier identification
-    """
+    """Display comprehensive summary of container movements between carriers."""
     if baseline_data is None or baseline_data.empty:
         return
-    
     if 'Container Numbers' not in baseline_data.columns:
         st.info("ℹ️ Container-level tracking not available. Upload data with 'Container Numbers' column for detailed tracing.")
         return
-    
+
     section_header("🔄 Container Movement Analysis")
-    
-    # Get movement summary
     summary = get_container_movement_summary(current_data, baseline_data, carrier_col)
-    
     if 'error' in summary:
         st.warning(f"⚠️ {summary['error']}")
         return
-    
-    # Display overview metrics
+
     st.subheader("📊 Movement Overview")
     col1, col2, col3, col4 = st.columns(4)
-    
     with col1:
-        st.metric(
-            "Total Containers",
-            f"{summary['total_containers']:,}",
-            help="Total unique containers tracked"
-        )
-    
+        st.metric("Total Containers", f"{summary['total_containers']:,}", help="Total unique containers tracked")
     with col2:
-        st.metric(
-            "✓ Kept with Original",
-            f"{summary['total_kept']:,}",
-            f"{summary['kept_percentage']:.1f}%",
-            help="Containers that stayed with their original carrier"
-        )
-    
+        st.metric("✓ Kept with Original", f"{summary['total_kept']:,}", f"{summary['kept_percentage']:.1f}%",
+                   help="Containers that stayed with their original carrier")
     with col3:
-        st.metric(
-            "🔄 Flipped to New Carrier",
-            f"{summary['total_flipped']:,}",
-            f"{summary['flipped_percentage']:.1f}%",
-            help="Containers that moved to a different carrier"
-        )
-    
+        st.metric("🔄 Flipped to New Carrier", f"{summary['total_flipped']:,}", f"{summary['flipped_percentage']:.1f}%",
+                   help="Containers that moved to a different carrier")
     with col4:
-        st.metric(
-            "🆕 Unknown/New",
-            f"{summary['total_unknown']:,}",
-            help="Containers not found in baseline"
-        )
-    
-    # Display top flows
+        st.metric("🆕 Unknown/New", f"{summary['total_unknown']:,}", help="Containers not found in baseline")
+
     if summary['top_flows']:
         st.subheader("🔝 Top Container Flows (Carrier → Carrier)")
-        
-        flows_df = pd.DataFrame(
-            summary['top_flows'],
-            columns=['From Carrier', 'To Carrier', 'Container Count']
-        )
-        
-        # Add percentage of total flipped
+        flows_df = pd.DataFrame(summary['top_flows'], columns=['From Carrier', 'To Carrier', 'Container Count'])
         flows_df['% of Flipped'] = (flows_df['Container Count'] / summary['total_flipped'] * 100).round(1)
         flows_df['% of Total'] = (flows_df['Container Count'] / summary['total_containers'] * 100).round(1)
-        
-        # Format display
         flows_display = flows_df.copy()
-        flows_display['Flow'] = flows_display.apply(
-            lambda row: f"{row['From Carrier']} → {row['To Carrier']}", 
-            axis=1
-        )
+        flows_display['Flow'] = flows_display.apply(lambda row: f"{row['From Carrier']} → {row['To Carrier']}", axis=1)
         flows_display['Containers'] = flows_display['Container Count'].apply(lambda x: f"{x:,}")
         flows_display['% Flipped'] = flows_display['% of Flipped'].apply(lambda x: f"{x:.1f}%")
         flows_display['% Total'] = flows_display['% of Total'].apply(lambda x: f"{x:.1f}%")
-        
-        st.dataframe(
-            flows_display[['Flow', 'Containers', '% Flipped', '% Total']],
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        # Visual representation
+        st.dataframe(flows_display[['Flow', 'Containers', '% Flipped', '% Total']], use_container_width=True, hide_index=True)
+
         st.subheader("📈 Flow Visualization")
-        
-        # Create bar chart of top flows
         chart_data = flows_df.head(10).copy()
-        chart_data['Flow Label'] = chart_data.apply(
-            lambda row: f"{row['From Carrier']} → {row['To Carrier']}", 
-            axis=1
-        )
-        
+        chart_data['Flow Label'] = chart_data.apply(lambda row: f"{row['From Carrier']} → {row['To Carrier']}", axis=1)
         import plotly.express as px
-        
-        fig = px.bar(
-            chart_data,
-            x='Container Count',
-            y='Flow Label',
-            orientation='h',
-            title='Top 10 Container Flows',
-            labels={'Container Count': 'Number of Containers', 'Flow Label': 'Carrier Flow'},
-            color='Container Count',
-            color_continuous_scale='Blues'
-        )
-        
-        fig.update_layout(
-            height=400,
-            showlegend=False,
-            yaxis={'categoryorder': 'total ascending'}
-        )
-        
+        fig = px.bar(chart_data, x='Container Count', y='Flow Label', orientation='h',
+                     title='Top 10 Container Flows',
+                     labels={'Container Count': 'Number of Containers', 'Flow Label': 'Carrier Flow'},
+                     color='Container Count', color_continuous_scale='Blues')
+        fig.update_layout(height=400, showlegend=False, yaxis={'categoryorder': 'total ascending'})
         st.plotly_chart(fig, use_container_width=True)
-    
-    # Summary insights
+
     st.subheader("💡 Insights")
-    
     insights = []
-    
     if summary['kept_percentage'] > 75:
         insights.append(f"✅ **High Stability**: {summary['kept_percentage']:.1f}% of containers remained with their original carrier.")
     elif summary['kept_percentage'] < 25:
         insights.append(f"🔄 **Major Reallocation**: {summary['flipped_percentage']:.1f}% of containers were reassigned to different carriers.")
     else:
         insights.append(f"⚖️ **Balanced Changes**: {summary['kept_percentage']:.1f}% kept, {summary['flipped_percentage']:.1f}% flipped.")
-    
     if summary['top_flows']:
         top_flow = summary['top_flows'][0]
         insights.append(f"🎯 **Largest Flow**: {top_flow[2]:,} containers moved from **{top_flow[0]}** to **{top_flow[1]}**.")
-    
     insights.append(f"🏢 **Carrier Participation**: {summary['unique_source_carriers']} carriers lost containers, {summary['unique_destination_carriers']} carriers gained containers.")
-    
     for insight in insights:
         st.markdown(insight)
