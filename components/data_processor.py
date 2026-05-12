@@ -77,6 +77,12 @@ def validate_and_process_gvt_data(GVTdata):
     
     return GVTdata
 
+_PORT_ALIASES = {
+    'USBWI': 'USBAL',
+    'USEWR': 'USNYC',
+    'USORF': 'USNFK',
+}
+
 @st.cache_data(show_spinner=False)
 def validate_and_process_rate_data(Ratedata):
     """Validate and process Rate data"""
@@ -84,6 +90,7 @@ def validate_and_process_rate_data(Ratedata):
     if 'Lookup' not in Ratedata.columns:
         if 'SCAC' in Ratedata.columns and 'Port' in Ratedata.columns and 'FC' in Ratedata.columns:
             Ratedata = Ratedata.copy()
+            Ratedata['Port'] = Ratedata['Port'].astype(str).str.strip().replace(_PORT_ALIASES)
             Ratedata['Lookup'] = (
                 Ratedata['SCAC'].astype(str).str.strip() +
                 Ratedata['Port'].astype(str).str.strip() +

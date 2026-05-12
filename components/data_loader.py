@@ -318,14 +318,25 @@ def _load_rate_file(file_bytes, file_name):
     return df
 
 
+_PORT_ALIASES = {
+    'USBWI': 'USBAL',
+    'USEWR': 'USNYC',
+    'USORF': 'USNFK',
+}
+
+
 def _transform_dray_master_format(df: pd.DataFrame) -> pd.DataFrame:
     """
     Transform US Dray Master format into the standard rate format.
 
     Input columns: SCAC, Port, FC, Base Rate, Fuel Surcharge, Carrier Name, ...
     Output: adds Lookup (SCAC+Port+FC) and CPC (Base Rate + Fuel Surcharge).
+    Port codes are normalized to match GVT conventions (USBWI→USBAL, USEWR→USNYC, USORF→USNFK).
     """
     df = df.copy()
+
+    # Normalize port codes to match GVT conventions
+    df['Port'] = df['Port'].astype(str).str.strip().replace(_PORT_ALIASES)
 
     # Generate Lookup key: SCAC + Port + FC
     df['Lookup'] = (
