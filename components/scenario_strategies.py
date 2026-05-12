@@ -64,9 +64,6 @@ def apply_optimized_strategy(display_data_with_rates, carrier_col,
     """
     from optimization import cascading_allocate_with_constraints
 
-    # Skip cache to enable step-by-step debugging
-    st.session_state.pop('_cached_opt_allocated', None)
-
     optimization_source = display_data_with_rates.copy()
     optimization_source = filter_excluded_carrier_facility_rows(
         optimization_source, carrier_facility_exclusions, carrier_col

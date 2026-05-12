@@ -331,10 +331,6 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
 
     # Strategy selector
     selected = st.selectbox("📊 Select Strategy:", ['Current Selection', 'Performance', 'Cheapest Cost', 'Optimized'])
-    if selected != 'Performance':
-        st.session_state.pop('_cached_perf_allocated', None)
-    if selected != 'Optimized':
-        st.session_state.pop('_cached_opt_allocated', None)
 
     # Show constrained section (common to all strategies)
     constrained_download_data = None
@@ -363,44 +359,73 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
 
     baseline_data = display_data_with_rates.copy()
 
-    # ---- Dispatch to strategy ----
-    performance_reallocated = 0
-    performance_groups_impacted = 0
+    # ---- Dispatch to strategy (with caching) ----
+    # Use a data fingerprint so cache invalidates when filters/constraints change
+    _data_fingerprint = (len(display_data_with_rates), display_data_with_rates['Container Count'].sum())
+    _cache_key = f'_strategy_cache_{selected}'
+    _cached = st.session_state.get(_cache_key)
 
-    if selected == 'Cheapest Cost':
-        source = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
-        display_data, download_data, desc, filename, rate_cols = apply_cheapest_strategy(
-            source, carrier_col, carrier_facility_exclusions,
-            has_constraints, constrained_data, metrics,
-            final_filtered_data, unconstrained_data,
-        )
+    # Check if we have a valid cached result for this strategy + data shape
+    if _cached is not None and _cached.get('fingerprint') == _data_fingerprint:
+        display_data = _cached['display_data']
+        download_data = _cached['download_data']
+        desc = _cached['desc']
+        filename = _cached['filename']
+        if 'rate_cols' in _cached:
+            rate_cols = _cached['rate_cols']
     else:
-        # Current Selection / Performance / Optimized share the same column pipeline
-        if selected == 'Current Selection':
-            display_data, performance_reallocated, performance_groups_impacted = apply_current_selection(
-                display_data_with_rates, carrier_col, max_constrained_carriers,
-            )
-        elif selected == 'Optimized':
-            display_data, performance_reallocated, performance_groups_impacted = apply_optimized_strategy(
-                display_data_with_rates, carrier_col, max_constrained_carriers,
-                carrier_facility_exclusions, historical_data_source,
-            )
-        elif selected == 'Performance':
-            display_data, performance_reallocated, performance_groups_impacted = apply_performance_strategy(
-                display_data_with_rates, carrier_col, carrier_facility_exclusions,
-            )
+        performance_reallocated = 0
+        performance_groups_impacted = 0
 
-        # Carrier Flips (common to non-cheapest strategies)
-        display_data = add_detailed_carrier_flips_column(display_data, baseline_data, carrier_col=carrier_col)
-        if 'Carrier Flips (Detailed)' in display_data.columns:
-            display_data.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
+        if selected == 'Cheapest Cost':
+            source = unconstrained_data.copy() if has_constraints else final_filtered_data.copy()
+            display_data, download_data, desc, filename, rate_cols = apply_cheapest_strategy(
+                source, carrier_col, carrier_facility_exclusions,
+                has_constraints, constrained_data, metrics,
+                final_filtered_data, unconstrained_data,
+            )
+            st.session_state[_cache_key] = {
+                'fingerprint': _data_fingerprint,
+                'display_data': display_data,
+                'download_data': download_data,
+                'desc': desc,
+                'filename': filename,
+                'rate_cols': rate_cols,
+            }
+        else:
+            # Current Selection / Performance / Optimized share the same column pipeline
+            if selected == 'Current Selection':
+                display_data, performance_reallocated, performance_groups_impacted = apply_current_selection(
+                    display_data_with_rates, carrier_col, max_constrained_carriers,
+                )
+            elif selected == 'Optimized':
+                display_data, performance_reallocated, performance_groups_impacted = apply_optimized_strategy(
+                    display_data_with_rates, carrier_col, max_constrained_carriers,
+                    carrier_facility_exclusions, historical_data_source,
+                )
+            elif selected == 'Performance':
+                display_data, performance_reallocated, performance_groups_impacted = apply_performance_strategy(
+                    display_data_with_rates, carrier_col, carrier_facility_exclusions,
+                )
 
-        # Column selection & renaming
-        display_data, download_data, desc, filename = _build_columns_and_description(
-            display_data, selected, carrier_col, rate_cols, metrics,
-            has_constraints, constrained_data, unconstrained_data,
-            performance_reallocated, performance_groups_impacted,
-        )
+            # Carrier Flips (common to non-cheapest strategies)
+            display_data = add_detailed_carrier_flips_column(display_data, baseline_data, carrier_col=carrier_col)
+            if 'Carrier Flips (Detailed)' in display_data.columns:
+                display_data.rename(columns={'Carrier Flips (Detailed)': 'Carrier Flips'}, inplace=True)
+
+            # Column selection & renaming
+            display_data, download_data, desc, filename = _build_columns_and_description(
+                display_data, selected, carrier_col, rate_cols, metrics,
+                has_constraints, constrained_data, unconstrained_data,
+                performance_reallocated, performance_groups_impacted,
+            )
+            st.session_state[_cache_key] = {
+                'fingerprint': _data_fingerprint,
+                'display_data': display_data,
+                'download_data': download_data,
+                'desc': desc,
+                'filename': filename,
+            }
 
     # ---- Render table ----
     st.info(desc)
