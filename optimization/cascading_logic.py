@@ -390,50 +390,53 @@ def _cascading_allocate_single_group(
     for carrier, allocated_count in allocations.items():
         if allocated_count == 0:
             continue
-        
+
         row = carrier_data[carrier].copy()
-        row[container_column] = allocated_count
-        
-        # Assign Container Numbers based on allocated_count (not proportion)
-        # allocated_count is already the exact number of containers this carrier should receive
+
+        # Assign Container Numbers based on allocated_count
         if remaining_container_numbers:
-            # Assign exactly allocated_count container IDs (or all remaining if less available)
             num_to_assign = min(int(allocated_count), len(remaining_container_numbers))
             assigned_containers = remaining_container_numbers[:num_to_assign]
             remaining_container_numbers = remaining_container_numbers[num_to_assign:]
             row[container_numbers_column] = ", ".join(assigned_containers)
-        
+            # Container Count must match actual IDs assigned to avoid downstream divergence
+            row[container_column] = len(assigned_containers)
+        else:
+            row[container_column] = allocated_count
+
         # Add rank
         row['Carrier_Rank'] = carrier_ranks.get(carrier, 999)
         
+        # Use actual container count (may differ from allocated_count if IDs were limited)
+        actual_count = row[container_column]
+
         # Add historical and new percentages
         row['Historical_Allocation_Pct'] = historical_pcts.get(carrier, 0)
-        row['New_Allocation_Pct'] = (allocated_count / total_containers_to_allocate * 100) if total_containers_to_allocate > 0 else 0
-        
+        row['New_Allocation_Pct'] = (actual_count / total_containers_to_allocate * 100) if total_containers_to_allocate > 0 else 0
+
         # Add allocation notes
         row['Allocation_Notes'] = notes.get(carrier, "")
-        
+
         # Add volume change indicator
         hist_pct = historical_pcts.get(carrier, 0)
         new_pct = row['New_Allocation_Pct']
-        
-        if new_pct > hist_pct + 0.1:  # More than 0.1% increase
+
+        if new_pct > hist_pct + 0.1:
             row['Volume_Change'] = "↑ Increase"
-        elif new_pct < hist_pct - 0.1:  # More than 0.1% decrease
+        elif new_pct < hist_pct - 0.1:
             row['Volume_Change'] = "↓ Decrease"
         else:
             row['Volume_Change'] = "→ Stable"
-        
+
         # Check if growth was constrained
         max_allowed_pct = hist_pct * (1 + max_growth_pct) if hist_pct > 0 else 100
         row['Growth_Constrained'] = "Yes" if new_pct >= max_allowed_pct - 0.1 else "No"
-        
-        # Recalculate total cost based on available rate columns
-        # Check for both Base Rate and CPC to support dynamic rate selection
+
+        # Recalculate total cost based on actual container count
         if 'Base Rate' in row and pd.notna(row.get('Base Rate')):
-            row['Total Rate'] = row['Base Rate'] * allocated_count
+            row['Total Rate'] = row['Base Rate'] * actual_count
         if 'CPC' in row and pd.notna(row.get('CPC')):
-            row['Total CPC'] = row['CPC'] * allocated_count
+            row['Total CPC'] = row['CPC'] * actual_count
         
         result_rows.append(row)
     
@@ -444,6 +447,9 @@ def _cascading_allocate_single_group(
             result_rows[0][container_numbers_column] = first_row_containers + ", " + ", ".join(remaining_container_numbers)
         else:
             result_rows[0][container_numbers_column] = ", ".join(remaining_container_numbers)
+        # Keep Container Count in sync with actual IDs
+        all_ids = [c.strip() for c in result_rows[0][container_numbers_column].split(',') if c.strip()]
+        result_rows[0][container_column] = len(all_ids)
     
     if not result_rows:
         return None
@@ -659,92 +665,82 @@ def _cascade_allocate_volume(
                 f"Allocated: {allocated:.0f} containers{limit_note}"
             )
     
-    # Second pass: if volume remains, allow ALL carriers to take more (bypass growth cap)
-    # This handles cases where growth caps prevented full allocation in the first pass
+    # Second pass: if volume remains, allow carriers to exceed growth cap up to a hard
+    # ceiling (2x historical or 50% of total for new carriers). Carriers are filled in
+    # rank order so better-ranked carriers absorb overflow first.
+    OVERFLOW_MULTIPLIER = 2.0  # hard ceiling: 2x the first-pass cap
+    MAX_NEW_CARRIER_PCT = 50.0  # new carriers can take up to 50% of group total
+
     if remaining > 0:
         for carrier in sorted_carriers:
             if remaining <= 0:
                 break
-            
-            current_allocation = allocations[carrier]
-            additional_capacity = total_containers - current_allocation
-            
-            if additional_capacity > 0:
-                additional = min(remaining, additional_capacity)
+
+            hist_pct = historical_pcts.get(carrier, 0)
+            rank = carrier_ranks.get(carrier, 999)
+
+            # Compute hard ceiling for this carrier
+            if hist_pct > 0:
+                ceiling_pct = hist_pct * (1 + max_growth_pct) * OVERFLOW_MULTIPLIER
+            else:
+                ceiling_pct = MAX_NEW_CARRIER_PCT
+            ceiling_containers = (ceiling_pct / 100) * total_containers
+
+            headroom = ceiling_containers - allocations[carrier]
+            if headroom > 0:
+                additional = min(remaining, headroom)
                 allocations[carrier] += additional
                 remaining -= additional
-                
-                # Update notes
+
                 new_pct = (allocations[carrier] / total_containers * 100) if total_containers > 0 else 0
-                rank = carrier_ranks.get(carrier, 999)
-                hist_pct = historical_pcts.get(carrier, 0)
-                
                 if hist_pct > 0:
                     change_pct = new_pct - hist_pct
                     change_abs = allocations[carrier] - ((hist_pct / 100) * total_containers)
                     notes[carrier] = (
                         f"Rank #{rank} | "
                         f"Historical: {hist_pct:.1f}% → New: {new_pct:.1f}% | "
-                        f"Change: {change_pct:+.1f}% ({change_abs:+.0f} containers) (overflow from growth caps)"
+                        f"Change: {change_pct:+.1f}% ({change_abs:+.0f} containers) (overflow, capped at {ceiling_pct:.0f}%)"
                     )
                 else:
                     notes[carrier] = (
                         f"Rank #{rank} | "
                         f"Historical: 0% (new carrier) → New: {new_pct:.1f}% | "
-                        f"Allocated: {allocations[carrier]:.0f} containers (overflow from growth caps)"
+                        f"Allocated: {allocations[carrier]:.0f} containers (overflow, capped at {MAX_NEW_CARRIER_PCT:.0f}%)"
                     )
-    
-    # Third pass: if volume still remains, assign to rank 1 (best) allocatable carrier
-    if remaining > 0.5 and sorted_carriers:  # Check for remaining (> 0.5 to handle rounding)
-        best_carrier = sorted_carriers[0]  # Rank 1 allocatable carrier
-        allocations[best_carrier] += remaining
-        
-        # Determine if this is due to max constraints or normal cascading
-        has_max_constraints = len(excluded_carriers) > 0
-        
-        # Update notes to indicate overflow was assigned
-        hist_pct = historical_pcts.get(best_carrier, 0)
-        new_pct = (allocations[best_carrier] / total_containers * 100) if total_containers > 0 else 0
-        rank = carrier_ranks.get(best_carrier, 999)
-        
-        if has_max_constraints:
-            # Overflow due to maximum constraints - special note
+
+    # Third pass: if volume still remains after hard ceilings, distribute proportionally
+    # to all allocatable carriers by rank (no single carrier gets all overflow)
+    if remaining > 0.5 and sorted_carriers:
+        per_carrier_share = remaining / len(sorted_carriers)
+        for carrier in sorted_carriers:
+            if remaining <= 0:
+                break
+            give = min(remaining, per_carrier_share)
+            allocations[carrier] += give
+            remaining -= give
+
+            hist_pct = historical_pcts.get(carrier, 0)
+            new_pct = (allocations[carrier] / total_containers * 100) if total_containers > 0 else 0
+            rank = carrier_ranks.get(carrier, 999)
             if hist_pct > 0:
                 change_pct = new_pct - hist_pct
-                change_abs = allocations[best_carrier] - ((hist_pct / 100) * total_containers)
-                notes[best_carrier] = (
+                change_abs = allocations[carrier] - ((hist_pct / 100) * total_containers)
+                notes[carrier] = (
                     f"Rank #{rank} | "
                     f"Historical: {hist_pct:.1f}% → New: {new_pct:.1f}% | "
-                    f"Change: {change_pct:+.1f}% ({change_abs:+.0f} containers) | "
-                    f"⚠️ +{remaining:.0f} overflow containers assigned (max constraints applied - growth limit bypassed)"
+                    f"Change: {change_pct:+.1f}% ({change_abs:+.0f} containers) (proportional overflow)"
                 )
             else:
-                notes[best_carrier] = (
+                notes[carrier] = (
                     f"Rank #{rank} | "
                     f"Historical: 0% (new carrier) → New: {new_pct:.1f}% | "
-                    f"Allocated: {allocations[best_carrier]:.0f} containers | "
-                    f"⚠️ +{remaining:.0f} overflow containers assigned (max constraints applied - growth limit bypassed)"
+                    f"Allocated: {allocations[carrier]:.0f} containers (proportional overflow)"
                 )
-        else:
-            # Normal overflow cascading
-            if hist_pct > 0:
-                change_pct = new_pct - hist_pct
-                change_abs = allocations[best_carrier] - ((hist_pct / 100) * total_containers)
-                notes[best_carrier] = (
-                    f"Rank #{rank} | "
-                    f"Historical: {hist_pct:.1f}% → New: {new_pct:.1f}% | "
-                    f"Change: {change_pct:+.1f}% ({change_abs:+.0f} containers) | "
-                    f"⚠️ +{remaining:.0f} overflow containers assigned"
-                )
-            else:
-                notes[best_carrier] = (
-                    f"Rank #{rank} | "
-                    f"Historical: 0% (new carrier) → New: {new_pct:.1f}% | "
-                    f"Allocated: {allocations[best_carrier]:.0f} containers | "
-                    f"⚠️ +{remaining:.0f} overflow containers assigned"
-                )
-        
-        remaining = 0  # All volume now allocated
+
+        # Final safety: assign any rounding remainder to rank-1 carrier
+        if remaining > 0.5:
+            allocations[sorted_carriers[0]] += remaining
+            remaining = 0
     
     # Final step: round all allocations to integers while preserving total_containers
     # Use largest-remainder method so sum(rounded) == total_containers

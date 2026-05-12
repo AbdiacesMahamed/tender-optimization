@@ -14,8 +14,9 @@ import pandas as pd
 
 
 # Columns considered when grouping carriers that share the same demand slice.
-# For optimization scenarios (performance, cheapest, optimized), we only group by Lane and Week.
+# Groups by Category + Lane + Week to match the optimized scenario grouping.
 DEFAULT_GROUP_COLUMNS: List[str] = [
+    "Category",
     "Lane",
     "Week Number",
 ]
@@ -187,7 +188,12 @@ def allocate_to_highest_performance(
             * best_carriers[container_column]
         )
 
-    best_carriers["Allocation Strategy"] = "Highest Performance Carrier"
+    # Flag when all performance scores are tied (0 or equal) — allocation is by cost tiebreak
+    unique_scores = working[performance_column].dropna().unique()
+    if len(unique_scores) <= 1:
+        best_carriers["Allocation Strategy"] = "Lowest Cost (performance scores tied)"
+    else:
+        best_carriers["Allocation Strategy"] = "Highest Performance Carrier"
 
     # Clean helper columns and preserve original ordering.
     helper_columns = {
