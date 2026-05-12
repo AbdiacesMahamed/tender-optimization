@@ -80,9 +80,17 @@ def validate_and_process_gvt_data(GVTdata):
 @st.cache_data(show_spinner=False)
 def validate_and_process_rate_data(Ratedata):
     """Validate and process Rate data"""
-    # Check if Lookup already exists in Rate data
+    # Check if Lookup already exists in Rate data; if not, generate from SCAC+Port+FC
     if 'Lookup' not in Ratedata.columns:
-        raise ValueError(f"Lookup column not found in Rate data. Available columns: {list(Ratedata.columns)}")
+        if 'SCAC' in Ratedata.columns and 'Port' in Ratedata.columns and 'FC' in Ratedata.columns:
+            Ratedata = Ratedata.copy()
+            Ratedata['Lookup'] = (
+                Ratedata['SCAC'].astype(str).str.strip() +
+                Ratedata['Port'].astype(str).str.strip() +
+                Ratedata['FC'].astype(str).str.strip()
+            )
+        else:
+            raise ValueError(f"Lookup column not found in Rate data and cannot generate it (need SCAC, Port, FC). Available columns: {list(Ratedata.columns)}")
 
     # Create Lane column in Rate data (Port + FC concatenation)
     # First, identify Port and FC columns in Rate data
