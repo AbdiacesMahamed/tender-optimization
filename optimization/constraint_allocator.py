@@ -148,6 +148,42 @@ def sort_constraints(constraints_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _validate_percent_sums(constraints_df: pd.DataFrame, log):
+    """
+    Check that percent allocations within the same scope don't exceed 100%.
+    Logs a warning for each scope where they do.
+    """
+    pct_rows = constraints_df[
+        constraints_df['Percent Allocation'].notna() &
+        (constraints_df['Percent Allocation'] > 0)
+    ].copy()
+
+    if pct_rows.empty:
+        return
+
+    scope_cols = ['Port', 'Category']
+    for col in scope_cols:
+        pct_rows[col] = pct_rows[col].fillna('__all__')
+
+    # Only validate rows WITHOUT a lane (flexible rows that share a pool)
+    flexible = pct_rows[pct_rows['Lane'].isna() | (pct_rows['Lane'] == '')].copy()
+    if flexible.empty:
+        return
+
+    grouped = flexible.groupby(scope_cols)['Percent Allocation'].sum()
+    over_allocated = grouped[grouped > 100]
+
+    for scope, total_pct in over_allocated.items():
+        port_label = scope[0] if scope[0] != '__all__' else 'All Ports'
+        cat_label = scope[1] if scope[1] != '__all__' else 'All Categories'
+        log(
+            f"WARNING: Percent allocations for {port_label}/{cat_label} sum to "
+            f"{total_pct:.0f}% (exceeds 100%). Later carriers in this scope will "
+            f"receive less than their stated percentage.",
+            'warning'
+        )
+
+
 def allocate_with_hierarchy(
     data: pd.DataFrame,
     constraints_df: pd.DataFrame,
@@ -221,6 +257,13 @@ def allocate_with_hierarchy(
 
     # Constrained records accumulator
     constrained_records: List[pd.Series] = []
+
+    # Track ORIGINAL pool size per scope (port, category) — computed once before any
+    # allocations. Percentages reference this, not the depleted remaining pool.
+    original_pool_sizes: Dict[Tuple, int] = {}
+
+    # Validate percent sums per scope and warn
+    _validate_percent_sums(constraints_df, log)
 
     log(f"Processing {len(constraints_df)} constraints in priority+specificity order")
 
@@ -346,11 +389,22 @@ def allocate_with_hierarchy(
         )
         already_allocated_for_carrier = carrier_allocated.get(scope_key, 0)
 
+        # Pool scope key (port, category) — shared across all carriers in same scope
+        pool_scope = (
+            port if _is_filled(port) else '__any__',
+            category if _is_filled(category) else '__any__',
+        )
+        # Record original pool size on first encounter (before any depletion)
+        if pool_scope not in original_pool_sizes:
+            original_pool_sizes[pool_scope] = total_available
+        original_pool = original_pool_sizes[pool_scope]
+
         target = _compute_target(
             pct_alloc=pct_alloc,
             max_count=max_count,
             min_count=min_count,
             total_available=total_available,
+            original_pool_size=original_pool,
             already_allocated=already_allocated_for_carrier,
             priority=priority,
         )
@@ -476,11 +530,16 @@ def _compute_target(
     max_count: Optional[float],
     min_count: Optional[float],
     total_available: int,
+    original_pool_size: int,
     already_allocated: int,
     priority: int,
 ) -> Optional[int]:
     """
     Compute how many containers to allocate for this constraint.
+
+    Percentages are computed against original_pool_size (the pool before any
+    allocations depleted it), so a carrier's 30% always means 30% of the
+    original scope volume regardless of processing order.
 
     Returns:
       - int >= 0: allocate this many containers
@@ -498,19 +557,16 @@ def _compute_target(
     if priority == 8 and _is_filled(pct_alloc) and pct_alloc == 0 and not _is_filled(max_count):
         return None
 
-    # Compute base target from percentage, or use min/max as the starting point
+    # Compute base target from percentage of ORIGINAL pool, or use min/max
     if _is_filled(pct_alloc) and pct_alloc > 0:
-        raw = total_available * (pct_alloc / 100.0)
+        raw = original_pool_size * (pct_alloc / 100.0)
         target = math.ceil(raw) if raw > 0 else 0
     elif _is_filled(pct_alloc) and pct_alloc == 0:
         # pct=0 but max>0: this is an overflow-only carrier (no guaranteed share)
-        # They get 0 proactive allocation; max is just a cap for the optimizer
         target = 0 if not _is_filled(min_count) else int(min_count)
     elif _is_filled(min_count) and min_count > 0:
-        # Min-only: lock exactly the minimum amount
         target = int(min_count)
     elif _is_filled(max_count):
-        # Max-only: allocate up to the max
         target = int(max_count)
     else:
         target = total_available
@@ -524,7 +580,7 @@ def _compute_target(
         remaining_cap = max(0, int(max_count) - already_allocated)
         target = min(target, remaining_cap)
 
-    # Can't exceed available
+    # Can't exceed what's actually available
     target = min(target, total_available)
 
     return max(0, target)

@@ -260,28 +260,37 @@ class TestComputeTarget:
     def test_block_pct0_max0(self):
         result = _compute_target(
             pct_alloc=0, max_count=0, min_count=None,
-            total_available=100, already_allocated=0, priority=8
+            total_available=100, original_pool_size=100, already_allocated=0, priority=8
         )
         assert result is None
 
     def test_percentage_allocation(self):
         result = _compute_target(
             pct_alloc=30, max_count=None, min_count=None,
-            total_available=100, already_allocated=0, priority=9
+            total_available=100, original_pool_size=100, already_allocated=0, priority=9
         )
         assert result == 30
+
+    def test_percentage_uses_original_pool(self):
+        # Pool was originally 200 but only 50 remain. 30% should be 30% of 200 = 60,
+        # but capped at available (50).
+        result = _compute_target(
+            pct_alloc=30, max_count=None, min_count=None,
+            total_available=50, original_pool_size=200, already_allocated=0, priority=9
+        )
+        assert result == 50  # min(60, 50) = 50
 
     def test_max_cap_reduces_target(self):
         result = _compute_target(
             pct_alloc=50, max_count=20, min_count=None,
-            total_available=100, already_allocated=0, priority=9
+            total_available=100, original_pool_size=100, already_allocated=0, priority=9
         )
         assert result == 20
 
     def test_max_cap_inclusive_of_already_allocated(self):
         result = _compute_target(
             pct_alloc=50, max_count=100, min_count=None,
-            total_available=200, already_allocated=80, priority=9
+            total_available=200, original_pool_size=200, already_allocated=80, priority=9
         )
         # 50% of 200 = 100, but max cap remaining = 100-80 = 20
         assert result == 20
@@ -289,7 +298,7 @@ class TestComputeTarget:
     def test_min_floor(self):
         result = _compute_target(
             pct_alloc=5, max_count=None, min_count=20,
-            total_available=100, already_allocated=0, priority=9
+            total_available=100, original_pool_size=100, already_allocated=0, priority=9
         )
         # 5% of 100 = 5, but min=20
         assert result == 20
@@ -297,7 +306,7 @@ class TestComputeTarget:
     def test_overflow_only_pct0_with_max(self):
         result = _compute_target(
             pct_alloc=0, max_count=75, min_count=None,
-            total_available=100, already_allocated=0, priority=8
+            total_available=100, original_pool_size=100, already_allocated=0, priority=8
         )
         # pct=0 means no proactive allocation → target=0
         assert result == 0
@@ -305,9 +314,33 @@ class TestComputeTarget:
     def test_priority8_pct0_no_max_is_block(self):
         result = _compute_target(
             pct_alloc=0, max_count=None, min_count=None,
-            total_available=100, already_allocated=0, priority=8
+            total_available=100, original_pool_size=100, already_allocated=0, priority=8
         )
         assert result is None
+
+    def test_min_max_range(self):
+        # Min=50, Max=100, no percent — target starts at min (50), stays within range
+        result = _compute_target(
+            pct_alloc=None, max_count=100, min_count=50,
+            total_available=200, original_pool_size=200, already_allocated=0, priority=9
+        )
+        assert result == 50  # no pct → defaults to min, capped at max (50 is within 50-100)
+
+    def test_min_max_with_pct(self):
+        # 30% of 200 = 60, clamped to min=50 (already above), clamped to max=80
+        result = _compute_target(
+            pct_alloc=30, max_count=80, min_count=50,
+            total_available=200, original_pool_size=200, already_allocated=0, priority=9
+        )
+        assert result == 60  # 30% of 200 = 60, between 50 and 80
+
+    def test_min_max_pct_exceeds_max(self):
+        # 80% of 200 = 160, clamped to max=100
+        result = _compute_target(
+            pct_alloc=80, max_count=100, min_count=50,
+            total_available=200, original_pool_size=200, already_allocated=0, priority=9
+        )
+        assert result == 100
 
 
 # ==================== _is_filled ====================
