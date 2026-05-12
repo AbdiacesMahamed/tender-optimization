@@ -286,20 +286,34 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
         merged_data['_carrier_normalized'] = merged_data['Dray SCAC(FL)'].astype(str).str.strip().str.upper()
         performance_clean = performance_clean.copy()  # Avoid modifying cached data
         performance_clean['_carrier_normalized'] = performance_clean['Carrier'].astype(str).str.strip().str.upper()
-        
+
         # Ensure Week Number types match
         merged_data['Week Number'] = pd.to_numeric(merged_data['Week Number'], errors='coerce')
         performance_clean['Week Number'] = pd.to_numeric(performance_clean['Week Number'], errors='coerce')
-        
+
+        # Check for week overlap before merging
+        gvt_weeks = set(merged_data['Week Number'].dropna().unique())
+        perf_weeks = set(performance_clean['Week Number'].dropna().unique())
+        overlapping_weeks = gvt_weeks & perf_weeks
+        if not overlapping_weeks:
+            st.warning(
+                f"**Performance data weeks don't match GVT weeks.** "
+                f"GVT has weeks {sorted(int(w) for w in gvt_weeks)}, "
+                f"but scorecard has weeks {sorted(int(w) for w in perf_weeks)}. "
+                f"Performance scores will not be applied — the Performance scenario "
+                f"will fall back to cost-based tiebreaking. Upload a scorecard with "
+                f"matching weeks for accurate performance optimization."
+            )
+
         # Perform the merge using normalized carrier names
         merged_data = pd.merge(
-            merged_data, 
-            performance_clean[['_carrier_normalized', 'Week Number', 'Performance_Score']], 
-            left_on=['_carrier_normalized', 'Week Number'], 
-            right_on=['_carrier_normalized', 'Week Number'], 
+            merged_data,
+            performance_clean[['_carrier_normalized', 'Week Number', 'Performance_Score']],
+            left_on=['_carrier_normalized', 'Week Number'],
+            right_on=['_carrier_normalized', 'Week Number'],
             how='left'
         )
-        
+
         # Drop the helper column
         merged_data = merged_data.drop(columns=['_carrier_normalized'], errors='ignore')
         
