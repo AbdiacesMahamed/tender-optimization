@@ -27,6 +27,11 @@ from .historic_volume import (
 from .historic_volume_display import (
     show_historic_volume_analysis,
 )
+from .constraint_allocator import (
+    load_and_normalize_constraints,
+    sort_constraints,
+    allocate_with_hierarchy,
+)
 
 __all__ = [
     # Optimization strategies
@@ -42,4 +47,8 @@ __all__ = [
     'filter_historical_weeks',
     'get_last_n_weeks',
     'show_historic_volume_analysis',
+    # Hierarchical constraint allocation
+    'load_and_normalize_constraints',
+    'sort_constraints',
+    'allocate_with_hierarchy',
 ]

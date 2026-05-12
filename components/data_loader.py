@@ -67,12 +67,23 @@ def _load_performance_file(file_bytes, file_name):
     - Week columns may be WK42, WK 42, Week 42, Week42, W42, Wk 42, etc.
     - Carrier column may be Carrier, SCAC, Carrier Name, Carrier SCAC, etc.
     - Metrics column may be Metrics, Metric, Type, or absent/unnamed
+    - Overall Carrier Scorecard format: grouped blocks per carrier with
+      "Score" rows and week columns like "26 W 13" (year prefix + W + week#).
+      Carrier names are mapped to SCAC codes automatically.
     """
     import io, re
 
     buf = io.BytesIO(file_bytes)
     xls = pd.ExcelFile(buf)
 
+    # ---------- Try Overall Carrier Scorecard format first ----------
+    # Detected by: "Score" rows in column 1 AND week columns like "YY W NN"
+    result = _try_load_overall_scorecard(xls)
+    if result is not None:
+        logger.info("Detected Overall Carrier Scorecard format")
+        return result
+
+    # ---------- Standard scorecard format ----------
     _WEEK_RE = re.compile(
         r'^(?:wk|week|w)\s*(\d+)$', re.IGNORECASE
     )
@@ -99,42 +110,181 @@ def _load_performance_file(file_bytes, file_name):
     # Fallback: default read (first sheet, header=0)
     buf.seek(0)
     return pd.read_excel(buf)
+
+
+def _try_load_overall_scorecard(xls: pd.ExcelFile):
+    """
+    Attempt to parse an Overall Carrier Scorecard file.
+
+    Format characteristics:
+    - Column 0: carrier names (filled once per block, then NaN for metric rows)
+    - Column 1: metric descriptions, with "Score" as the aggregate row
+    - Columns 2+: week scores and a Total column
+    - Week headers like "26 W 13" meaning year 2026, week 13
+
+    Returns a DataFrame in standard scorecard format (Carrier + Metrics + WK columns)
+    or None if the file doesn't match this format.
+    """
+    import re
+    from config.carrier_mapping import resolve_scac
+
+    # Year-prefixed week pattern: "26 W 13", "25 W 42", etc.
+    _YR_WEEK_RE = re.compile(r'^(\d{2})\s*W\s*(\d+)$', re.IGNORECASE)
+
+    for sheet in xls.sheet_names:
+        raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+
+        if len(raw) < 10 or len(raw.columns) < 4:
+            continue
+
+        # Find the header row: look for "Carriers" in col 0 or week patterns in cols 2+
+        header_row = None
+        for i in range(min(len(raw), 10)):
+            row_vals = [str(v).strip() for v in raw.iloc[i].values]
+            # Check if this row has week-like headers (YY W NN pattern)
+            week_matches = sum(1 for v in row_vals[2:] if _YR_WEEK_RE.match(v))
+            if week_matches >= 2:
+                header_row = i
+                break
+
+        if header_row is None:
+            continue
+
+        # Parse week column names from header row
+        week_cols = {}  # col_index -> week_number
+        for col_idx in range(2, len(raw.columns)):
+            val = str(raw.iloc[header_row, col_idx]).strip()
+            m = _YR_WEEK_RE.match(val)
+            if m:
+                week_num = int(m.group(2))
+                week_cols[col_idx] = week_num
+
+        if len(week_cols) < 2:
+            continue
+
+        # Check for "Score" rows in column 1 (below header)
+        score_mask = raw.iloc[header_row + 1:, 1].astype(str).str.strip().str.lower() == 'score'
+        if score_mask.sum() == 0:
+            continue
+
+        # This IS the Overall Carrier Scorecard format.
+        # Extract carrier blocks: carrier name is in col 0, forward-filled down
+        data_start = header_row + 1
+        data = raw.iloc[data_start:].copy().reset_index(drop=True)
+
+        # Forward-fill carrier names in column 0
+        data[0] = data[0].ffill()
+
+        # Filter to Score rows only
+        is_score = data[1].astype(str).str.strip().str.lower() == 'score'
+        score_data = data[is_score].copy()
+
+        if len(score_data) == 0:
+            continue
+
+        # Build output DataFrame in standard format
+        rows = []
+        for _, row in score_data.iterrows():
+            carrier_name = str(row[0]).strip()
+            scac = resolve_scac(carrier_name)
+
+            for col_idx, week_num in week_cols.items():
+                score_val = row.iloc[col_idx]
+                rows.append({
+                    'Carrier': scac,
+                    'Metrics': 'Total Score %',
+                    f'WK {week_num}': score_val,
+                })
+
+        if not rows:
+            continue
+
+        # Pivot: one row per carrier, week columns spread out
+        result_rows = []
+        carriers_seen = []
+        for _, row in score_data.iterrows():
+            carrier_name = str(row[0]).strip()
+            scac = resolve_scac(carrier_name)
+            carriers_seen.append(scac)
+
+            record = {'Carrier': scac, 'Metrics': 'Total Score %'}
+            for col_idx, week_num in week_cols.items():
+                record[f'WK {week_num}'] = row.iloc[col_idx]
+            result_rows.append(record)
+
+        result_df = pd.DataFrame(result_rows)
+        logger.info(
+            f"Parsed Overall Scorecard: {len(result_df)} carriers, "
+            f"weeks {sorted(week_cols.values())}, "
+            f"carriers: {carriers_seen}"
+        )
+        return result_df
+
+    return None
 def _load_rate_file(file_bytes, file_name):
     """
     Load a rate Excel file with auto-detection of format.
-    
-    Supports two formats:
+
+    Supports three formats:
     1. Standard rate sheet — flat Excel with headers in row 0, columns include
        SCAC, Port, FC, Lookup, Base Rate.
     2. Master Rate Card — multi-sheet workbook where the rate data lives in a
        sheet whose name contains 'Master Sheet' and headers start at row 3
        (rows 0-2 contain metadata). Same key columns once the correct header
        row is used.
-    
+    3. US Dray Master — has SCAC, Port, FC, Base Rate but no Lookup column.
+       May be multi-sheet (data in sheet containing 'Dray' or 'Master' or '3P').
+       Lookup is generated as SCAC + Port + FC. Fuel Surcharge is added to
+       Base Rate to produce a CPC column if available.
+
     Returns:
         DataFrame with rate data, regardless of input format.
     """
     import io
     buf = io.BytesIO(file_bytes)
-    
+
     # Try default load first (header=0)
     df = pd.read_excel(buf, header=0)
-    
+
     # Quick check: if the expected key columns already exist, return immediately
     if 'Lookup' in df.columns and 'SCAC' in df.columns:
         return df
-    
-    # ---------- Master Rate Card detection ----------
-    # Re-open the workbook and look for a sheet matching "Master Sheet"
+
+    # ---------- US Dray Master format detection ----------
+    # Has SCAC, Port, FC, Base Rate but no Lookup column
+    if 'SCAC' in df.columns and 'Port' in df.columns and 'FC' in df.columns and 'Base Rate' in df.columns:
+        df = _transform_dray_master_format(df)
+        logger.info("Detected US Dray Master format (first sheet)")
+        return df
+
+    # Check other sheets for dray master format
     buf.seek(0)
     xls = pd.ExcelFile(buf)
-    
+
+    dray_sheet = None
+    for name in xls.sheet_names:
+        name_lower = name.lower()
+        if 'dray' in name_lower or ('master' in name_lower and '3p' in name_lower):
+            dray_sheet = name
+            break
+        if 'master' in name_lower and 'structure' not in name_lower:
+            dray_sheet = name
+
+    if dray_sheet:
+        candidate = pd.read_excel(xls, sheet_name=dray_sheet, header=0)
+        if 'SCAC' in candidate.columns and 'Port' in candidate.columns and 'FC' in candidate.columns:
+            df = _transform_dray_master_format(candidate)
+            logger.info(f"Detected US Dray Master format in sheet '{dray_sheet}'")
+            return df
+
+    # ---------- Master Rate Card detection ----------
+    # Re-open the workbook and look for a sheet matching "Master Sheet"
     master_sheet = None
     for name in xls.sheet_names:
         if 'master sheet' in name.lower() and 'original' not in name.lower():
             master_sheet = name
             break
-    
+
     if master_sheet:
         # Scan the first 10 rows to find the header row containing 'Lookup' and 'SCAC'
         preview = pd.read_excel(xls, sheet_name=master_sheet, header=None, nrows=10)
@@ -144,12 +294,12 @@ def _load_rate_file(file_bytes, file_name):
             if 'Lookup' in row_values and 'SCAC' in row_values:
                 header_row = i
                 break
-        
+
         if header_row is not None:
             df = pd.read_excel(xls, sheet_name=master_sheet, header=header_row)
             logger.info(f"Detected Master Rate Card format in sheet '{master_sheet}' (header row {header_row})")
             return df
-    
+
     # ---------- Generic header-row scan (fallback) ----------
     # The file might have metadata rows above the header in the first sheet.
     # Scan the first 10 rows for 'Lookup'/'SCAC'.
@@ -162,9 +312,41 @@ def _load_rate_file(file_bytes, file_name):
             df = pd.read_excel(buf, header=i)
             logger.info(f"Detected rate data header at row {i}")
             return df
-    
+
     # Nothing matched — return the original default load; validate_and_process_rate_data
     # will raise a clear error if required columns are missing.
+    return df
+
+
+def _transform_dray_master_format(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Transform US Dray Master format into the standard rate format.
+
+    Input columns: SCAC, Port, FC, Base Rate, Fuel Surcharge, Carrier Name, ...
+    Output: adds Lookup (SCAC+Port+FC) and CPC (Base Rate + Fuel Surcharge).
+    """
+    df = df.copy()
+
+    # Generate Lookup key: SCAC + Port + FC
+    df['Lookup'] = (
+        df['SCAC'].astype(str).str.strip() +
+        df['Port'].astype(str).str.strip() +
+        df['FC'].astype(str).str.strip()
+    )
+
+    # Ensure Base Rate is numeric
+    df['Base Rate'] = pd.to_numeric(df['Base Rate'], errors='coerce')
+
+    # Compute CPC (Cost Per Container) = Base Rate + Fuel Surcharge if available
+    if 'Fuel Surcharge' in df.columns:
+        fuel = pd.to_numeric(df['Fuel Surcharge'], errors='coerce').fillna(0)
+        df['CPC'] = df['Base Rate'] + fuel
+
+    # Drop rows without essential data
+    df = df.dropna(subset=['SCAC', 'Port', 'FC', 'Base Rate'])
+
+    logger.info(f"Transformed Dray Master: {len(df)} rows, {df['SCAC'].nunique()} carriers, {df['Port'].nunique()} ports")
+
     return df
 
 def load_data_files(gvt_file, rate_file, performance_file):

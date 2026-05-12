@@ -60,7 +60,7 @@ def build_container_origin_map(original_data, carrier_col='Dray SCAC(FL)', week_
         }}
     """
     container_map = {}
-    
+
     context_cols = {
         'discharged_port': 'Discharged Port',
         'lane': 'Lane',
@@ -71,43 +71,54 @@ def build_container_origin_map(original_data, carrier_col='Dray SCAC(FL)', week_
         'vessel': 'Vessel',
         'week_number': 'Week Number'
     }
-    
-    for _, row in original_data.iterrows():
-        carrier = row.get(carrier_col, 'Unknown')
-        if pd.isna(carrier):
-            carrier = 'Unknown'
-        week = row.get(week_col, 0)
-        container_str = row.get('Container Numbers', '')
-        
-        # Parse all container IDs from this row
-        container_ids = parse_container_ids(container_str)
-        
-        # Build context for each container
+
+    # Determine which context columns exist in the data
+    available_context = {k: v for k, v in context_cols.items() if v in original_data.columns}
+
+    # Build column list with stable positional access (deduplicate)
+    base_cols = ['Container Numbers', carrier_col, week_col]
+    extra_context = {k: v for k, v in available_context.items() if v not in base_cols}
+    cols = base_cols + list(extra_context.values())
+    df = original_data[cols].copy()
+    df[carrier_col] = df[carrier_col].fillna('Unknown')
+
+    context_keys = list(extra_context.keys())
+    all_context_keys = list(context_cols.keys())
+
+    cn_col_values = df['Container Numbers'].tolist()
+    carrier_values = df.iloc[:, 1].tolist()
+    week_values = df.iloc[:, 2].tolist()
+    context_arrays = [df[col].tolist() for col in extra_context.values()]
+
+    for row_i in range(len(df)):
+        container_ids = parse_container_ids(cn_col_values[row_i])
+        if not container_ids:
+            continue
+        carrier = carrier_values[row_i]
+        week_val = week_values[row_i]
+        week_int = int(week_val) if pd.notna(week_val) else 0
         context = {
             'original_carrier': carrier,
-            'week': int(week) if pd.notna(week) else 0
+            'week': week_int,
+            'week_number': week_int,
         }
-        
-        # Add location context with standardized keys
-        for key, col_name in context_cols.items():
-            if col_name in row.index:
-                context[key] = row[col_name] if pd.notna(row[col_name]) else ''
-            else:
+        for ci, key in enumerate(context_keys):
+            val = context_arrays[ci][row_i]
+            context[key] = val if pd.notna(val) else ''
+        for key in all_context_keys:
+            if key not in context:
                 context[key] = ''
-        
-        # Map each container to its origin
+
         for container_id in container_ids:
             if container_id not in container_map:
                 container_map[container_id] = context
             else:
-                # Container appears multiple times - this shouldn't happen
-                # Keep first occurrence but flag it
                 if container_map[container_id].get('duplicate'):
                     container_map[container_id]['duplicate_count'] = container_map[container_id].get('duplicate_count', 1) + 1
                 else:
                     container_map[container_id]['duplicate'] = True
                     container_map[container_id]['duplicate_count'] = 2
-    
+
     return container_map
 
 
@@ -197,79 +208,66 @@ def trace_container_movements(current_data, origin_map, carrier_col='Dray SCAC(F
         
         original_group_state[group_key][orig_carrier].append(container_id)
     
-    for _, row in current_data.iterrows():
-        current_carrier = row.get(carrier_col, 'Unknown')
-        if pd.isna(current_carrier):
-            current_carrier = 'Unknown'
-        container_str = row.get('Container Numbers', '')
+    # Pre-compute group keys for all rows vectorially
+    _group_key_df = current_data[group_cols].copy()
+    for col in group_cols:
+        if col == 'Week Number':
+            _group_key_df[col] = pd.to_numeric(_group_key_df[col], errors='coerce').fillna(0).astype(int)
+        else:
+            _group_key_df[col] = _group_key_df[col].fillna('')
+    _group_keys = list(_group_key_df.itertuples(index=False, name=None))
+
+    _carriers_series = current_data[carrier_col].fillna('Unknown').tolist()
+    _cn_series = current_data['Container Numbers'].fillna('').tolist()
+
+    for i, (group_key, current_carrier, container_str) in enumerate(
+        zip(_group_keys, _carriers_series, _cn_series)
+    ):
         container_ids = parse_container_ids(container_str)
-        
-        # Build group key for this row (normalize types to match origin map)
-        group_key_values = []
-        for col in group_cols:
-            val = row.get(col, '')
-            # Normalize week number to int for consistent matching
-            if col == 'Week Number' and pd.notna(val):
-                try:
-                    val = int(val)
-                except (ValueError, TypeError):
-                    pass
-            elif pd.isna(val):
-                val = ''
-            group_key_values.append(val)
-        group_key = tuple(group_key_values)
-        
-        # Get original count for THIS carrier IN THIS GROUP
+
         original_count_in_group = 0
         if group_key in original_group_state and current_carrier in original_group_state[group_key]:
             original_count_in_group = len(original_group_state[group_key][current_carrier])
-        
+
         kept = []
         flipped = []
         unknown = []
         flip_summary = {}
-        
+
         for container_id in container_ids:
             if container_id not in origin_map:
-                # New container (shouldn't happen normally)
                 unknown.append(container_id)
             else:
-                origin = origin_map[container_id]
-                orig_carrier = origin['original_carrier']
-                
+                orig_carrier = origin_map[container_id]['original_carrier']
                 if orig_carrier == current_carrier:
-                    # Container stayed with same carrier
                     kept.append(container_id)
                 else:
-                    # Container moved from different carrier
                     flipped.append((container_id, orig_carrier))
                     flip_summary[orig_carrier] = flip_summary.get(orig_carrier, 0) + 1
-        
+
         trace_results.append({
             'kept_containers': kept,
             'flipped_containers': flipped,
             'unknown_containers': unknown,
             'flip_summary': flip_summary,
-            'flip_containers_by_source': {carrier: [cid for cid, c in flipped if c == carrier] for carrier in flip_summary.keys()},  # NEW: containers grouped by source carrier
+            'flip_containers_by_source': {carrier: [cid for cid, c in flipped if c == carrier] for carrier in flip_summary.keys()},
             'total_kept': len(kept),
             'total_flipped': len(flipped),
             'total_unknown': len(unknown),
-            'original_count': original_count_in_group,  # PER-GROUP count
+            'original_count': original_count_in_group,
             'current_count': len(container_ids),
-            'all_original_containers': original_group_state.get(group_key, {}).get(current_carrier, []) if group_key in original_group_state else [],  # NEW: original container IDs
-            'current_carrier': current_carrier  # Store current carrier for destination lookup
+            'all_original_containers': original_group_state.get(group_key, {}).get(current_carrier, []) if group_key in original_group_state else [],
+            'current_carrier': current_carrier
         })
     
-    # Build global container destinations map: {container_id: new_carrier}
+    # Build global container destinations map via vectorized explode
     container_destinations = {}
-    for idx, row in current_data.iterrows():
-        carrier = row.get(carrier_col, 'Unknown')
-        if pd.isna(carrier):
-            carrier = 'Unknown'
-        container_str = row.get('Container Numbers', '')
-        for cid in parse_container_ids(container_str):
+    _carriers = current_data[carrier_col].fillna('Unknown')
+    _cn_strs = current_data['Container Numbers'].fillna('')
+    for carrier, cn_str in zip(_carriers, _cn_strs):
+        for cid in parse_container_ids(cn_str):
             container_destinations[cid] = carrier
-    
+
     return trace_results, container_destinations
 
 

@@ -39,59 +39,67 @@ def add_carrier_flips_column(current_data, original_data, carrier_col='Dray SCAC
     if original_data is None or original_data.empty:
         current_data['Carrier Flips'] = 'No baseline'
         return current_data
-    
+
     group_cols = get_grouping_columns(
-        current_data, 
+        current_data,
         base_cols=['Discharged Port', 'Lane', 'Facility', 'Week Number']
     )
-    
+
     if not group_cols:
         current_data['Carrier Flips'] = 'No groups'
         return current_data
-    
-    # Build original state: {group_key: {carrier: count}}
+
+    # Build original state via groupby instead of iterrows
+    orig_for_group = original_data.copy()
+    orig_for_group[carrier_col] = orig_for_group[carrier_col].fillna('Unknown')
+    for col in group_cols:
+        orig_for_group[col] = orig_for_group[col].fillna('')
+
+    orig_agg = (
+        orig_for_group.groupby(group_cols + [carrier_col], sort=False)['Container Count']
+        .sum()
+        .reset_index()
+    )
+    # Build nested dict: group_key -> {carrier: count}
     original_state = {}
-    for _, row in original_data.iterrows():
-        key = tuple(row.get(col, '') for col in group_cols)
-        carrier = row.get(carrier_col, 'Unknown')
-        count = row.get('Container Count', 0)
+    for key_vals, grp in orig_agg.groupby(group_cols, sort=False):
+        if not isinstance(key_vals, tuple):
+            key_vals = (key_vals,)
+        original_state[key_vals] = dict(zip(grp[carrier_col], grp['Container Count']))
+
+    # Vectorized lookup for current_data
+    curr_keys = current_data[group_cols].fillna('').apply(tuple, axis=1)
+    curr_carriers = current_data[carrier_col].fillna('Unknown')
+    curr_counts = current_data['Container Count'].fillna(0)
+
+    def _compute_flip(key, curr_carrier, curr_count):
         if key not in original_state:
-            original_state[key] = {}
-        original_state[key][carrier] = original_state[key].get(carrier, 0) + count
-    
-    flips = []
-    for _, row in current_data.iterrows():
-        key = tuple(row.get(col, '') for col in group_cols)
-        curr_carrier = row.get(carrier_col, 'Unknown')
-        curr_count = row.get('Container Count', 0)
-        
-        if key not in original_state:
-            flips.append("🆕 New group")
-            continue
-        
+            return "🆕 New group"
         orig_group = original_state[key]
         orig_own_count = orig_group.get(curr_carrier, 0)
-        
         if orig_own_count == 0:
             orig_carriers = [c for c, cnt in orig_group.items() if cnt > 0]
-            if len(orig_carriers) == 0:
-                flips.append(f"🔄 New: {curr_count:.0f}")
-            elif len(orig_carriers) == 1:
-                flips.append(f"🔄 New: {curr_count:.0f} (was {orig_carriers[0]})")
-            elif len(orig_carriers) <= 3:
-                flips.append(f"🔄 New: {curr_count:.0f} (was {', '.join(orig_carriers)})")
+            n = len(orig_carriers)
+            if n == 0:
+                return f"🔄 New: {curr_count:.0f}"
+            elif n == 1:
+                return f"🔄 New: {curr_count:.0f} (was {orig_carriers[0]})"
+            elif n <= 3:
+                return f"🔄 New: {curr_count:.0f} (was {', '.join(orig_carriers)})"
             else:
-                flips.append(f"🔄 New: {curr_count:.0f} (was {len(orig_carriers)} carriers)")
+                return f"🔄 New: {curr_count:.0f} (was {n} carriers)"
+        diff = curr_count - orig_own_count
+        if abs(diff) < 0.5:
+            return f"✓ Kept {orig_own_count:.0f}"
+        elif diff > 0:
+            return f"✓ Had {orig_own_count:.0f}, now {curr_count:.0f} (+{diff:.0f})"
         else:
-            diff = curr_count - orig_own_count
-            if abs(diff) < 0.5:
-                flips.append(f"✓ Kept {orig_own_count:.0f}")
-            elif diff > 0:
-                flips.append(f"✓ Had {orig_own_count:.0f}, now {curr_count:.0f} (+{diff:.0f})")
-            else:
-                flips.append(f"✓ Had {orig_own_count:.0f}, now {curr_count:.0f} ({diff:.0f})")
-    
-    current_data['Carrier Flips'] = flips
+            return f"✓ Had {orig_own_count:.0f}, now {curr_count:.0f} ({diff:.0f})"
+
+    current_data['Carrier Flips'] = [
+        _compute_flip(k, c, cnt)
+        for k, c, cnt in zip(curr_keys, curr_carriers, curr_counts)
+    ]
     return current_data
 
 

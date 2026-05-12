@@ -326,22 +326,27 @@ def _cascading_allocate_single_group(
     
     # Build carrier lookup — aggregate when a carrier appears in multiple rows
     # (e.g. same carrier on different vessels within the same lane/week)
+    # Vectorized: use groupby to sum containers and concat numbers, then take first row per carrier
     carrier_data = {}
-    for idx, row in group_data.iterrows():
+    if container_numbers_column in group_data.columns:
+        cn_agg = (
+            group_data.groupby(carrier_column, sort=False)[container_numbers_column]
+            .apply(lambda s: ', '.join(str(v) for v in s.dropna() if str(v).strip()))
+            .to_dict()
+        )
+    else:
+        cn_agg = {}
+    count_agg = group_data.groupby(carrier_column, sort=False)[container_column].sum().to_dict()
+
+    # Take first row per carrier as the template
+    first_rows = group_data.drop_duplicates(subset=[carrier_column], keep='first')
+    for _, row in first_rows.iterrows():
         carrier = row[carrier_column]
-        if carrier not in carrier_data:
-            carrier_data[carrier] = row.to_dict()
-        else:
-            # Sum container count across rows for same carrier
-            carrier_data[carrier][container_column] += row[container_column]
-            # Concatenate container numbers
-            if container_numbers_column in row.index and pd.notna(row.get(container_numbers_column)):
-                existing = carrier_data[carrier].get(container_numbers_column, '') or ''
-                new_nums = str(row[container_numbers_column]).strip()
-                if existing and new_nums:
-                    carrier_data[carrier][container_numbers_column] = existing + ', ' + new_nums
-                elif new_nums:
-                    carrier_data[carrier][container_numbers_column] = new_nums
+        d = row.to_dict()
+        d[container_column] = count_agg.get(carrier, 0)
+        if cn_agg:
+            d[container_numbers_column] = cn_agg.get(carrier, '')
+        carrier_data[carrier] = d
     
     # Get LP-based ranking for carriers in this group
     carrier_ranks = _rank_carriers_from_lp(
@@ -513,21 +518,19 @@ def _rank_carriers_from_lp(
     
     # Rank by container allocation in LP results (higher allocation = better rank)
     if carrier_column in lp_group.columns and container_column in lp_group.columns:
-        # Sort once and create rank dictionary
-        lp_group = lp_group.sort_values(container_column, ascending=False)
-        
-        # Use dictionary comprehension for efficiency
-        carrier_ranks = {row[carrier_column]: rank + 1 
-                        for rank, (_, row) in enumerate(lp_group.iterrows()) 
-                        if row[carrier_column] in carriers}
-        
+        lp_group = lp_group.sort_values(container_column, ascending=False).reset_index(drop=True)
+        carriers_set = set(carriers)
+        # Vectorized: filter to relevant carriers and assign ranks by position
+        in_group = lp_group[lp_group[carrier_column].isin(carriers_set)]
+        carrier_ranks = {c: rank + 1 for rank, c in enumerate(in_group[carrier_column])}
+
         # Add any carriers not in LP results with lower ranks
         next_rank = len(carrier_ranks) + 1
         for carrier in carriers:
             if carrier not in carrier_ranks:
                 carrier_ranks[carrier] = next_rank
                 next_rank += 1
-        
+
         return carrier_ranks
     
     # Fallback: alphabetical (filter out NaN values)
