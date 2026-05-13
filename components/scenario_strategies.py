@@ -69,11 +69,6 @@ def apply_optimized_strategy(display_data_with_rates, carrier_col,
         optimization_source, carrier_facility_exclusions, carrier_col
     )
 
-    # Split: only optimize rows with valid rates
-    has_valid_rate = optimization_source['Base Rate'].notna() & (optimization_source['Base Rate'] != 0)
-    rated_data = optimization_source[has_valid_rate].copy()
-    unrated_data = optimization_source[~has_valid_rate].copy()
-
     cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0
     performance_weight = st.session_state.get('opt_performance_weight', 30) / 100.0
     max_growth_pct = st.session_state.get('opt_max_growth_pct', 30) / 100.0
@@ -83,9 +78,9 @@ def apply_optimized_strategy(display_data_with_rates, carrier_col,
 
     try:
         allocated = None
-        if len(rated_data) > 0:
+        if len(optimization_source) > 0:
             allocated = cascading_allocate_with_constraints(
-                rated_data,
+                optimization_source,
                 max_growth_pct=max_growth_pct,
                 cost_weight=cost_weight,
                 performance_weight=performance_weight,
@@ -100,8 +95,6 @@ def apply_optimized_strategy(display_data_with_rates, carrier_col,
         return optimization_source, 0, 0
 
     if allocated is not None and len(allocated) > 0:
-        if len(unrated_data) > 0:
-            allocated = pd.concat([allocated, unrated_data], ignore_index=True)
         display_data = allocated
     else:
         display_data = optimization_source
@@ -150,21 +143,14 @@ def apply_performance_strategy(display_data_with_rates, carrier_col,
         if 'Container Numbers' in perf_input.columns:
             perf_input['Container Count'] = perf_input['Container Numbers'].apply(count_containers)
 
-        # Split: only optimize rows with valid rates
-        has_valid_rate = perf_input['Base Rate'].notna() & (perf_input['Base Rate'] != 0)
-        rated_perf = perf_input[has_valid_rate].copy()
-        unrated_perf = perf_input[~has_valid_rate].copy()
-
         try:
             allocated = allocate_to_highest_performance(
-                rated_perf,
+                perf_input,
                 carrier_column=carrier_col,
                 container_column='Container Count',
                 performance_column='Performance_Score',
                 container_numbers_column='Container Numbers',
             )
-            if len(unrated_perf) > 0:
-                allocated = pd.concat([allocated, unrated_perf], ignore_index=True)
         except ValueError as exc:
             st.warning(f"Unable to build performance scenario: {exc}")
             return performance_source, 0, 0

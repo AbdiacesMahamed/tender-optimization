@@ -209,15 +209,10 @@ def _calc_performance_cost(scenario_data, carrier_facility_exclusions, rate_cols
     try:
         carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
         filtered = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
-        has_valid_rate = filtered['Base Rate'].notna() & (filtered['Base Rate'] != 0)
-        rated_perf = filtered[has_valid_rate].copy()
-        unrated_perf = filtered[~has_valid_rate].copy()
         allocated = allocate_to_highest_performance(
-            rated_perf, carrier_column=carrier_col, container_column='Container Count',
+            filtered, carrier_column=carrier_col, container_column='Container Count',
             performance_column='Performance_Score', container_numbers_column='Container Numbers',
         )
-        if len(unrated_perf) > 0:
-            allocated = pd.concat([allocated, unrated_perf], ignore_index=True)
         cost = allocated[rate_cols['total_rate']].sum() if rate_cols['total_rate'] in allocated.columns else None
         st.session_state['_cached_perf_allocated'] = allocated
         return cost
@@ -231,9 +226,8 @@ def _calc_cheapest_cost(scenario_data, carrier_facility_exclusions, rate_cols):
     try:
         carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
         working = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
-        working[rate_cols['rate']] = pd.to_numeric(working[rate_cols['rate']], errors='coerce')
+        working[rate_cols['rate']] = pd.to_numeric(working[rate_cols['rate']], errors='coerce').fillna(0)
         working['Container Count'] = pd.to_numeric(working['Container Count'], errors='coerce').fillna(0)
-        working = working[working[rate_cols['rate']].notna()]
         if len(working) == 0:
             return None
         group_cols = [col for col in ['Category', 'Lane', 'Week Number'] if col in working.columns]
@@ -270,23 +264,18 @@ def _calc_optimized_cost(scenario_data, carrier_facility_exclusions,
         optimization_source = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
         if 'Container Numbers' in optimization_source.columns:
             optimization_source['Container Count'] = optimization_source['Container Numbers'].apply(count_containers)
-        has_valid_rate = optimization_source['Base Rate'].notna() & (optimization_source['Base Rate'] != 0)
-        rated_data = optimization_source[has_valid_rate].copy()
-        unrated_data = optimization_source[~has_valid_rate].copy()
         cost_weight = st.session_state.get('opt_cost_weight', 70) / 100.0
         performance_weight = st.session_state.get('opt_performance_weight', 30) / 100.0
         max_growth_pct = st.session_state.get('opt_max_growth_pct', 30) / 100.0
         optimized_allocated = None
-        if len(rated_data) > 0:
+        if len(optimization_source) > 0:
             optimized_allocated = cascading_allocate_with_constraints(
-                rated_data, max_growth_pct=max_growth_pct, cost_weight=cost_weight,
+                optimization_source, max_growth_pct=max_growth_pct, cost_weight=cost_weight,
                 performance_weight=performance_weight, n_historical_weeks=5,
                 carrier_column=carrier_col, container_column='Container Count',
                 excluded_carriers=max_constrained_carriers, historical_data=historical_data_source,
             )
         if optimized_allocated is not None and len(optimized_allocated) > 0:
-            if len(unrated_data) > 0:
-                optimized_allocated = pd.concat([optimized_allocated, unrated_data], ignore_index=True)
             cost = optimized_allocated[rate_cols['total_rate']].sum() if rate_cols['total_rate'] in optimized_allocated.columns else None
             st.session_state['_cached_opt_allocated'] = optimized_allocated
             return cost
