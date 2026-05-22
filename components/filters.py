@@ -130,10 +130,10 @@ def filter_interface_fragment(comprehensive_data):
         st.markdown("**📅 Week Numbers:**")
         week_search = st.text_input("Search weeks...", key="week_search", placeholder="Type to search weeks")
         
-        week_options = sorted([x for x in comprehensive_data['Week Number'].unique() if pd.notna(x)])
+        week_options = sorted({int(x) for x in comprehensive_data['Week Number'].unique() if pd.notna(x)})
         if week_search:
             week_options = [week for week in week_options if week_search.lower() in str(week).lower()]
-        
+
         week_display_options = ['All'] + [str(week) for week in week_options]
         
         current_week_selection = st.multiselect(
@@ -175,7 +175,7 @@ def filter_interface_fragment(comprehensive_data):
         # Check if filters actually changed
         new_ports = [p for p in current_port_selection if p != 'All']
         new_fcs = [f for f in current_fc_selection if f != 'All']
-        new_weeks = [int(w) for w in current_week_selection if w != 'All']
+        new_weeks = [int(float(w)) for w in current_week_selection if w != 'All']
         new_scacs = [s for s in current_scac_selection if s != 'All']
         
         # Only update if filters changed
