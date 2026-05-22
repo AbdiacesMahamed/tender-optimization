@@ -461,3 +461,82 @@ class TestClaimedByAttribution:
         assert p50['claimed_by'] is not None
         assert 100 in p50['claimed_by']
         assert 'Priority 100' in p50['reason']
+
+
+# ==================== percent fallback against remainder ====================
+
+class TestPercentFallback:
+    """When higher-priority constraints consume part of the pool, percent uses the
+    remainder as denominator and reports a shortfall against the original-pool target."""
+
+    def test_no_overlap_no_shortfall(self, sample_data):
+        """50% of full pool (10) -> 5 allocated, no shortfall."""
+        constraints = pd.DataFrame([{
+            'Priority Score': 10, 'Carrier': 'EFGH',
+            'Maximum Container Count': None, 'Minimum Container Count': None,
+            'Percent Allocation': 50, 'Category': None, 'Lane': None, 'Port': None,
+            'Week Number': None, 'Terminal': None, 'SSL': None, 'Vessel': None,
+            'Excluded FC': None,
+        }])
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        assert entry['status'] == 'Applied'
+        assert entry['containers_allocated'] == 5
+        # No shortfall reason
+        assert entry['reason'] is None or 'shortfall' not in (entry['reason'] or '').lower()
+
+    def test_overlap_recomputes_against_remainder_with_shortfall(self, sample_data):
+        """P100 takes 8 of 10; P50 wants 50% — recompute against remainder of 2,
+        target=1, status=Partial with shortfall vs original target of 5."""
+        constraints = pd.DataFrame([
+            {  # P100 takes 8
+                'Priority Score': 100, 'Carrier': 'ABCD',
+                'Maximum Container Count': 8, 'Minimum Container Count': None,
+                'Percent Allocation': None, 'Category': None, 'Lane': None, 'Port': None,
+                'Week Number': None, 'Terminal': None, 'SSL': None, 'Vessel': None,
+                'Excluded FC': None,
+            },
+            {  # P50 wants 50% of original pool
+                'Priority Score': 50, 'Carrier': 'EFGH',
+                'Maximum Container Count': None, 'Minimum Container Count': None,
+                'Percent Allocation': 50, 'Category': None, 'Lane': None, 'Port': None,
+                'Week Number': None, 'Terminal': None, 'SSL': None, 'Vessel': None,
+                'Excluded FC': None,
+            },
+        ])
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        p50 = next(s for s in summary if s['priority'] == 50)
+        # 50% of remainder (2) = 1, ceil. Allocated = 1.
+        assert p50['containers_allocated'] == 1
+        # Original target was 5; shortfall = 4
+        assert p50['status'] == 'Partial (shortfall: 4)'
+        # Reason names the consuming priority and explains the recomputation
+        assert 'remainder' in p50['reason'].lower()
+        assert 'Priority 100' in p50['reason']
+        # Method string surfaces both denominators
+        assert 'remainder' in p50['method']
+
+    def test_no_shortfall_when_count_unchanged(self, sample_data):
+        """If P100 takes 1 of 10, P50's 50% of remainder=9 still ceils to 5,
+        matching the original-pool target of 5. No shortfall."""
+        constraints = pd.DataFrame([
+            {  # P100 takes 1
+                'Priority Score': 100, 'Carrier': 'ABCD',
+                'Maximum Container Count': 1, 'Minimum Container Count': None,
+                'Percent Allocation': None, 'Category': None, 'Lane': None, 'Port': None,
+                'Week Number': None, 'Terminal': None, 'SSL': None, 'Vessel': None,
+                'Excluded FC': None,
+            },
+            {  # P50 wants 50%
+                'Priority Score': 50, 'Carrier': 'EFGH',
+                'Maximum Container Count': None, 'Minimum Container Count': None,
+                'Percent Allocation': 50, 'Category': None, 'Lane': None, 'Port': None,
+                'Week Number': None, 'Terminal': None, 'SSL': None, 'Vessel': None,
+                'Excluded FC': None,
+            },
+        ])
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        p50 = next(s for s in summary if s['priority'] == 50)
+        # 50% of 10 = 5, 50% of 9 = 5 (ceil) → no count difference → no shortfall
+        assert p50['containers_allocated'] == 5
+        assert p50['status'] == 'Applied'

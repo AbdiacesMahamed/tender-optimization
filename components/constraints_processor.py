@@ -333,6 +333,11 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     
     constrained_records = []
     remaining_data = data.copy().reset_index(drop=True)
+    # Snapshot of the input data BEFORE any allocations run. Percent allocations use this as
+    # the denominator so a "30%" rule always means 30% of the original scope volume, even
+    # after higher-priority constraints have consumed part of the pool. Indexes are aligned
+    # with remaining_data via reset_index, so the same mask selects the same rows in both.
+    original_data = remaining_data.copy()
     # Snapshot of original container IDs per row index — survives mutation of remaining_data
     # so we can attribute "missing" containers back to the priorities that claimed them.
     _original_containers_by_idx = (
@@ -685,6 +690,20 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             else 0
         )
         eligible_data = eligible_data[eligible_data['_available_containers'] > 0].copy()
+
+        # Original pool size for percent calculations: count containers in the same scope
+        # against the snapshot taken before any constraints ran. This freezes the denominator
+        # so "30%" always means 30% of the original eligible volume regardless of how much
+        # earlier-priority constraints have already claimed.
+        original_scope_data = original_data[mask]
+        if 'Container Numbers' in original_scope_data.columns:
+            original_pool_size = int(
+                original_scope_data['Container Numbers'].map(
+                    lambda s: len(parse_container_ids(s)) if pd.notna(s) else 0
+                ).sum()
+            )
+        else:
+            original_pool_size = 0
         
         # Check if this is a maximum constraint - if so, validate we have a carrier
         is_potential_max_constraint = (
@@ -743,12 +762,53 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
         target_containers = None
         allocation_method = None
         is_maximum_constraint = False  # Track if this is a hard cap
-        
+
         # Unified allocation: Percent sets the base target, Min/Max are hard bounds
         # Priority: Percent computes target → clamped by Min (floor) → clamped by Max (ceiling)
         has_max = pd.notna(constraint['Maximum Container Count']) and constraint['Maximum Container Count'] > 0
         has_min = pd.notna(constraint['Minimum Container Count']) and constraint['Minimum Container Count'] > 0
         has_pct = pd.notna(constraint['Percent Allocation']) and constraint['Percent Allocation'] > 0
+
+        # Lockout: Percent Allocation == 0 or Maximum Container Count == 0 means the user
+        # wants this carrier blocked from receiving any containers in this scope (allocate
+        # nothing AND keep the optimizer from sending volume here). Detect before the
+        # has_max/has_min/has_pct gate, since both 0% and max=0 would otherwise fall through
+        # to "No allocation amount" and silently leave the carrier as a free target.
+        is_zero_pct = (
+            pd.notna(constraint.get('Percent Allocation'))
+            and constraint['Percent Allocation'] == 0
+        )
+        is_zero_max = (
+            pd.notna(constraint.get('Maximum Container Count'))
+            and constraint['Maximum Container Count'] == 0
+        )
+        if (is_zero_pct or is_zero_max) and target_carrier:
+            method_label = "0% (lockout)" if is_zero_pct else "max 0 (lockout)"
+            log_explanation(
+                f"Lockout: {target_carrier} blocked from this scope ({method_label})",
+                'block'
+            )
+            max_constrained_carriers.append({
+                'carrier': target_carrier,
+                'category': constraint.get('Category') if is_valid_value(constraint.get('Category')) else None,
+                'lane': constraint.get('Lane') if is_valid_value(constraint.get('Lane')) else None,
+                'port': constraint.get('Port') if is_valid_value(constraint.get('Port')) else None,
+                'week': constraint.get('Week Number') if is_valid_value(constraint.get('Week Number')) else None,
+            })
+            constraint_summary.append({
+                'priority': constraint['Priority Score'],
+                'description': constraint_desc,
+                'status': 'Applied (Lockout)',
+                'containers_allocated': 0,
+                'eligible_containers': int(total_eligible_containers),
+                'method': method_label,
+                'scope': _build_scope_dict(constraint, target_carrier, all_excluded_facilities),
+                'reason': (
+                    f"{target_carrier} is locked out of this scope. The optimizer will not "
+                    "send any containers to this carrier in matching groups."
+                ),
+            })
+            continue
 
         if has_max or has_min or has_pct:
             # Validation: Max constraints require a carrier
@@ -768,9 +828,23 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                 })
                 continue
 
-            # Step 1: Compute base target from percent (or default to all eligible)
+            # Step 1: Compute base target from percent (or default to all eligible).
+            # Percent uses total_eligible_containers (the *remainder* after higher-priority
+            # constraints have run) as the denominator, so overlapping constraints degrade
+            # gracefully instead of failing. If the original pool shrank, we record the
+            # shortfall against the original-pool-based target so the user sees the impact.
+            pct_target_against_original = None  # set only when percent is in play
             if has_pct:
                 percent_value = constraint['Percent Allocation'] / 100
+                # Original-pool target — what the constraint *would* have allocated had no
+                # higher-priority constraint touched this scope. Used purely for shortfall
+                # reporting; the actual target uses the remainder.
+                original_target_raw = original_pool_size * percent_value
+                if 0 < original_target_raw < 1:
+                    pct_target_against_original = 1
+                else:
+                    pct_target_against_original = math.ceil(original_target_raw)
+
                 calculated_containers = total_eligible_containers * percent_value
                 if calculated_containers > 0 and calculated_containers < 1:
                     target_containers = 1
@@ -800,10 +874,21 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             if has_max and total_eligible_containers == 0:
                 target_containers = 0
 
-            # Build allocation method description
+            # Build allocation method description. For percent, show the denominator
+            # actually used. If the remainder differs from the original pool, also note
+            # what the original-pool target would have been — that's the shortfall.
             method_parts = []
             if has_pct:
-                method_parts.append(f"{constraint['Percent Allocation']}% = {math.ceil(total_eligible_containers * constraint['Percent Allocation'] / 100)}")
+                if total_eligible_containers < original_pool_size:
+                    method_parts.append(
+                        f"{constraint['Percent Allocation']}% of {int(total_eligible_containers)} "
+                        f"(remainder; original pool was {original_pool_size}) = {target_containers}"
+                    )
+                else:
+                    method_parts.append(
+                        f"{constraint['Percent Allocation']}% of {int(total_eligible_containers)} "
+                        f"= {target_containers}"
+                    )
             if has_min:
                 method_parts.append(f"min {int(constraint['Minimum Container Count'])}")
             if has_max:
@@ -1045,6 +1130,28 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                 constraint_reason = (
                     f"Minimum requested {requested_min} but only {allocated_containers_count} could be "
                     "allocated. Check facility exclusions or other late-stage filters."
+                )
+        elif (has_pct and pct_target_against_original is not None
+              and allocated_containers_count < pct_target_against_original):
+            # Percent shortfall: the original-pool target couldn't be met because higher-priority
+            # constraints consumed part of the scope. Recomputed against the remainder so we got
+            # *something* instead of failing — but flag the gap so the user sees the impact.
+            shortfall = pct_target_against_original - allocated_containers_count
+            constraint_status = f"Partial (shortfall: {shortfall})"
+            if claimed_total > 0:
+                constraint_reason = (
+                    f"{constraint['Percent Allocation']}% of the original {original_pool_size}-container "
+                    f"pool would have been {pct_target_against_original}, but {claimed_total} "
+                    f"container(s) were already claimed by: {claimed_by_str}. Allocated "
+                    f"{allocated_containers_count} ({constraint['Percent Allocation']}% of the "
+                    f"{int(total_eligible_containers)}-container remainder) instead."
+                )
+            else:
+                constraint_reason = (
+                    f"{constraint['Percent Allocation']}% of the original {original_pool_size}-container "
+                    f"pool would have been {pct_target_against_original}, but the remainder was only "
+                    f"{int(total_eligible_containers)}. Allocated {allocated_containers_count} "
+                    f"({constraint['Percent Allocation']}% of the remainder) instead."
                 )
         elif allocated_containers_count == 0 and target_containers > 0:
             if claimed_total > 0:
