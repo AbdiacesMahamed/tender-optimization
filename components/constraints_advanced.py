@@ -3,11 +3,20 @@ Advanced Constraints Module with Excel Upload Support
 
 This module allows users to upload operational constraints via Excel with flexible field support.
 Supports partial input, conflict resolution via priority scores, and pre-scenario enforcement.
+
+NOTE (currently dead code): nothing in app.py / streamlit_app.py / dashboard.py imports
+show_advanced_constraints_interface or apply_advanced_constraints. The active flow goes
+through components.constraints_processor. Category/Port aliasing and 4-char Lane shorthand
+matching have been mirrored here from constraints_processor so this module behaves the same
+way if/when its UI is re-enabled. Future work: consider deleting this file in favor of
+calling apply_constraints_to_data directly, or refactor this module to delegate to it so
+constraint logic lives in one place.
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
 from .config_styling import section_header
+from .constraints_processor import resolve_category_filter, resolve_port_filter
 
 def initialize_advanced_constraints():
     """Initialize session state for advanced constraints"""
@@ -144,7 +153,7 @@ def validate_and_process_constraints(constraints_df, comprehensive_data):
     """Validate and process uploaded constraints"""
     
     # Required columns (at least one must be present to define scope)
-    scope_columns = ['Category', 'Carrier', 'Lane', 'Week Number', 'SSL', 'Vessel']
+    scope_columns = ['Category', 'Carrier', 'Lane', 'Port', 'Week Number', 'SSL', 'Vessel']
     constraint_columns = ['Maximum Container Count', 'Minimum Container Count', 'Percent Allocation']
     
     # Check if we have any scope or constraint columns
@@ -314,26 +323,40 @@ def apply_advanced_constraints(comprehensive_data):
         # Build filter mask based on constraint fields
         mask = pd.Series([True] * len(unconstrained_data), index=unconstrained_data.index)
         
-        # Apply filters for non-null constraint fields
+        # Apply filters for non-null constraint fields.
+        # Category shorthand (CD/TL/Robotics/Devices) expands via resolve_category_filter so the
+        # same constraint files used with constraints_processor work here too.
         if pd.notna(constraint['Category']) and 'Category' in unconstrained_data.columns:
-            mask &= unconstrained_data['Category'] == constraint['Category']
+            allowed_categories = resolve_category_filter(constraint['Category'])
+            mask &= unconstrained_data['Category'].isin(allowed_categories)
             st.write(f"  - Category: {constraint['Category']}")
-        
+
         if pd.notna(constraint['Carrier']):
             mask &= unconstrained_data['Dray SCAC(FL)'] == constraint['Carrier']
             st.write(f"  - Carrier: {constraint['Carrier']}")
-        
+
         if pd.notna(constraint['Lane']) and 'Lane' in unconstrained_data.columns:
             # Support partial lane matching (e.g., "USOAK→" matches all lanes starting with USOAK)
-            lane_pattern = str(constraint['Lane'])
+            # and 4-char facility-code shorthand (e.g., "ABE8" matches "USNYCABE8").
+            lane_pattern = str(constraint['Lane']).strip()
             if '→' in lane_pattern:
-                # Partial match
-                mask &= unconstrained_data['Lane'].str.contains(lane_pattern.replace('→', ''), na=False, regex=False)
+                mask &= unconstrained_data['Lane'].str.contains(
+                    lane_pattern.replace('→', ''), na=False, regex=False
+                )
+            elif len(lane_pattern) <= 4:
+                mask &= unconstrained_data['Lane'].astype(str).str.endswith(lane_pattern)
             else:
-                # Exact match
                 mask &= unconstrained_data['Lane'] == lane_pattern
             st.write(f"  - Lane: {constraint['Lane']}")
         
+        # Port shorthand (NYC/LAX) expands via resolve_port_filter to cover EWR/LGB.
+        # Port wasn't part of this module's original scope columns — added here so behavior
+        # matches constraints_processor when the same upload format is used.
+        if pd.notna(constraint.get('Port')) and 'Discharged Port' in unconstrained_data.columns:
+            allowed_ports = resolve_port_filter(constraint['Port'])
+            mask &= unconstrained_data['Discharged Port'].isin(allowed_ports)
+            st.write(f"  - Port: {constraint['Port']}")
+
         if constraint['Week Number'] is not None and isinstance(constraint['Week Number'], list):
             mask &= unconstrained_data['Week Number'].isin(constraint['Week Number'])
             st.write(f"  - Weeks: {', '.join(map(str, constraint['Week Number']))}")
@@ -355,7 +378,7 @@ def apply_advanced_constraints(comprehensive_data):
             constraint_summary.append({
                 'constraint_id': constraint_idx + 1,
                 'priority': int(constraint['Priority Score']),
-                'status': 'No matching data',
+                'status': 'Failed: No matching data',
                 'allocated_containers': 0,
                 'allocated_records': 0
             })

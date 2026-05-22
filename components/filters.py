@@ -6,6 +6,26 @@ import pandas as pd
 from .config_styling import section_header
 from .utils import normalize_facility_series
 
+
+def build_week_options(week_series: pd.Series) -> list[int]:
+    """Return sorted unique week numbers as ints, dropping NaNs.
+
+    Week Number arrives as a float-typed pandas column when produced by
+    pd.to_numeric (which the merge step uses). Casting to int here keeps
+    the multiselect display values free of trailing ".0" so that
+    parse_selected_weeks can round-trip them back to Python ints.
+    """
+    return sorted({int(x) for x in week_series.unique() if pd.notna(x)})
+
+
+def parse_selected_weeks(selection: list[str]) -> list[int]:
+    """Convert user-selected week strings back to ints, ignoring 'All'.
+
+    Goes through float() so values like '5' and stray '5.0' both parse —
+    int('5.0') would raise ValueError.
+    """
+    return [int(float(w)) for w in selection if w != 'All']
+
 def initialize_filter_session_state():
     """Initialize session state for filters"""
     if 'filter_ports' not in st.session_state:
@@ -130,7 +150,7 @@ def filter_interface_fragment(comprehensive_data):
         st.markdown("**📅 Week Numbers:**")
         week_search = st.text_input("Search weeks...", key="week_search", placeholder="Type to search weeks")
         
-        week_options = sorted({int(x) for x in comprehensive_data['Week Number'].unique() if pd.notna(x)})
+        week_options = build_week_options(comprehensive_data['Week Number'])
         if week_search:
             week_options = [week for week in week_options if week_search.lower() in str(week).lower()]
 
@@ -175,7 +195,7 @@ def filter_interface_fragment(comprehensive_data):
         # Check if filters actually changed
         new_ports = [p for p in current_port_selection if p != 'All']
         new_fcs = [f for f in current_fc_selection if f != 'All']
-        new_weeks = [int(float(w)) for w in current_week_selection if w != 'All']
+        new_weeks = parse_selected_weeks(current_week_selection)
         new_scacs = [s for s in current_scac_selection if s != 'All']
         
         # Only update if filters changed

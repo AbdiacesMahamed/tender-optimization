@@ -11,6 +11,39 @@ from .utils import (
 )
 
 
+# Category shorthand used in user-supplied constraint files → values found in GVT data.
+# Lookup is case-insensitive on the constraint side (key is uppercased before lookup).
+CATEGORY_ALIASES = {
+    'CD': ['Retail CD', 'FBA FCL', 'FBA LCL'],
+    'TL': ['Retail Transload'],
+    'ROBOTICS': ['AMAZON ROBOTICS'],
+    'DEVICES': ['AMAZON DEVICES'],
+}
+
+# Port shorthand used in user-supplied constraint files → discharge ports the user
+# considers part of that port complex. Lookup is case-insensitive.
+PORT_ALIASES = {
+    'NYC': ['NYC', 'EWR'],
+    'LAX': ['LAX', 'LGB'],
+}
+
+
+def resolve_category_filter(value):
+    """Return the list of GVT Category values a constraint Category should match."""
+    if value is None:
+        return []
+    key = str(value).strip().upper()
+    return CATEGORY_ALIASES.get(key, [str(value).strip()])
+
+
+def resolve_port_filter(value):
+    """Return the list of Discharged Port values a constraint Port should match."""
+    if value is None:
+        return []
+    key = str(value).strip().upper()
+    return PORT_ALIASES.get(key, [str(value).strip()])
+
+
 def allocate_specific_containers(row, num_containers, allocated_tracker, target_carrier, week_num):
     """
     Allocate specific container IDs from a row, tracking which containers are allocated
@@ -446,11 +479,27 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
         if 'Facility' in remaining_data.columns else pd.Series(dtype='object')
     )
 
+    def _build_scope_dict(constraint, target_carrier=None, excluded_facilities=None):
+        """Capture the constraint's filter values for the summary."""
+        scope = {}
+        for field in ('Category', 'Lane', 'Port', 'Week Number', 'Terminal', 'SSL', 'Vessel'):
+            val = constraint.get(field)
+            if pd.notna(val) and not (isinstance(val, str) and val.strip() == ''):
+                if field == 'Week Number':
+                    scope[field] = int(val)
+                else:
+                    scope[field] = val
+        if target_carrier:
+            scope['Target Carrier'] = target_carrier
+        if excluded_facilities:
+            scope['Excluded Facilities'] = sorted(excluded_facilities)
+        return scope
+
     for idx, constraint in constraints_df.iterrows():
         # Build filter mask based on provided constraint fields
         # NOTE: Carrier is NOT a filter - it's the TARGET carrier to assign containers to
         mask = pd.Series([True] * len(remaining_data), index=remaining_data.index)
-        
+
         # Helper function to check if value is valid (not None, not NaN, not empty string)
         def is_valid_value(val):
             if pd.isna(val):
@@ -458,7 +507,7 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             if isinstance(val, str) and val.strip() == '':
                 return False
             return True
-        
+
         constraint_desc = f"Priority {constraint['Priority Score']}: "
         filters_applied = []
         
@@ -475,28 +524,44 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                 'priority': constraint['Priority Score'],
                 'description': f"Priority {constraint['Priority Score']}: Excluded FC without Carrier",
                 'status': 'Error: Excluded FC requires Carrier',
-                'containers_allocated': 0
+                'containers_allocated': 0,
+                'eligible_containers': 0,
+                'scope': _build_scope_dict(constraint, excluded_facilities=[excluded_facility]),
+                'reason': (
+                    f"Constraint malformed: 'Excluded FC' was set to {excluded_facility} but no "
+                    "'Carrier' was provided. Add a Carrier so the exclusion has a target."
+                ),
             })
             continue
         
-        # Apply Category filter if specified
+        # Apply Category filter if specified.
+        # User shorthand (CD/TL/Robotics/Devices) expands to the full GVT values via CATEGORY_ALIASES.
         if is_valid_value(constraint['Category']):
             if 'Category' in remaining_data.columns:
-                mask &= remaining_data['Category'] == constraint['Category']
+                allowed_categories = resolve_category_filter(constraint['Category'])
+                mask &= remaining_data['Category'].isin(allowed_categories)
                 filters_applied.append(f"Category={constraint['Category']}")
-        
+
         # DO NOT filter by Carrier - Carrier is the TARGET assignment, not a filter!
         # The constraint means "assign X% to this carrier", not "find X% already with this carrier"
-        
-        # Apply Lane filter if specified
+
+        # Apply Lane filter if specified. Constraint files commonly use 4-char facility codes
+        # (e.g. ABE8) while data carries the full 9-char concatenated lane (e.g. USNYCABE8) —
+        # endswith match keeps the short form usable while still respecting Port filters.
         if is_valid_value(constraint['Lane']):
-            mask &= remaining_data['Lane'] == constraint['Lane']
+            lane_value = str(constraint['Lane']).strip()
+            if len(lane_value) <= 4:
+                mask &= remaining_data['Lane'].astype(str).str.endswith(lane_value)
+            else:
+                mask &= remaining_data['Lane'] == lane_value
             filters_applied.append(f"Lane={constraint['Lane']}")
-        
-        # Apply Port filter if specified
+
+        # Apply Port filter if specified.
+        # User shorthand (NYC/LAX) expands to the full Discharged Port set via PORT_ALIASES.
         if is_valid_value(constraint['Port']):
             if 'Discharged Port' in remaining_data.columns:
-                mask &= remaining_data['Discharged Port'] == constraint['Port']
+                allowed_ports = resolve_port_filter(constraint['Port'])
+                mask &= remaining_data['Discharged Port'].isin(allowed_ports)
                 filters_applied.append(f"Port={constraint['Port']}")
         
         # Apply Week Number filter if specified
@@ -595,11 +660,27 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                 total_eligible_containers = 0
             else:
                 log_explanation(f"No eligible data for constraint: {constraint_desc}", 'warning')
+                # Diagnose why: was it excluded facilities, or just zero filter matches?
+                if all_excluded_facilities and excluded_facility_mask is not None and excluded_facility_mask.any():
+                    excluded_n = int(excluded_facility_mask.sum())
+                    no_match_reason = (
+                        f"No containers matched the constraint filters after removing {excluded_n} row(s) "
+                        f"at excluded facilities ({', '.join(sorted(all_excluded_facilities))}). "
+                        "Check that scope filters and exclusions don't fully eliminate the data."
+                    )
+                else:
+                    no_match_reason = (
+                        "No containers matched the constraint's scope filters. "
+                        "Verify that filter values exist in the underlying data."
+                    )
                 constraint_summary.append({
                     'priority': constraint['Priority Score'],
                     'description': constraint_desc,
-                    'status': 'No matching data',
-                    'containers_allocated': 0
+                    'status': 'Failed: No matching data',
+                    'containers_allocated': 0,
+                    'eligible_containers': 0,
+                    'scope': _build_scope_dict(constraint, target_carrier, all_excluded_facilities),
+                    'reason': no_match_reason,
                 })
                 continue
         else:
@@ -624,7 +705,13 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     'priority': constraint['Priority Score'],
                     'description': constraint_desc,
                     'status': 'Error: No carrier specified for maximum constraint',
-                    'containers_allocated': 0
+                    'containers_allocated': 0,
+                    'eligible_containers': int(total_eligible_containers),
+                    'scope': _build_scope_dict(constraint, target_carrier, all_excluded_facilities),
+                    'reason': (
+                        "Constraint malformed: 'Maximum Container Count' was set but no 'Carrier' "
+                        "was provided. Maximum constraints must name the carrier being capped."
+                    ),
                 })
                 continue
 
@@ -716,7 +803,13 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     'description': constraint_desc,
                     'status': 'Applied (Exclusion Rule)',
                     'containers_allocated': 0,
-                    'method': f"Exclusion: {target_carrier} blocked from {excluded_facility}"
+                    'eligible_containers': int(total_eligible_containers),
+                    'method': f"Exclusion: {target_carrier} blocked from {excluded_facility}",
+                    'scope': _build_scope_dict(constraint, target_carrier, all_excluded_facilities),
+                    'reason': (
+                        f"Exclusion rule active: {target_carrier} is blocked from {excluded_facility}. "
+                        "No containers are allocated by this rule itself; it constrains other allocations."
+                    ),
                 })
                 continue
             else:
@@ -726,7 +819,13 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     'priority': constraint['Priority Score'],
                     'description': constraint_desc,
                     'status': 'No allocation amount',
-                    'containers_allocated': 0
+                    'containers_allocated': 0,
+                    'eligible_containers': int(total_eligible_containers),
+                    'scope': _build_scope_dict(constraint, target_carrier, all_excluded_facilities),
+                    'reason': (
+                        "No 'Maximum', 'Minimum', 'Percent Allocation', or 'Excluded FC' was set. "
+                        "Add at least one to make this constraint actionable."
+                    ),
                 })
                 continue
         
@@ -827,8 +926,15 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     'description': constraint_desc,
                     'status': 'FAILED: Carrier allocated to excluded facility',
                     'containers_allocated': 0,
+                    'eligible_containers': int(total_eligible_containers),
                     'target_containers': target_containers,
-                    'method': allocation_method
+                    'method': allocation_method,
+                    'scope': _build_scope_dict(constraint, target_carrier, all_excluded_facilities),
+                    'reason': (
+                        f"Allocation produced records for {target_carrier} at {excluded_facility}, "
+                        "which is on its excluded-facility list. No alternative carrier was available "
+                        "for those containers, so the entire constraint was rolled back."
+                    ),
                 })
                 continue
             
@@ -854,18 +960,42 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
         
         # Determine status: flag minimum shortfalls
         constraint_status = 'Applied'
+        constraint_reason = None
         if (pd.notna(constraint.get('Minimum Container Count')) and
             constraint['Minimum Container Count'] > 0 and
             allocated_containers_count < int(constraint['Minimum Container Count'])):
-            constraint_status = f"Partial (shortfall: {int(constraint['Minimum Container Count']) - allocated_containers_count})"
+            requested_min = int(constraint['Minimum Container Count'])
+            shortfall = requested_min - allocated_containers_count
+            constraint_status = f"Partial (shortfall: {shortfall})"
+            # Diagnose: was the eligible pool too small, or did higher-priority constraints consume it?
+            if int(total_eligible_containers) < requested_min:
+                constraint_reason = (
+                    f"Minimum requested {requested_min} but only {int(total_eligible_containers)} "
+                    "containers matched this constraint's filters before allocation. Loosen the scope "
+                    "or lower the minimum."
+                )
+            else:
+                constraint_reason = (
+                    f"Minimum requested {requested_min} but only {allocated_containers_count} could be "
+                    "allocated. The eligible pool was reduced because higher-priority constraints already "
+                    "claimed the remaining containers."
+                )
+        elif allocated_containers_count == 0 and target_containers > 0:
+            constraint_reason = (
+                f"Target was {target_containers} but no containers were allocated. The eligible pool "
+                "was likely consumed by higher-priority constraints."
+            )
 
         constraint_summary.append({
             'priority': constraint['Priority Score'],
             'description': constraint_desc,
             'status': constraint_status,
             'containers_allocated': allocated_containers_count,
+            'eligible_containers': int(total_eligible_containers),
             'target_containers': target_containers,
-            'method': allocation_method
+            'method': allocation_method,
+            'scope': _build_scope_dict(constraint, target_carrier, all_excluded_facilities),
+            'reason': constraint_reason,
         })
     
     # Remove rows with zero containers from remaining data
@@ -918,17 +1048,27 @@ def show_constraints_summary(constraint_summary, explanation_logs=None):
     
     section_header("📊 Applied Constraints Summary")
     
+    def _format_scope(scope):
+        if not scope:
+            return ''
+        return ', '.join(
+            f"{k}={', '.join(map(str, v))}" if isinstance(v, list) else f"{k}={v}"
+            for k, v in scope.items()
+        )
+
     summary_data = []
     for item in constraint_summary:
         summary_data.append({
             'Priority': item['priority'],
-            'Description': item['description'],
+            'Scope': _format_scope(item.get('scope')),
             'Method': item.get('method', 'N/A'),
             'Status': item['status'],
-            'Containers Allocated': item['containers_allocated'],
-            'Target': item.get('target_containers', 'N/A')
+            'Eligible': item.get('eligible_containers', 'N/A'),
+            'Allocated': item['containers_allocated'],
+            'Target': item.get('target_containers', 'N/A'),
+            'Why': item.get('reason') or '',
         })
-    
+
     summary_df = pd.DataFrame(summary_data)
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
     

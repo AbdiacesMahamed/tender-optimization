@@ -257,3 +257,124 @@ class TestApplyConstraintsToData:
             apply_constraints_to_data(sample_data, constraints)
         assert constrained['Container Count'].sum() == 3
         assert constrained['Dray SCAC(FL)'].iloc[0] == 'EFGH'
+
+
+# ==================== constraint_summary diagnostics ====================
+
+def _make_constraint(**fields):
+    """Helper to build a single-row constraints DataFrame with overrides."""
+    base = {
+        'Priority Score': 10,
+        'Carrier': None,
+        'Maximum Container Count': None,
+        'Minimum Container Count': None,
+        'Percent Allocation': None,
+        'Category': None,
+        'Lane': None,
+        'Port': None,
+        'Week Number': None,
+        'Terminal': None,
+        'SSL': None,
+        'Vessel': None,
+        'Excluded FC': None,
+    }
+    base.update(fields)
+    return pd.DataFrame([base])
+
+
+class TestConstraintSummaryDiagnostics:
+    """Each summary entry must carry eligible_containers, scope, reason."""
+
+    REQUIRED_KEYS = {'priority', 'description', 'status', 'containers_allocated',
+                     'eligible_containers', 'scope', 'reason'}
+
+    def test_applied_entry_has_diagnostics(self, sample_data, max_constraint):
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, max_constraint)
+        entry = summary[0]
+        assert self.REQUIRED_KEYS.issubset(entry.keys())
+        assert entry['status'] == 'Applied'
+        # Eligible should reflect actual matching containers (ABCD has 5 across rows)
+        assert entry['eligible_containers'] > 0
+        assert entry['scope'].get('Target Carrier') == 'ABCD'
+
+    def test_scope_captures_filter_values(self, sample_data, scoped_max_constraint):
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, scoped_max_constraint)
+        entry = summary[0]
+        assert entry['scope']['Category'] == 'CD'
+        assert entry['scope']['Lane'] == 'USLAXIUSF'
+        assert entry['scope']['Target Carrier'] == 'ABCD'
+
+    def test_partial_status_explains_shortfall_from_pool(self, sample_data):
+        # Request 100 containers but pool has only ~10
+        constraints = _make_constraint(
+            Carrier='EFGH',
+            **{'Minimum Container Count': 100, 'Priority Score': 10},
+        )
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        assert entry['status'].startswith('Partial')
+        assert entry['reason'] is not None
+        assert 'matched this constraint' in entry['reason']
+        assert entry['eligible_containers'] < 100
+
+    def test_no_matching_data_explains_filter(self, sample_data):
+        # Filter on a Lane that doesn't exist
+        constraints = _make_constraint(
+            Carrier='ABCD',
+            Lane='USNOPE-NONE',
+            **{'Maximum Container Count': 5},
+        )
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        # Max constraint with no carrier match still continues to record carrier exclusion;
+        # so accept either "Failed: No matching data" or "Applied" depending on path,
+        # but the diagnostic keys must be present.
+        assert self.REQUIRED_KEYS.issubset(entry.keys())
+        assert entry['eligible_containers'] == 0
+        assert entry['scope'].get('Lane') == 'USNOPE-NONE'
+
+    def test_no_matching_data_no_max_carrier_returns_failed(self, sample_data):
+        # Min/Percent constraint on impossible filter — gives "Failed: No matching data"
+        constraints = _make_constraint(
+            Carrier='ABCD',
+            Lane='USNOPE-NONE',
+            **{'Minimum Container Count': 5},
+        )
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        assert entry['status'] == 'Failed: No matching data'
+        assert entry['reason'] is not None
+        assert 'scope filters' in entry['reason']
+        assert entry['eligible_containers'] == 0
+
+    def test_excluded_fc_without_carrier_explains_error(self, sample_data):
+        constraints = _make_constraint(
+            **{'Excluded FC': 'IUSF', 'Maximum Container Count': 5},
+        )
+        # No Carrier set — the Excluded FC error fires first
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        assert entry['status'] == 'Error: Excluded FC requires Carrier'
+        assert entry['reason'] is not None
+        assert 'Carrier' in entry['reason']
+
+    def test_exclusion_only_constraint_explains_role(self, sample_data, excluded_fc_constraint):
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, excluded_fc_constraint)
+        entry = summary[0]
+        assert entry['status'] == 'Applied (Exclusion Rule)'
+        assert entry['reason'] is not None
+        assert 'blocked from' in entry['reason']
+        assert entry['scope'].get('Excluded Facilities') == ['IUSF']
+
+    def test_no_allocation_amount_explains_role(self, sample_data):
+        # Constraint with Carrier but no Min/Max/Percent/Excluded FC → unactionable
+        constraints = _make_constraint(Carrier='ABCD')
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        assert entry['status'] == 'No allocation amount'
+        assert entry['reason'] is not None
+        assert "'Maximum'" in entry['reason'] or 'Minimum' in entry['reason']
+
+    def test_eligible_containers_is_int(self, sample_data, max_constraint):
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, max_constraint)
+        assert isinstance(summary[0]['eligible_containers'], int)
