@@ -378,3 +378,86 @@ class TestConstraintSummaryDiagnostics:
     def test_eligible_containers_is_int(self, sample_data, max_constraint):
         _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, max_constraint)
         assert isinstance(summary[0]['eligible_containers'], int)
+
+
+# ==================== cross-constraint attribution ====================
+
+class TestClaimedByAttribution:
+    """When a later constraint's pool was consumed by earlier ones, claimed_by names the priorities."""
+
+    def test_higher_priority_consumes_pool_attribution(self, sample_data):
+        """Priority 100 takes everything; Priority 50 with same scope reports who took it."""
+        constraints = pd.DataFrame([
+            {  # P100: take 100% of EFGH-eligible volume
+                'Priority Score': 100, 'Carrier': 'EFGH',
+                'Maximum Container Count': None, 'Minimum Container Count': None,
+                'Percent Allocation': 100, 'Category': None, 'Lane': None, 'Port': None,
+                'Week Number': None, 'Terminal': None, 'SSL': None, 'Vessel': None,
+                'Excluded FC': None,
+            },
+            {  # P50: also wants EFGH volume but P100 already took it
+                'Priority Score': 50, 'Carrier': 'EFGH',
+                'Maximum Container Count': None, 'Minimum Container Count': 5,
+                'Percent Allocation': None, 'Category': None, 'Lane': None, 'Port': None,
+                'Week Number': None, 'Terminal': None, 'SSL': None, 'Vessel': None,
+                'Excluded FC': None,
+            },
+        ])
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        # P100 processed first
+        assert summary[0]['priority'] == 100
+        # P50 should report claimed_by P100
+        p50 = next(s for s in summary if s['priority'] == 50)
+        assert p50['claimed_by'] is not None
+        assert 100 in p50['claimed_by']
+        assert p50['claimed_by'][100] > 0
+        assert p50['reason'] is not None
+        assert 'Priority 100' in p50['reason']
+
+    def test_no_self_attribution(self, sample_data, percent_constraint):
+        """A constraint must not list itself as having claimed its own containers."""
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, percent_constraint)
+        entry = summary[0]
+        # claimed_by should be empty (no other constraints exist)
+        assert not entry['claimed_by']
+
+    def test_claimed_by_none_when_pool_was_just_too_small(self, sample_data):
+        """If no other constraint touched the scope, claimed_by stays empty and reason cites pool size."""
+        constraints = pd.DataFrame([{
+            'Priority Score': 10, 'Carrier': 'IJKL',
+            'Maximum Container Count': None, 'Minimum Container Count': 1000,
+            'Percent Allocation': None, 'Category': None, 'Lane': None, 'Port': None,
+            'Week Number': None, 'Terminal': None, 'SSL': None, 'Vessel': None,
+            'Excluded FC': None,
+        }])
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        assert entry['status'].startswith('Partial')
+        assert not entry['claimed_by']
+        assert 'in the source data' in entry['reason']
+
+    def test_no_matching_data_attributes_to_claiming_priorities(self, sample_data):
+        """When scope had volume but it was all consumed, status is 'Failed: No matching data'
+        and reason names the claiming priorities."""
+        constraints = pd.DataFrame([
+            {  # P100 takes ALL containers
+                'Priority Score': 100, 'Carrier': 'ABCD',
+                'Maximum Container Count': 999, 'Minimum Container Count': None,
+                'Percent Allocation': None, 'Category': None, 'Lane': None, 'Port': None,
+                'Week Number': None, 'Terminal': None, 'SSL': None, 'Vessel': None,
+                'Excluded FC': None,
+            },
+            {  # P50 gets nothing but had matching scope
+                'Priority Score': 50, 'Carrier': 'EFGH',
+                'Maximum Container Count': None, 'Minimum Container Count': 1,
+                'Percent Allocation': None, 'Category': None, 'Lane': None, 'Port': None,
+                'Week Number': None, 'Terminal': None, 'SSL': None, 'Vessel': None,
+                'Excluded FC': None,
+            },
+        ])
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        p50 = next(s for s in summary if s['priority'] == 50)
+        # P50's eligible pool was emptied by P100
+        assert p50['claimed_by'] is not None
+        assert 100 in p50['claimed_by']
+        assert 'Priority 100' in p50['reason']

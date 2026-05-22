@@ -44,41 +44,43 @@ def resolve_port_filter(value):
     return PORT_ALIASES.get(key, [str(value).strip()])
 
 
-def allocate_specific_containers(row, num_containers, allocated_tracker, target_carrier, week_num):
+def allocate_specific_containers(row, num_containers, allocated_tracker, target_carrier, week_num, priority=None):
     """
     Allocate specific container IDs from a row, tracking which containers are allocated
-    
+
     Args:
         row: Data row containing Container Numbers
         num_containers: Number of containers to allocate
         allocated_tracker: Dict tracking allocated container IDs
         target_carrier: Carrier to assign containers to
         week_num: Week number for tracking
-    
+        priority: Priority score of the constraint claiming these containers (for attribution)
+
     Returns:
         tuple: (allocated_container_ids, remaining_container_ids)
     """
     container_ids = parse_container_ids(row.get('Container Numbers', ''))
-    
+
     # Filter out already-allocated containers
     available_ids = [cid for cid in container_ids if cid not in allocated_tracker]
-    
+
     if len(available_ids) == 0:
         return [], []
-    
+
     # Take up to num_containers
     actual_to_allocate = min(num_containers, len(available_ids))
     allocated_ids = available_ids[:actual_to_allocate]
     remaining_ids = available_ids[actual_to_allocate:]
-    
+
     # Mark as allocated with metadata
     for cid in allocated_ids:
         allocated_tracker[cid] = {
             'carrier': target_carrier,
             'week': week_num,
-            'row_idx': row.name if hasattr(row, 'name') else None
+            'row_idx': row.name if hasattr(row, 'name') else None,
+            'priority': priority,
         }
-    
+
     return allocated_ids, remaining_ids
 
 
@@ -331,6 +333,14 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     
     constrained_records = []
     remaining_data = data.copy().reset_index(drop=True)
+    # Snapshot of original container IDs per row index — survives mutation of remaining_data
+    # so we can attribute "missing" containers back to the priorities that claimed them.
+    _original_containers_by_idx = (
+        remaining_data['Container Numbers'].map(
+            lambda s: parse_container_ids(s) if pd.notna(s) else []
+        ).to_dict()
+        if 'Container Numbers' in remaining_data.columns else {}
+    )
     constraint_summary = []
     
     # Collect explanation logs for downloadable report (not displayed in UI)
@@ -479,6 +489,33 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
         if 'Facility' in remaining_data.columns else pd.Series(dtype='object')
     )
 
+    def _attribute_claimed_containers(filter_mask, exclude_priority=None):
+        """For rows matching filter_mask, count which prior priorities claimed their containers.
+
+        Returns (claimed_total, claimed_by_priority dict). Uses the original snapshot of
+        container IDs so it sees claimed containers even after their row was zeroed out.
+        Containers claimed by `exclude_priority` (the current constraint) are skipped.
+        """
+        claimed_by_priority = {}
+        claimed_total = 0
+        for row_idx in remaining_data.index[filter_mask]:
+            for cid in _original_containers_by_idx.get(row_idx, []):
+                meta = allocated_containers_tracker.get(cid)
+                if meta is None:
+                    continue
+                p = meta.get('priority')
+                if exclude_priority is not None and p == exclude_priority:
+                    continue
+                claimed_by_priority[p] = claimed_by_priority.get(p, 0) + 1
+                claimed_total += 1
+        return claimed_total, claimed_by_priority
+
+    def _format_claimed_by(claimed_by):
+        if not claimed_by:
+            return None
+        parts = [f"Priority {p} ({n})" for p, n in sorted(claimed_by.items(), key=lambda kv: -kv[1])]
+        return ', '.join(parts)
+
     def _build_scope_dict(constraint, target_carrier=None, excluded_facilities=None):
         """Capture the constraint's filter values for the summary."""
         scope = {}
@@ -609,6 +646,10 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             if len(all_excluded_facilities) > 0:
                 log_explanation(f"Applying {len(all_excluded_facilities)} facility exclusion(s) for {target_carrier}: {', '.join(sorted(all_excluded_facilities))}", 'info')
         
+        # Snapshot the scope-only mask BEFORE excluded-facility filtering, so attribution
+        # can distinguish "claimed by another constraint" from "removed by exclusion rule".
+        scope_only_mask = mask.copy()
+
         # Apply all excluded facilities to the mask (uses pre-computed normalized series)
         excluded_facility_mask = None
         if all_excluded_facilities and 'Facility' in remaining_data.columns:
@@ -660,8 +701,19 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                 total_eligible_containers = 0
             else:
                 log_explanation(f"No eligible data for constraint: {constraint_desc}", 'warning')
-                # Diagnose why: was it excluded facilities, or just zero filter matches?
-                if all_excluded_facilities and excluded_facility_mask is not None and excluded_facility_mask.any():
+                # Attribution: did higher-priority constraints already claim what would have matched?
+                claimed_total, claimed_by_priority = _attribute_claimed_containers(
+                    scope_only_mask, exclude_priority=constraint['Priority Score']
+                )
+                claimed_by_str = _format_claimed_by(claimed_by_priority)
+                # Diagnose why: claimed by others, excluded facilities, or just zero filter matches?
+                if claimed_total > 0:
+                    no_match_reason = (
+                        f"All {claimed_total} container(s) that matched this constraint's scope "
+                        f"were already claimed by higher-priority constraint(s): {claimed_by_str}. "
+                        "Lower the other constraint(s)' allocations or raise this constraint's priority."
+                    )
+                elif all_excluded_facilities and excluded_facility_mask is not None and excluded_facility_mask.any():
                     excluded_n = int(excluded_facility_mask.sum())
                     no_match_reason = (
                         f"No containers matched the constraint filters after removing {excluded_n} row(s) "
@@ -670,8 +722,8 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     )
                 else:
                     no_match_reason = (
-                        "No containers matched the constraint's scope filters. "
-                        "Verify that filter values exist in the underlying data."
+                        "No containers matched the constraint's scope filters in the source data. "
+                        "Verify that filter values exist in the GVT file."
                     )
                 constraint_summary.append({
                     'priority': constraint['Priority Score'],
@@ -679,6 +731,7 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     'status': 'Failed: No matching data',
                     'containers_allocated': 0,
                     'eligible_containers': 0,
+                    'claimed_by': claimed_by_priority or None,
                     'scope': _build_scope_dict(constraint, target_carrier, all_excluded_facilities),
                     'reason': no_match_reason,
                 })
@@ -848,7 +901,8 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                 # Allocate specific container IDs from this row
                 week_num = row.get('Week Number', None)
                 allocated_ids, remaining_ids = allocate_specific_containers(
-                    row, containers_needed, allocated_containers_tracker, target_carrier, week_num
+                    row, containers_needed, allocated_containers_tracker, target_carrier, week_num,
+                    priority=constraint['Priority Score']
                 )
                 
                 if len(allocated_ids) > 0:
@@ -958,6 +1012,14 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     log_explanation(f"These containers must be reallocated to other carriers or constraint will fail", 'warning')
                     # Mark carrier for exclusion at this facility (handled by optimization)
         
+        # Attribute already-claimed containers in this constraint's scope (always computed —
+        # gives "Why" context for partial/zero-allocated cases). Excludes the current priority
+        # so we don't self-attribute.
+        claimed_total, claimed_by_priority = _attribute_claimed_containers(
+            scope_only_mask, exclude_priority=constraint['Priority Score']
+        )
+        claimed_by_str = _format_claimed_by(claimed_by_priority)
+
         # Determine status: flag minimum shortfalls
         constraint_status = 'Applied'
         constraint_reason = None
@@ -968,23 +1030,33 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             shortfall = requested_min - allocated_containers_count
             constraint_status = f"Partial (shortfall: {shortfall})"
             # Diagnose: was the eligible pool too small, or did higher-priority constraints consume it?
-            if int(total_eligible_containers) < requested_min:
+            if claimed_total > 0:
+                constraint_reason = (
+                    f"Minimum requested {requested_min}, only {allocated_containers_count} allocated. "
+                    f"{claimed_total} container(s) in this scope were already claimed by: {claimed_by_str}."
+                )
+            elif int(total_eligible_containers) < requested_min:
                 constraint_reason = (
                     f"Minimum requested {requested_min} but only {int(total_eligible_containers)} "
-                    "containers matched this constraint's filters before allocation. Loosen the scope "
+                    "containers matched this constraint's filters in the source data. Loosen the scope "
                     "or lower the minimum."
                 )
             else:
                 constraint_reason = (
                     f"Minimum requested {requested_min} but only {allocated_containers_count} could be "
-                    "allocated. The eligible pool was reduced because higher-priority constraints already "
-                    "claimed the remaining containers."
+                    "allocated. Check facility exclusions or other late-stage filters."
                 )
         elif allocated_containers_count == 0 and target_containers > 0:
-            constraint_reason = (
-                f"Target was {target_containers} but no containers were allocated. The eligible pool "
-                "was likely consumed by higher-priority constraints."
-            )
+            if claimed_total > 0:
+                constraint_reason = (
+                    f"Target was {target_containers} but no containers were allocated. "
+                    f"{claimed_total} container(s) in this scope were already claimed by: {claimed_by_str}."
+                )
+            else:
+                constraint_reason = (
+                    f"Target was {target_containers} but no containers were allocated, and none were "
+                    "claimed by other constraints. Check facility exclusions or scope filters."
+                )
 
         constraint_summary.append({
             'priority': constraint['Priority Score'],
@@ -992,6 +1064,7 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             'status': constraint_status,
             'containers_allocated': allocated_containers_count,
             'eligible_containers': int(total_eligible_containers),
+            'claimed_by': claimed_by_priority or None,
             'target_containers': target_containers,
             'method': allocation_method,
             'scope': _build_scope_dict(constraint, target_carrier, all_excluded_facilities),
@@ -1056,6 +1129,13 @@ def show_constraints_summary(constraint_summary, explanation_logs=None):
             for k, v in scope.items()
         )
 
+    def _format_claimed_by_for_table(claimed_by):
+        if not claimed_by:
+            return ''
+        return ', '.join(
+            f"P{p}({n})" for p, n in sorted(claimed_by.items(), key=lambda kv: -kv[1])
+        )
+
     summary_data = []
     for item in constraint_summary:
         summary_data.append({
@@ -1066,6 +1146,7 @@ def show_constraints_summary(constraint_summary, explanation_logs=None):
             'Eligible': item.get('eligible_containers', 'N/A'),
             'Allocated': item['containers_allocated'],
             'Target': item.get('target_containers', 'N/A'),
+            'Claimed By': _format_claimed_by_for_table(item.get('claimed_by')),
             'Why': item.get('reason') or '',
         })
 
