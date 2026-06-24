@@ -42,11 +42,16 @@ from components import (
     deduplicate_containers_per_lane_week
 )
 
-from components.constraints_processor import (
+from components.constraints.processor import (
     process_constraints_file,
     apply_constraints_to_data,
     show_constraints_summary,
 )
+
+from components.reporting.carrier_flip import show_carrier_flip_report
+
+# AI assistant (Bedrock-powered chatbot for analysis + constraint generation)
+from components.chatbot import show_chatbot_sidebar, get_applied_constraints_df
 
 # Import optimization module for historic volume analysis
 from optimization import show_historic_volume_analysis
@@ -80,7 +85,15 @@ def main():
     
     with st.spinner('📊 Creating comprehensive data view...'):
         comprehensive_data = create_comprehensive_data(merged_data)
-    
+
+    # AI assistant sidebar — analyzes the loaded data, prices carrier flips, and
+    # proposes/applies constraints. Pass the rate sheet so flip-cost simulation can
+    # price moves to carriers not currently on a lane. Pass the uploaded constraint
+    # file so the assistant edits the user's actual constraints. rate_type defaults
+    # from the selector's session-state value (set on the previous run).
+    show_chatbot_sidebar(comprehensive_data, rate_data=Ratedata,
+                         constraints_file=constraints_file)
+
     # Show rate type selector (Base Rate vs CPC)
     show_rate_type_selector(comprehensive_data)
     
@@ -103,23 +116,37 @@ def main():
         carrier_facility_exclusions = {}  # Carrier+facility exclusions
         
         explanation_logs = []  # For downloadable constraint explanations
-        
-        if constraints_file is not None:
+
+        # The assistant seeds the uploaded constraint file into its working set, so
+        # when the user clicks "Apply" in the chat panel the applied set ALREADY
+        # contains the uploaded rows plus any edits/additions. In that case the
+        # applied set is authoritative — use it alone and do NOT also re-process the
+        # raw file (that would double-count the uploaded rows). Only fall back to the
+        # raw uploaded file when the user hasn't applied anything through the chat.
+        ai_constraints_df = get_applied_constraints_df()
+        if ai_constraints_df is not None and len(ai_constraints_df) > 0:
+            constraints_df = ai_constraints_df.sort_values(
+                'Priority Score', ascending=False, na_position='last'
+            )
+            st.markdown("---")
+            st.info(f"🤖 Applying {len(ai_constraints_df)} constraint(s) from the AI assistant "
+                    "(includes any uploaded rows it incorporated).")
+        elif constraints_file is not None:
             st.markdown("---")
             constraints_df = process_constraints_file(constraints_file)
-            
-            if constraints_df is not None:
-                # Apply constraints to filtered data
-                # Pass Ratedata so we can find capable carriers for lanes when reallocation is needed
-                constrained_data, unconstrained_data, constraint_summary, max_constrained_carriers, carrier_facility_exclusions, explanation_logs = apply_constraints_to_data(
-                    final_filtered_data, constraints_df, Ratedata
-                )
-                
-                # Show constraint summary
-                if len(constraint_summary) > 0:
-                    show_constraints_summary(constraint_summary, explanation_logs)
-            else:
-                st.warning("⚠️ Constraints file could not be processed")
+
+        if constraints_df is not None and len(constraints_df) > 0:
+            # Apply constraints to filtered data
+            # Pass Ratedata so we can find capable carriers for lanes when reallocation is needed
+            constrained_data, unconstrained_data, constraint_summary, max_constrained_carriers, carrier_facility_exclusions, explanation_logs = apply_constraints_to_data(
+                final_filtered_data, constraints_df, Ratedata
+            )
+
+            # Show constraint summary
+            if len(constraint_summary) > 0:
+                show_constraints_summary(constraint_summary, explanation_logs)
+        elif constraints_file is not None:
+            st.warning("⚠️ Constraints file could not be processed")
         else:
             st.info("ℹ️ No constraints file uploaded - all data is unconstrained")
     
@@ -134,11 +161,27 @@ def main():
         # Peel pile carriers are global (no scope filters)
         for pp_carrier in peel_pile_carriers:
             max_constrained_carriers.append({'carrier': pp_carrier})
-    
+
+    # Expose the (now final) Applied Constraints Summary to the AI assistant so its
+    # read_constraints_summary tool can explain constraint impact and ground new
+    # suggestions. Written each run after file + peel-pile constraints are applied;
+    # the sidebar reads it on the next user message. Empty list when nothing applied.
+    st.session_state['chatbot_constraint_summary'] = constraint_summary
+
     # ==================== DEDUPLICATE CONTAINERS ====================
     # A container can only belong to ONE carrier per lane/week (zero sum).
     # Apply dedup before metrics so cost cards and detailed table use the same data.
+    raw_container_count = int(final_filtered_data['Container Count'].sum())
     final_filtered_data = deduplicate_containers_per_lane_week(final_filtered_data)
+    deduped_container_count = int(final_filtered_data['Container Count'].sum())
+    dedup_removed = raw_container_count - deduped_container_count
+    if dedup_removed > 0:
+        st.info(
+            f"ℹ️ **Container Deduplication:** Reporting {deduped_container_count:,} unique containers "
+            f"(raw data has {raw_container_count:,} rows — {dedup_removed} duplicate container(s) removed). "
+            f"Duplicates occur when the same container appears under multiple carriers or rows in the same "
+            f"lane/week. Each physical container is counted only once, assigned to the first carrier encountered."
+        )
     if len(constrained_data) > 0:
         constrained_data = deduplicate_containers_per_lane_week(constrained_data)
     unconstrained_data = deduplicate_containers_per_lane_week(unconstrained_data)
@@ -164,17 +207,28 @@ def main():
     show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics, max_constrained_carriers, carrier_facility_exclusions, comprehensive_data)
     
     # 🔬 DIAGNOSTIC TOOL - Enable to debug container count discrepancies
-    
-    # Show advanced analytics
-    show_advanced_analytics(final_filtered_data)
-    
-    # Show interactive visualizations
-    show_interactive_visualizations(final_filtered_data)
-    
+
+    # Advanced Analytics & Machine Learning and Interactive Visualizations are
+    # hidden for now. Re-enable by uncommenting the two calls below.
+    # show_advanced_analytics(final_filtered_data)
+    # show_interactive_visualizations(final_filtered_data)
+
     # Show historic volume analysis at the bottom (uses filtered data to match current view)
     st.markdown("---")
     show_historic_volume_analysis(final_filtered_data, n_weeks=5)
-    
+
+    # Carrier Flip Analysis — reuses the loaded per-container GVT and Rate data.
+    # The allocation it analyzes already reflects the active filters (it comes from the
+    # Detailed Analysis Table, which runs on final_filtered_data). The GVT, however, is
+    # the full per-container sheet, so filter it with the SAME active filters before
+    # handing it over — otherwise the flip report's GVT rows, match counts, and table
+    # would include containers outside the current view. GVT carries the exact columns
+    # the filters key on (Discharged Port, Facility, Week Number, Dray SCAC(FL)), so we
+    # reuse apply_filters_to_data to keep the filtering logic in one place.
+    st.markdown("---")
+    filtered_gvt, _, _, _, _ = apply_filters_to_data(GVTdata)
+    show_carrier_flip_report(in_app_gvt=filtered_gvt, in_app_rate=Ratedata)
+
     # Footer
     show_footer()
 

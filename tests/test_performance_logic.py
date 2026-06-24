@@ -6,8 +6,6 @@ Covers: allocate_to_highest_performance, _prepare_group_columns
 import pandas as pd
 import numpy as np
 import pytest
-import sys
-sys.path.insert(0, '.')
 
 from optimization.performance_logic import (
     allocate_to_highest_performance,

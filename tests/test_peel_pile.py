@@ -6,13 +6,13 @@ Covers: _peel_pile_key, apply_peel_pile_as_constraints
 import pandas as pd
 import numpy as np
 import pytest
-import sys
-sys.path.insert(0, '.')
 
 from unittest.mock import MagicMock, patch
 
-from components.peel_pile import _peel_pile_key, apply_peel_pile_as_constraints
-import components.peel_pile as peel_pile_module
+# Streamlit is stubbed centrally in tests/conftest.py before any first-party import.
+
+from components.constraints.peel_pile import _peel_pile_key, apply_peel_pile_as_constraints
+import components.constraints.peel_pile as peel_pile_module
 
 
 # ==================== FIXTURES ====================

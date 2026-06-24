@@ -8,10 +8,8 @@ Covers: join_container_ids, get_grouping_columns, normalize_facility_code,
 import pandas as pd
 import numpy as np
 import pytest
-import sys
-sys.path.insert(0, '.')
 
-from components.utils import (
+from components.core.utils import (
     join_container_ids,
     get_grouping_columns,
     normalize_facility_code,

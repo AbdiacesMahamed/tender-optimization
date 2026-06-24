@@ -7,8 +7,6 @@ Covers: _get_excluded_carriers_for_group, cascading_allocate_with_constraints,
 import pandas as pd
 import numpy as np
 import pytest
-import sys
-sys.path.insert(0, '.')
 
 from optimization.cascading_logic import (
     _get_excluded_carriers_for_group,

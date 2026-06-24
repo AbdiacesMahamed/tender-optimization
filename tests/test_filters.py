@@ -7,19 +7,14 @@ produced display strings like "5.0" that int() could not parse.
 import pandas as pd
 import numpy as np
 import pytest
-import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-sys.path.insert(0, '.')
+# Streamlit is stubbed centrally in tests/conftest.py. This test patches the `st`
+# object inside the filters module directly via the fixture below.
 
-# Mock streamlit before importing the module — but if other tests have already
-# imported the real streamlit, components.filters binds to it. We patch the
-# `st` object inside that module directly via fixture below.
-sys.modules.setdefault('streamlit', MagicMock())
-
-from components import filters as filters_module
-from components.filters import (
+from components.ui import filters as filters_module
+from components.ui.filters import (
     build_week_options,
     parse_selected_weeks,
     apply_filters_to_data,
@@ -187,3 +182,12 @@ class TestApplyFiltersToData:
         result, *_ = apply_filters_to_data(comprehensive_data)
         result.loc[result.index[0], 'Discharged Port'] = 'XXX'
         assert 'XXX' not in comprehensive_data['Discharged Port'].values
+
+    def test_scac_filter(self, comprehensive_data, _patched_st):
+        """SCAC dimension — the dashboard reuses apply_filters_to_data to scope the
+        per-container GVT handed to the Carrier Flip Analysis, so all four filter
+        dimensions (incl. SCAC) must narrow a GVT-shaped frame identically."""
+        _set_session(_patched_st, filter_scacs=['ABCD'])
+        result, *_ = apply_filters_to_data(comprehensive_data)
+        assert len(result) == 2
+        assert set(result['Dray SCAC(FL)']) == {'ABCD'}

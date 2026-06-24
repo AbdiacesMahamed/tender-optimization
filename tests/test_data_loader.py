@@ -6,17 +6,10 @@ USBWI → USBAL, USEWR → USNYC, USORF → USNFK so rate Lookups match GVT.
 """
 import pandas as pd
 import pytest
-import sys
-from unittest.mock import MagicMock
 
-sys.path.insert(0, '.')
+# Streamlit is stubbed centrally in tests/conftest.py before any first-party import.
 
-# Mock streamlit before importing the module
-sys.modules['streamlit'] = MagicMock()
-import streamlit as st
-st.cache_data = lambda **kwargs: (lambda f: f)
-
-from components.data_loader import _transform_dray_master_format
+from components.data.loader import _transform_dray_master_format
 
 
 @pytest.fixture

@@ -6,18 +6,14 @@ Covers: allocate_specific_containers, process_constraints_file, apply_constraint
 import pandas as pd
 import numpy as np
 import pytest
-import sys
-sys.path.insert(0, '.')
 
-# Mock streamlit before importing
-from unittest.mock import MagicMock, patch
-sys.modules['streamlit'] = MagicMock()
-import streamlit as st
-st.cache_data = lambda **kwargs: (lambda f: f)
+# Streamlit is stubbed centrally in tests/conftest.py before any first-party import.
 
-from components.constraints_processor import (
+from components.constraints.processor import (
     allocate_specific_containers,
     apply_constraints_to_data,
+    build_scope_filters,
+    diagnose_no_match,
 )
 
 
@@ -259,6 +255,104 @@ class TestApplyConstraintsToData:
         assert constrained['Dray SCAC(FL)'].iloc[0] == 'EFGH'
 
 
+class TestCarrierCaseInsensitiveMatching:
+    """A constraint Carrier typed in any case should resolve to the data's spelling,
+    so both the assignment write and the optimizer-exclusion match line up."""
+
+    def _constraint(self, carrier):
+        return pd.DataFrame({
+            'Priority Score': [10],
+            'Carrier': [carrier],
+            'Maximum Container Count': [2],
+            'Minimum Container Count': [None],
+            'Percent Allocation': [None],
+            'Category': [None], 'Lane': [None], 'Port': [None], 'Week Number': [None],
+            'Terminal': [None], 'SSL': [None], 'Vessel': [None], 'Excluded FC': [None],
+        })
+
+    def test_lowercase_carrier_resolves_to_data_spelling(self, sample_data):
+        # Data carries 'ABCD'; constraint typed 'abcd' must still allocate and assign 'ABCD'.
+        constrained, _, _, max_carriers, _, _ = \
+            apply_constraints_to_data(sample_data, self._constraint('abcd'))
+        assert constrained['Container Count'].sum() == 2
+        assert constrained['Dray SCAC(FL)'].iloc[0] == 'ABCD'
+        # Exclusion list uses the data's spelling so cascading_logic matches the real carrier.
+        assert max_carriers[0]['carrier'] == 'ABCD'
+
+    def test_mixed_case_carrier_resolves(self, sample_data):
+        constrained, _, _, max_carriers, _, _ = \
+            apply_constraints_to_data(sample_data, self._constraint('AbCd'))
+        assert constrained['Dray SCAC(FL)'].iloc[0] == 'ABCD'
+        assert max_carriers[0]['carrier'] == 'ABCD'
+
+    def test_unknown_carrier_passed_through_verbatim(self, sample_data):
+        # A carrier not present in the data isn't remapped — Carrier is the assignment
+        # target, not a filter, so it still allocates and is assigned exactly as typed.
+        constrained, _, _, max_carriers, _, _ = \
+            apply_constraints_to_data(sample_data, self._constraint('ZZZZ'))
+        assert constrained['Dray SCAC(FL)'].iloc[0] == 'ZZZZ'
+        assert max_carriers[0]['carrier'] == 'ZZZZ'
+
+    def test_excluded_fc_carrier_case_insensitive(self, sample_data):
+        constraint = pd.DataFrame({
+            'Priority Score': [10],
+            'Carrier': ['abcd'],
+            'Maximum Container Count': [None], 'Minimum Container Count': [None],
+            'Percent Allocation': [None], 'Category': [None], 'Lane': [None],
+            'Port': [None], 'Week Number': [None], 'Terminal': [None],
+            'SSL': [None], 'Vessel': [None], 'Excluded FC': ['IUSF'],
+        })
+        _, _, _, _, exclusions, _ = apply_constraints_to_data(sample_data, constraint)
+        # Exclusion keyed by the data's spelling so it matches rows during reallocation.
+        assert 'ABCD' in exclusions
+        assert 'IUSF' in exclusions['ABCD']
+
+
+class TestScopeDimensionNormalization:
+    """Lane/Port/Terminal/SSL/Vessel scope filters match case- and whitespace-insensitively
+    via build_scope_filters, so a constraint typed in any case still finds its rows."""
+
+    def _scoped(self, **fields):
+        base = {
+            'Priority Score': 10, 'Carrier': 'ABCD',
+            'Maximum Container Count': 5, 'Minimum Container Count': None,
+            'Percent Allocation': None, 'Category': None, 'Lane': None,
+            'Port': None, 'Week Number': None, 'Terminal': None,
+            'SSL': None, 'Vessel': None, 'Excluded FC': None,
+        }
+        base.update(fields)
+        return pd.DataFrame([base])
+
+    def test_lane_short_code_lowercase(self, sample_data):
+        # Data lane 'USLAXIUSF'; constraint short code 'iusf' (lowercase) must match.
+        c, _, _, _, _, _ = apply_constraints_to_data(sample_data, self._scoped(Lane='iusf'))
+        assert c['Container Count'].sum() > 0
+        assert set(c['Lane'].str.upper().str[-4:]) == {'IUSF'}
+
+    def test_lane_full_with_whitespace(self, sample_data):
+        c, _, _, _, _, _ = apply_constraints_to_data(
+            sample_data, self._scoped(Lane='  uslaxiusf '))
+        assert c['Container Count'].sum() > 0
+
+    def test_port_lowercase(self, sample_data):
+        # Discharged Port 'LAX'; constraint 'lax' must match.
+        c, _, _, _, _, _ = apply_constraints_to_data(sample_data, self._scoped(Port='lax'))
+        assert c['Container Count'].sum() > 0
+        assert set(c['Discharged Port'].unique()) == {'LAX'}
+
+    def test_terminal_case_insensitive(self):
+        data = pd.DataFrame({
+            'Category': ['CD', 'CD'], 'Dray SCAC(FL)': ['ABCD', 'EFGH'],
+            'Lane': ['USLAXIUSF', 'USLAXIUSF'], 'Discharged Port': ['LAX', 'LAX'],
+            'Week Number': [9, 9], 'Facility': ['IUSF-5', 'IUSF-5'],
+            'Terminal': ['Pier T', 'Pier T'],
+            'Container Numbers': ['C001, C002', 'C003'], 'Container Count': [2, 1],
+            'Base Rate': [100, 200], 'Total Rate': [200, 200],
+        })
+        c, _, _, _, _, _ = apply_constraints_to_data(data, self._scoped(Terminal='pier t'))
+        assert c['Container Count'].sum() > 0
+
+
 # ==================== constraint_summary diagnostics ====================
 
 def _make_constraint(**fields):
@@ -344,8 +438,64 @@ class TestConstraintSummaryDiagnostics:
         entry = summary[0]
         assert entry['status'] == 'Failed: No matching data'
         assert entry['reason'] is not None
-        assert 'scope filters' in entry['reason']
+        # Reason should pinpoint the offending filter, not give a generic message
+        assert 'Lane=USNOPE-NONE' in entry['reason']
         assert entry['eligible_containers'] == 0
+
+    def test_bucket_category_matches_normalized_data(self, sample_data):
+        # Regression: data is normalized to the 'CD' bucket; a 'CD'-scoped rule
+        # must match those rows (the inverse-mapping bug matched zero).
+        constraints = _make_constraint(
+            Carrier='ABCD', Category='CD',
+            **{'Maximum Container Count': 3},
+        )
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        assert entry['eligible_containers'] > 0, "CD rule matched no CD rows"
+
+    def test_raw_label_category_matches_normalized_bucket_data(self, sample_data):
+        # Regression / both-directions: a constraint written with the RAW label
+        # 'Retail CD' must still match data that was normalized to the 'CD' bucket.
+        constraints = _make_constraint(
+            Carrier='ABCD', Category='Retail CD',
+            **{'Maximum Container Count': 3},
+        )
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        assert entry['eligible_containers'] > 0, "'Retail CD' rule matched no 'CD' rows"
+
+    def test_no_match_combination_too_narrow_names_each_filter(self, sample_data):
+        # Lane=USLAXIUSF matches rows in week 9 only; Week=10 matches the single
+        # USBALREWR row. Each filter matches data on its own, but no single row
+        # satisfies BOTH — the combination is too narrow.
+        constraints = _make_constraint(
+            Carrier='EFGH',
+            Lane='USLAXIUSF',
+            **{'Week Number': 10, 'Minimum Container Count': 1},
+        )
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        assert entry['status'] == 'Failed: No matching data'
+        assert 'no single row satisfies all of them' in entry['reason']
+        # Each dimension's standalone row count is surfaced
+        assert 'Lane=USLAXIUSF' in entry['reason']
+        assert 'Week=10' in entry['reason']
+
+    def test_no_match_dead_filter_value_is_named(self, sample_data):
+        # Week=99 exists nowhere; Lane is fine. Diagnosis must name the dead Week
+        # filter (the actionable culprit), not the valid Lane.
+        constraints = _make_constraint(
+            Carrier='EFGH',
+            Lane='USLAXIUSF',
+            **{'Week Number': 99, 'Minimum Container Count': 1},
+        )
+        _, _, summary, _, _, _ = apply_constraints_to_data(sample_data, constraints)
+        entry = summary[0]
+        assert entry['status'] == 'Failed: No matching data'
+        assert "isn't present in the GVT file" in entry['reason']
+        assert 'Week=99' in entry['reason']
+        # The valid Lane filter must NOT be blamed as dead
+        assert 'Lane=USLAXIUSF' not in entry['reason']
 
     def test_excluded_fc_without_carrier_explains_error(self, sample_data):
         constraints = _make_constraint(
@@ -540,3 +690,107 @@ class TestPercentFallback:
         # 50% of 10 = 5, 50% of 9 = 5 (ceil) → no count difference → no shortfall
         assert p50['containers_allocated'] == 5
         assert p50['status'] == 'Applied'
+
+
+# ==================== no-match diagnosis helpers (adversarial) ====================
+
+def _series(**fields):
+    """Build a single constraint as a Series (what diagnose_no_match consumes)."""
+    base = {k: None for k in (
+        'Priority Score', 'Carrier', 'Maximum Container Count', 'Minimum Container Count',
+        'Percent Allocation', 'Category', 'Lane', 'Port', 'Week Number',
+        'Terminal', 'SSL', 'Vessel', 'Excluded FC')}
+    base['Priority Score'] = 10
+    base.update(fields)
+    return pd.Series(base)
+
+
+class TestDiagnoseNoMatch:
+    """Direct, adversarial coverage of build_scope_filters / diagnose_no_match —
+    the engine behind the improved 'why did this constraint match nothing?' reason."""
+
+    @pytest.fixture
+    def data(self):
+        return pd.DataFrame({
+            'Category': ['CD', 'CD', 'TL'],
+            'Lane': ['USLAXIUSF', 'USLAXIUSF', 'USBALREWR'],
+            'Discharged Port': ['LAX', 'LAX', 'BAL'],
+            'Week Number': [9, 9, 10],
+            'Container Numbers': ['C1', 'C2', 'C3'],
+            'Container Count': [1, 1, 1],
+        })
+
+    def test_no_filters_returns_none(self, data):
+        # Carrier is the target, not a filter — a carrier-only constraint has nothing to blame.
+        kind, reason = diagnose_no_match(_series(Carrier='EFGH'), data)
+        assert kind is None and reason is None
+
+    def test_missing_column_filter_is_dropped(self, data):
+        # A filter whose backing column is absent must not raise — it's silently skipped.
+        no_port = data.drop(columns=['Discharged Port'])
+        assert build_scope_filters(_series(Port='LAX'), no_port) == []
+        kind, reason = diagnose_no_match(_series(Port='LAX'), no_port)
+        assert kind is None and reason is None
+
+    def test_empty_dataframe_flags_dead(self, data):
+        kind, reason = diagnose_no_match(_series(Lane='USLAXIUSF'), data.iloc[0:0])
+        assert kind == 'dead'
+        assert 'Lane=USLAXIUSF' in reason
+
+    def test_nan_in_data_does_not_crash(self, data):
+        data = data.copy()
+        data.loc[0, 'Category'] = np.nan
+        kind, reason = diagnose_no_match(_series(Category='ZZZ'), data)
+        assert kind == 'dead'
+
+    def test_category_matches_normalized_bucket_in_both_directions(self, data):
+        # Data is normalized to buckets ('CD'/'TL'). A constraint may carry the
+        # bucket OR a raw label — both must match. 'TL' hits the TL row directly;
+        # 'Retail Transload' canonicalizes to TL and hits the same row.
+        for value in ('TL', 'Retail Transload', 'retail transload'):
+            specs = build_scope_filters(_series(Category=value), data)
+            cat_spec = next(s for s in specs if s['dimension'] == 'Category')
+            assert int(cat_spec['mask'].sum()) == 1, f"{value!r} should match the TL row"
+
+    def test_truly_absent_category_is_dead(self, data):
+        # ROBOTICS is a real bucket, but no row in this data carries it.
+        kind, reason = diagnose_no_match(_series(Category='ROBOTICS'), data)
+        assert kind == 'dead'
+        assert 'Category=ROBOTICS' in reason
+
+    def test_float_week_matches_int_row(self, data):
+        # Excel stores weeks as floats (9.0). It must match the int-9 rows, so the
+        # failure is a too-narrow combination, NOT a dead week.
+        kind, reason = diagnose_no_match(
+            _series(Lane='USBALREWR', **{'Week Number': 9.0}), data)
+        assert kind == 'combination'
+
+    def test_combination_too_narrow_lists_per_filter_counts(self, data):
+        kind, reason = diagnose_no_match(
+            _series(Lane='USLAXIUSF', **{'Week Number': 10}), data)
+        assert kind == 'combination'
+        assert 'Lane=USLAXIUSF → 2 row(s)' in reason
+        assert 'Week=10 → 1 row(s)' in reason
+
+    def test_multiple_dead_filters_all_named(self, data):
+        kind, reason = diagnose_no_match(
+            _series(Category='NOPE', Lane='USXXXXXXX'), data)
+        assert kind == 'dead'
+        assert 'Category=NOPE' in reason
+        assert 'Lane=USXXXXXXX' in reason
+
+    def test_dead_filter_named_valid_filter_not_blamed(self, data):
+        # Week 99 is dead; Lane USLAXIUSF is valid — only the dead one is named.
+        kind, reason = diagnose_no_match(
+            _series(Lane='USLAXIUSF', **{'Week Number': 99}), data)
+        assert kind == 'dead'
+        assert 'Week=99' in reason
+        assert 'Lane=USLAXIUSF' not in reason
+
+    def test_mask_index_aligns_with_data(self, data):
+        # Masks are &='d into the eligibility mask, so they must share the data's index.
+        data = data.copy()
+        data.index = [100, 200, 300]
+        specs = build_scope_filters(_series(**{'Week Number': 9}), data)
+        assert list(specs[0]['mask'].index) == [100, 200, 300]
+        assert int(specs[0]['mask'].sum()) == 2

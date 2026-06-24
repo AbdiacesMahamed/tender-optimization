@@ -10,7 +10,6 @@ SolidCompression=yes
 
 [Files]
 Source: "{#SourcePath}\..\dist\app.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourcePath}\..\desktop_instructions.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Tender Optimization"; Filename: "{app}\app.exe"

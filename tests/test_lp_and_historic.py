@@ -8,9 +8,7 @@ Covers: _normalize_values, optimize_carrier_allocation, _prepare_group_columns,
 import pandas as pd
 import numpy as np
 import pytest
-import sys
 from datetime import datetime
-sys.path.insert(0, '.')
 
 from optimization.linear_programming import (
     _normalize_values,

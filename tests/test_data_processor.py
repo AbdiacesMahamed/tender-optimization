@@ -7,17 +7,11 @@ Uses mock st.cache_data to avoid Streamlit dependency.
 import pandas as pd
 import numpy as np
 import pytest
-import sys
-sys.path.insert(0, '.')
 
-# Mock streamlit before importing modules that use it
-from unittest.mock import MagicMock, patch
-sys.modules['streamlit'] = MagicMock()
-import streamlit as st
-# Make st.cache_data a passthrough decorator
-st.cache_data = lambda **kwargs: (lambda f: f)
+# Streamlit is stubbed centrally in tests/conftest.py (passthrough cache_data,
+# dict-like session_state) before any first-party import.
 
-from components.data_processor import (
+from components.data.processor import (
     validate_and_process_gvt_data,
     validate_and_process_rate_data,
     CATEGORY_MAPPING,

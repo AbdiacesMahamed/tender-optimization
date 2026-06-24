@@ -20,9 +20,22 @@ import numpy as np
 
 from .linear_programming import optimize_carrier_allocation
 from .historic_volume import calculate_carrier_volume_share
+from config.category_mapping import canonical_category
 
 
 DEFAULT_MAX_GROWTH_PCT = 0.30  # 30% maximum growth over historical allocation
+
+
+def _norm_scope(value):
+    """Case/whitespace-insensitive normalization for string scope comparison.
+
+    Mirrors components.constraints.processor.norm_text (defined locally to keep the
+    optimization package decoupled from components): upper-cases, trims, and collapses
+    internal whitespace so scope values match the same way constraint eligibility does.
+    """
+    if value is None:
+        return value
+    return ' '.join(str(value).strip().upper().split())
 
 # ─────────────────────────────────────────────────────────────────────
 # CONSTRAINT SCOPE CONFIG
@@ -252,13 +265,23 @@ def _get_excluded_carriers_for_group(
             group_val = group_vals.get(group_col)
             if group_val is None:
                 continue  # group doesn't have this dimension — skip
-            # Compare (numeric-safe for week numbers)
+            # Category compares on the canonical bucket so a 'Retail CD' exclusion
+            # matches a normalized 'CD' group (both directions); other dimensions
+            # use a numeric-safe equality (week numbers may be float vs int).
+            if group_col == "Category":
+                if canonical_category(mc_val) != canonical_category(group_val):
+                    matches = False
+                    break
+                continue
             try:
                 if float(mc_val) != float(group_val):
                     matches = False
                     break
             except (ValueError, TypeError):
-                if str(mc_val) != str(group_val):
+                # Case/whitespace-insensitive string compare so a max/lockout rule
+                # scoped on e.g. a lowercase Lane or Port still excludes the carrier,
+                # mirroring the constraint-eligibility normalization (processor.norm_text).
+                if _norm_scope(mc_val) != _norm_scope(group_val):
                     matches = False
                     break
         

@@ -7,24 +7,18 @@ Covers: add_carrier_flips_column, add_missing_rate_rows, calculate_enhanced_metr
 import pandas as pd
 import numpy as np
 import pytest
-import sys
-sys.path.insert(0, '.')
 
-# Mock streamlit
-from unittest.mock import MagicMock
-sys.modules['streamlit'] = MagicMock()
-import streamlit as st
-st.cache_data = lambda **kwargs: (lambda f: f)
-st.session_state = {}
+# Streamlit is stubbed centrally in tests/conftest.py before any first-party import.
 
-from components.metrics import (
+from components.scenarios.metrics import (
     add_carrier_flips_column,
     add_missing_rate_rows,
     calculate_enhanced_metrics,
+    build_combined_allocations_export,
     _calc_performance_cost,
     _calc_cheapest_cost,
 )
-from components.utils import get_rate_columns
+from components.core.utils import get_rate_columns
 
 
 # ==================== FIXTURES ====================
@@ -249,3 +243,69 @@ class TestCalculateEnhancedMetrics:
             scenario_data, unconstrained_data=unconstrained
         )
         assert result is not None
+
+
+# ==================== build_combined_allocations_export ====================
+
+class TestCombinedAllocationsExport:
+    """The 'download both tables in one file' export — a two-sheet .xlsx."""
+
+    @pytest.fixture
+    def constrained(self):
+        return pd.DataFrame({
+            'Dray SCAC(FL)': ['ABCD', 'EFGH'],
+            'Lane': ['USLAXIUSF', 'USBALREWR'],
+            'Container Count': [5, 3],
+            'Total Rate': [500, 360],
+        })
+
+    @pytest.fixture
+    def unconstrained(self):
+        return pd.DataFrame({
+            'Dray SCAC(FL)': ['IJKL'],
+            'Lane': ['USNYCABE8'],
+            'Container Count': [7],
+            'Total Rate': [1050],
+        })
+
+    def _read_sheets(self, data):
+        import io
+        return pd.read_excel(io.BytesIO(data), sheet_name=None)
+
+    def test_returns_xlsx_bytes(self, constrained, unconstrained):
+        data = build_combined_allocations_export(constrained, unconstrained)
+        assert isinstance(data, bytes) and len(data) > 0
+        # .xlsx is a ZIP container — starts with the PK magic bytes.
+        assert data[:2] == b'PK'
+
+    def test_has_both_sheets_with_correct_rows(self, constrained, unconstrained):
+        sheets = self._read_sheets(
+            build_combined_allocations_export(constrained, unconstrained)
+        )
+        assert set(sheets) == {'Constrained', 'Unconstrained'}
+        assert len(sheets['Constrained']) == 2
+        assert len(sheets['Unconstrained']) == 1
+        # Content round-trips faithfully.
+        assert list(sheets['Constrained']['Dray SCAC(FL)']) == ['ABCD', 'EFGH']
+        assert int(sheets['Unconstrained']['Container Count'].iloc[0]) == 7
+
+    def test_none_inputs_yield_empty_sheets_not_crash(self):
+        sheets = self._read_sheets(build_combined_allocations_export(None, None))
+        assert set(sheets) == {'Constrained', 'Unconstrained'}
+        assert len(sheets['Constrained']) == 0
+        assert len(sheets['Unconstrained']) == 0
+
+    def test_one_side_empty_still_writes_both_sheets(self, unconstrained):
+        sheets = self._read_sheets(
+            build_combined_allocations_export(pd.DataFrame(), unconstrained)
+        )
+        assert set(sheets) == {'Constrained', 'Unconstrained'}
+        assert len(sheets['Constrained']) == 0
+        assert len(sheets['Unconstrained']) == 1
+
+    def test_does_not_mutate_inputs(self, constrained, unconstrained):
+        before_c = constrained.copy(deep=True)
+        before_u = unconstrained.copy(deep=True)
+        build_combined_allocations_export(constrained, unconstrained)
+        pd.testing.assert_frame_equal(constrained, before_c)
+        pd.testing.assert_frame_equal(unconstrained, before_u)

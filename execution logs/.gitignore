@@ -1,0 +1,5 @@
+# Local run logs — keep the folder + README, ignore everything generated:
+# per-turn JSON logs and the data/prompt snapshot files they link to.
+*.json
+data_snapshots/
+prompt_snapshots/

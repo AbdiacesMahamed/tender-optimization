@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tender-optimization"
+version = "1.0.0"
+description = "Carrier tender-optimization dashboard for Amazon inbound drayage (Streamlit + Bedrock assistant)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit==1.44.0",
+    "pandas==2.2.3",
+    "numpy==1.26.4",
+    "openpyxl==3.1.5",
+    "pulp==2.9.0",
+    "scikit-learn==1.5.2",
+    "plotly==5.24.1",
+    "boto3>=1.34.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+# Desktop launcher (app.py) extras — not needed for the Streamlit/cloud path.
+desktop = ["requests", "pywebview"]
+dev = ["pytest>=8"]
+
+# The project is a set of top-level packages imported by absolute name
+# (`from components... / optimization... / config... / evals...`). Declaring them
+# here lets `pip install -e .` put them on the path instead of relying on the
+# repo root happening to be the CWD. The Streamlit entry point stays
+# `streamlit run dashboard.py`.
+[tool.setuptools]
+py-modules = ["dashboard", "streamlit_app", "app"]
+
+[tool.setuptools.packages.find]
+include = ["components*", "optimization*", "config*", "evals*"]
+exclude = ["tests*", "build*", "dist*", "installer*", "docs*"]
+
+[tool.pytest.ini_options]
+# Tests bootstrap sys.path + a single Streamlit stub in tests/conftest.py.
+testpaths = ["tests"]

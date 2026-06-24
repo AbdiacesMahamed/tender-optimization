@@ -3,7 +3,7 @@ Main imports file for all dashboard components
 """
 
 # Shared utilities (import first as other modules depend on these)
-from .utils import (
+from .core.utils import (
     get_rate_columns,
     count_containers,
     parse_container_ids,
@@ -21,11 +21,11 @@ from .utils import (
 )
 
 # Configuration and styling
-from .config_styling import configure_page, apply_custom_css, show_header, section_header
+from .core.config_styling import configure_page, apply_custom_css, show_header, section_header
 
 # Data loading and processing
-from .data_loader import show_file_upload_section, load_data_files, process_performance_data
-from .data_processor import (
+from .data.loader import show_file_upload_section, load_data_files, process_performance_data
+from .data.processor import (
     validate_and_process_gvt_data, 
     validate_and_process_rate_data, 
     perform_lane_analysis, 
@@ -35,7 +35,7 @@ from .data_processor import (
 )
 
 # Filtering
-from .filters import (
+from .ui.filters import (
     show_filter_interface, 
     apply_filters_to_data, 
     show_selection_summary,
@@ -43,22 +43,23 @@ from .filters import (
 )
 
 # Metrics and analysis
-from .metrics import (
-    calculate_enhanced_metrics, 
-    display_current_metrics, 
-    show_detailed_analysis_table, 
+from .scenarios.metrics import (
+    calculate_enhanced_metrics,
+    display_current_metrics,
+    show_detailed_analysis_table,
     show_top_savings_opportunities,
     show_complete_data_export,
     show_performance_score_analysis,
     show_carrier_performance_matrix,
     show_container_movement_summary,
+    build_combined_allocations_export,
     apply_peel_pile_as_constraints
 )
 
 # Focused sub-modules (also importable directly)
-from .metrics_display import display_current_metrics          # noqa: F811
-from .peel_pile import show_peel_pile_analysis, apply_peel_pile_as_constraints  # noqa: F811
-from .scenario_strategies import (
+from .scenarios.metrics_display import display_current_metrics          # noqa: F811
+from .constraints.peel_pile import show_peel_pile_analysis, apply_peel_pile_as_constraints  # noqa: F811
+from .scenarios.strategies import (
     apply_current_selection,
     apply_optimized_strategy,
     apply_performance_strategy,
@@ -66,22 +67,23 @@ from .scenario_strategies import (
 )
 
 # Summary tables
-from .summary_tables import show_summary_tables
+from .reporting.summary_tables import show_summary_tables
 
 # Analytics
-from .analytics import show_advanced_analytics
+from .reporting.analytics import show_advanced_analytics
 
 # Visualizations
-from .visualizations import show_interactive_visualizations
+from .reporting.visualizations import show_interactive_visualizations
 
 # Calculation logic and utilities
-from .calculation_logic import show_calculation_logic, show_debug_performance_merge, show_footer
-from .performance_assignments import show_performance_assignments_table, export_performance_assignments
-from .constraints_processor import (
+from .ui.calculation_logic import show_calculation_logic, show_debug_performance_merge, show_footer
+from .data.performance_assignments import show_performance_assignments_table, export_performance_assignments
+from .constraints.processor import (
     process_constraints_file,
     apply_constraints_to_data,
     show_constraints_summary
 )
+from .reporting.carrier_flip import show_carrier_flip_report, run_carrier_flip_analysis
 
 # Import optimization functions - imported after components to avoid circular dependencies
 try:
@@ -110,11 +112,15 @@ __all__ = [
     
     # Constraints
     'process_constraints_file', 'apply_constraints_to_data', 'show_constraints_summary',
+
+    # Carrier flip analysis
+    'show_carrier_flip_report', 'run_carrier_flip_analysis',
     
     # Metrics
     'calculate_enhanced_metrics', 'display_current_metrics', 'show_detailed_analysis_table',
     'show_top_savings_opportunities', 'show_complete_data_export', 'show_performance_score_analysis',
     'show_carrier_performance_matrix', 'show_container_movement_summary',
+    'build_combined_allocations_export',
     'apply_peel_pile_as_constraints',
     
     # Tables and analysis

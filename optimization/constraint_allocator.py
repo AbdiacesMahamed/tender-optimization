@@ -23,7 +23,8 @@ from typing import Dict, List, Tuple, Optional, Set
 import pandas as pd
 import numpy as np
 
-from components.utils import parse_container_ids, join_container_ids, normalize_facility_code
+from components.core.utils import parse_container_ids, join_container_ids, normalize_facility_code
+from config.category_mapping import canonical_category
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +324,10 @@ def allocate_with_hierarchy(
         if _is_filled(port) and port_column in remaining.columns:
             mask &= remaining[port_column] == port
         if _is_filled(category) and category_column in remaining.columns:
-            mask &= remaining[category_column] == category
+            # Canonical compare so 'CD'/'Retail CD'/'FBA FCL' all match the
+            # normalized data bucket in both directions (config.category_mapping).
+            wanted_cat = canonical_category(category)
+            mask &= remaining[category_column].map(canonical_category) == wanted_cat
         if _is_filled(lane) and lane_column in remaining.columns:
             mask &= remaining[lane_column] == lane
         if _is_filled(week) and week_column in remaining.columns:

@@ -21,16 +21,16 @@ import pandas as pd
 import numpy as np
 import pytest
 
-from components.data_processor import (
+from components.data.processor import (
     validate_and_process_gvt_data,
     validate_and_process_rate_data,
     merge_all_data,
     process_performance_data,
     CATEGORY_MAPPING,
 )
-from components.constraints_processor import apply_constraints_to_data
-from components.utils import deduplicate_containers_per_lane_week
-from components.metrics import calculate_enhanced_metrics
+from components.constraints.processor import apply_constraints_to_data
+from components.core.utils import deduplicate_containers_per_lane_week
+from components.scenarios.metrics import calculate_enhanced_metrics
 
 
 # =====================================================================

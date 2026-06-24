@@ -1,0 +1,2 @@
+# Eval run artifacts (structured result dumps from harness --json)
+*.json

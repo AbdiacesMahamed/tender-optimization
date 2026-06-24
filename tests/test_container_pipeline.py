@@ -7,10 +7,8 @@ Run with: python -m pytest tests/test_container_pipeline.py -v
 import pandas as pd
 import numpy as np
 import pytest
-import sys
-sys.path.insert(0, '.')
 
-from components.utils import (
+from components.core.utils import (
     count_containers,
     deduplicate_containers_per_lane_week,
     parse_container_ids,

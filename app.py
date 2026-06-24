@@ -6,8 +6,9 @@ Starts a headless Streamlit server and opens a native window using pywebview.
 Usage (dev):
 	python app.py
 
-When packaging, use the provided `build_windows.ps1` script which installs
-the desktop requirements and runs PyInstaller.
+When packaging for Windows, install the desktop extras
+(`pip install -e .[desktop]`) and run PyInstaller against this file; the Inno
+Setup script in `installer/installer.iss` then wraps the resulting `dist/app.exe`.
 """
 
 import sys
