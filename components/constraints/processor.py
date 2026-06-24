@@ -7,7 +7,8 @@ import pandas as pd
 import streamlit as st
 import math
 from ..core.utils import (
-    normalize_facility_code, parse_container_ids, join_container_ids
+    normalize_facility_code, parse_container_ids, join_container_ids,
+    parse_day_of_week
 )
 from config.category_mapping import canonical_category
 
@@ -135,6 +136,17 @@ def build_scope_filters(constraint, df):
             'value': int(constraint['Week Number']),
             'desc': f"Week={int(constraint['Week Number'])}",
             'mask': df['Week Number'] == constraint['Week Number'],
+        })
+
+    # Day of Week: constraint value is already parsed to the Excel WEEKDAY number
+    # (Sun=1 … Sat=7) at load time; the data column carries the same numbering.
+    if is_valid_value(constraint.get('Day of Week')) and 'Day of Week' in df.columns:
+        dow_value = int(constraint['Day of Week'])
+        specs.append({
+            'dimension': 'Day of Week',
+            'value': dow_value,
+            'desc': f"Day={dow_value}",
+            'mask': pd.to_numeric(df['Day of Week'], errors='coerce') == dow_value,
         })
 
     if is_valid_value(constraint.get('Terminal')) and 'Terminal' in df.columns:
@@ -294,6 +306,9 @@ def process_constraints_file(constraints_file):
             # Map Week Number
             elif 'week' in col_lower and 'number' in col_lower:
                 column_mapping[col] = 'Week Number'
+            # Map Day of Week (accepts 'Day of Week', 'Day', 'DOW', 'Weekday')
+            elif col_lower in ('day of week', 'day', 'dow', 'weekday', 'day of the week'):
+                column_mapping[col] = 'Day of Week'
             # Map Maximum Container variations
             elif 'maximum' in col_lower and 'container' in col_lower:
                 column_mapping[col] = 'Maximum Container Count'
@@ -323,7 +338,8 @@ def process_constraints_file(constraints_file):
         
         # Define expected columns
         expected_cols = [
-            'Category', 'Carrier', 'Lane', 'Port', 'Week Number', 'Terminal', 'SSL', 'Vessel',
+            'Category', 'Carrier', 'Lane', 'Port', 'Week Number', 'Day of Week',
+            'Terminal', 'SSL', 'Vessel',
             'Maximum Container Count', 'Minimum Container Count',
             'Percent Allocation', 'Excluded FC', 'Priority Score'
         ]
@@ -352,6 +368,11 @@ def process_constraints_file(constraints_file):
             constraints_df['Week Number'] = pd.to_numeric(
                 constraints_df['Week Number'], errors='coerce'
             )
+
+        # Parse Day of Week to Excel WEEKDAY number (Sun=1 … Sat=7). Accepts numbers
+        # (1–7) or names (mon/monday/…), case-insensitively. Unrecognized → None.
+        if 'Day of Week' in constraints_df.columns:
+            constraints_df['Day of Week'] = constraints_df['Day of Week'].apply(parse_day_of_week)
         
         # Clean up Percent Allocation - remove % sign and convert to numeric
         if 'Percent Allocation' in constraints_df.columns:
@@ -742,10 +763,11 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     def _build_scope_dict(constraint, target_carrier=None, excluded_facilities=None):
         """Capture the constraint's filter values for the summary."""
         scope = {}
-        for field in ('Category', 'Lane', 'Port', 'Week Number', 'Terminal', 'SSL', 'Vessel'):
+        for field in ('Category', 'Lane', 'Port', 'Week Number', 'Day of Week',
+                      'Terminal', 'SSL', 'Vessel'):
             val = constraint.get(field)
             if pd.notna(val) and not (isinstance(val, str) and val.strip() == ''):
-                if field == 'Week Number':
+                if field in ('Week Number', 'Day of Week'):
                     scope[field] = int(val)
                 else:
                     scope[field] = val
@@ -967,6 +989,7 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                 'lane': constraint.get('Lane') if is_valid_value(constraint.get('Lane')) else None,
                 'port': constraint.get('Port') if is_valid_value(constraint.get('Port')) else None,
                 'week': constraint.get('Week Number') if is_valid_value(constraint.get('Week Number')) else None,
+                'day': constraint.get('Day of Week') if is_valid_value(constraint.get('Day of Week')) else None,
             })
             constraint_summary.append({
                 'priority': constraint['Priority Score'],
@@ -1119,6 +1142,7 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     'lane': constraint.get('Lane') if is_valid_value(constraint.get('Lane')) else None,
                     'port': constraint.get('Port') if is_valid_value(constraint.get('Port')) else None,
                     'week': constraint.get('Week Number') if is_valid_value(constraint.get('Week Number')) else None,
+                    'day': constraint.get('Day of Week') if is_valid_value(constraint.get('Day of Week')) else None,
                 })
 
             # Percent-only constraints also exclude carrier from optimizer
@@ -1131,6 +1155,7 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     'lane': constraint.get('Lane') if is_valid_value(constraint.get('Lane')) else None,
                     'port': constraint.get('Port') if is_valid_value(constraint.get('Port')) else None,
                     'week': constraint.get('Week Number') if is_valid_value(constraint.get('Week Number')) else None,
+                    'day': constraint.get('Day of Week') if is_valid_value(constraint.get('Day of Week')) else None,
                 })
 
             # Warn on minimum shortfall

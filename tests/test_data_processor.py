@@ -119,6 +119,94 @@ class TestValidateGVTData:
         with pytest.raises(ValueError, match="Missing required columns"):
             validate_and_process_gvt_data(df)
 
+    def test_closed_future_containers_removed(self):
+        """Closed containers with an Ocean ETA after today are dropped; other
+        combinations (closed+past, open+future) are kept."""
+        future = pd.Timestamp.now().normalize() + pd.Timedelta(days=30)
+        past = pd.Timestamp.now().normalize() - pd.Timedelta(days=30)
+        df = pd.DataFrame({
+            'Ocean ETA': [future, future, past, future],
+            'Discharged Port': ['LAX', 'BAL', 'NYC', 'SEA'],
+            'Dray SCAC(FL)': ['ABCD', 'EFGH', 'IJKL', 'MNOP'],
+            'Facility': ['IUSF-5', 'HGR6-5', 'ABC4-5', 'DEF7-5'],
+            'Container Status': ['Closed', 'CLOSED', 'Closed', 'On Water'],
+        })
+        result = validate_and_process_gvt_data(df)
+        # Row 0 (Closed+future) and row 1 (CLOSED+future, case-insensitive) removed.
+        # Row 2 (Closed+past) and row 3 (On Water+future) kept.
+        assert len(result) == 2
+        assert set(result['Discharged Port']) == {'NYC', 'SEA'}
+
+    def test_no_container_status_column_is_noop(self, minimal_gvt):
+        """Files without a Container Status column are unaffected."""
+        assert 'Container Status' not in minimal_gvt.columns
+        result = validate_and_process_gvt_data(minimal_gvt)
+        assert len(result) == len(minimal_gvt)
+
+    def test_closed_same_day_arrival_kept(self):
+        """A Closed container arriving later TODAY (time-of-day in the future) is
+        kept — 'future' is measured by date, not timestamp."""
+        today_afternoon = pd.Timestamp.now().normalize() + pd.Timedelta(hours=15)
+        df = pd.DataFrame({
+            'Ocean ETA': [today_afternoon],
+            'Discharged Port': ['LAX'],
+            'Dray SCAC(FL)': ['ABCD'],
+            'Facility': ['IUSF-5'],
+            'Container Status': ['Closed'],
+        })
+        result = validate_and_process_gvt_data(df)
+        assert len(result) == 1
+
+    def test_closed_future_tz_aware_eta(self):
+        """Timezone-aware Ocean ETA must not crash the comparison and must still
+        filter Closed+future rows correctly."""
+        tz_future = pd.Timestamp.now(tz='US/Pacific').normalize() + pd.Timedelta(days=30)
+        tz_past = pd.Timestamp.now(tz='US/Pacific').normalize() - pd.Timedelta(days=30)
+        df = pd.DataFrame({
+            'Ocean ETA': [tz_future, tz_past, tz_future],
+            'Discharged Port': ['LAX', 'BAL', 'NYC'],
+            'Dray SCAC(FL)': ['ABCD', 'EFGH', 'IJKL'],
+            'Facility': ['IUSF-5', 'HGR6-5', 'ABC4-5'],
+            'Container Status': ['Closed', 'Closed', 'On Water'],
+        })
+        result = validate_and_process_gvt_data(df)
+        # Only the Closed+future LAX row is removed.
+        assert len(result) == 2
+        assert set(result['Discharged Port']) == {'BAL', 'NYC'}
+
+    def test_closed_future_mixed_timezone_eta(self):
+        """A Container Status filter must survive an Ocean ETA column with mixed UTC
+        offsets — pandas leaves such input as object dtype, which would break a naive
+        .dt access and crash the whole pipeline. Filtering must still be correct."""
+        df = pd.DataFrame({
+            'Ocean ETA': [
+                '2099-01-01 12:00:00+00:00',   # closed + far future -> removed
+                '2099-01-01 12:00:00+00:00',   # on water + future   -> kept
+                '2000-01-01 12:00:00-08:00',   # closed + past       -> kept
+            ],
+            'Discharged Port': ['LAX', 'BAL', 'NYC'],
+            'Dray SCAC(FL)': ['ABCD', 'EFGH', 'IJKL'],
+            'Facility': ['IUSF-5', 'HGR6-5', 'ABC4-5'],
+            'Container Status': ['Closed', 'On Water', 'Closed'],
+        })
+        result = validate_and_process_gvt_data(df)
+        assert len(result) == 2
+        assert set(result['Discharged Port']) == {'BAL', 'NYC'}
+
+    def test_closed_status_substring_not_matched(self):
+        """Only an exact 'closed' (after strip/casefold) matches — values that
+        merely contain 'closed' are left alone."""
+        future = pd.Timestamp.now().normalize() + pd.Timedelta(days=30)
+        df = pd.DataFrame({
+            'Ocean ETA': [future, future, future],
+            'Discharged Port': ['LAX', 'BAL', 'NYC'],
+            'Dray SCAC(FL)': ['ABCD', 'EFGH', 'IJKL'],
+            'Facility': ['IUSF-5', 'HGR6-5', 'ABC4-5'],
+            'Container Status': ['Not Closed', 'Closed-Delivered', 'Reclosed'],
+        })
+        result = validate_and_process_gvt_data(df)
+        assert len(result) == 3
+
     def test_null_ocean_eta_dropped(self):
         df = pd.DataFrame({
             'Ocean ETA': ['2025-03-01', 'not a date'],

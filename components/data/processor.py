@@ -5,7 +5,7 @@ import pandas as pd
 import logging
 import streamlit as st
 from ..core.config_styling import section_header
-from ..core.utils import normalize_facility_series
+from ..core.utils import normalize_facility_series, excel_weekday_series
 
 # Set up module logger — debug output goes to console only when DEBUG level is enabled
 logger = logging.getLogger(__name__)
@@ -48,6 +48,41 @@ def validate_and_process_gvt_data(GVTdata):
     if 'Market' in GVTdata.columns:
         GVTdata = GVTdata[~GVTdata['Market'].str.upper().str.contains('CANADA', na=False)]
 
+    # Remove future-dated Closed containers.
+    # A container marked "Closed" with an Ocean ETA still in the future is a data
+    # artifact (a container can't be closed before it has even arrived), so it would
+    # distort forward-looking volume/cost. Drop these here, while we still have the
+    # per-container Container Status + Ocean ETA columns (both are lost in the
+    # downstream groupby). "Future" is measured against today's date. The removed
+    # count + reason are stashed in session state so the dashboard can surface them
+    # the same way deduplication is reported.
+    if 'Container Status' in GVTdata.columns:
+        # Compare on the date only (drop time-of-day) so a container arriving later
+        # *today* isn't treated as future. Coerce to UTC first: this collapses naive,
+        # single-tz, AND mixed-tz inputs to one comparable tz-aware dtype. Without
+        # utc=True a mixed-offset column stays object dtype and the .dt accessor
+        # raises, taking down the whole pipeline; a tz-aware column also can't be
+        # compared against a naive Timestamp. Normalizing the cutoff the same way
+        # keeps the date-only semantics.
+        eta_dates = pd.to_datetime(GVTdata['Ocean ETA'], errors='coerce', utc=True).dt.normalize()
+        today = pd.Timestamp.now(tz='UTC').normalize()
+        closed_mask = GVTdata['Container Status'].astype(str).str.strip().str.casefold() == 'closed'
+        future_mask = eta_dates.notna() & (eta_dates > today)
+        remove_mask = closed_mask & future_mask
+        removed_count = int(remove_mask.sum())
+        if removed_count > 0:
+            GVTdata = GVTdata[~remove_mask]
+            logger.info(
+                f"Removed {removed_count} future-dated Closed container(s) "
+                f"(Container Status == 'Closed' and Ocean ETA > {today.date()})"
+            )
+        try:
+            st.session_state['closed_future_removed'] = removed_count
+            st.session_state['closed_future_cutoff'] = str(today.date())
+        except Exception:
+            # session_state is unavailable outside a Streamlit run (e.g. unit tests) — skip silently
+            pass
+
     # Normalise Category values using the mapping defined at module level
     if 'Category' in GVTdata.columns:
         GVTdata['Category'] = (
@@ -78,6 +113,11 @@ def validate_and_process_gvt_data(GVTdata):
         GVTdata['Week Number'] = GVTdata['Ocean ETA'].apply(
             lambda x: int(x.strftime('%U')) + 1 if pd.notna(x) else None
         )
+
+    # Day of Week from Ocean ETA, using Excel WEEKDAY(date, 1) numbering (Sun=1 … Sat=7)
+    # to match the Sunday-start week convention used for Week Number above. Carried
+    # through grouping so day-of-week constraints can scope to a specific weekday.
+    GVTdata['Day of Week'] = excel_weekday_series(GVTdata['Ocean ETA'])
 
     # Remove rows where Ocean ETA is null (couldn't be converted to date)
     GVTdata = GVTdata.dropna(subset=['Ocean ETA'])
@@ -201,7 +241,12 @@ def merge_all_data(GVTdata, Ratedata, performance_clean, has_performance):
         group_cols.insert(3, 'Vessel')  # Insert after SSL
     if 'Terminal' in GVTdata.columns:
         group_cols.insert(len(group_cols) - 1, 'Terminal')  # Insert before 'Lookup'
-    
+    if 'Day of Week' in GVTdata.columns:
+        # Split rows by weekday so a day-of-week constraint matches exact dates rather
+        # than a week-level row that may mix days. Sits next to Week Number in the key.
+        wk_idx = group_cols.index('Week Number')
+        group_cols.insert(wk_idx + 1, 'Day of Week')
+
     # --- Assign cheapest carrier to containers with no Dray SCAC ---
     # GVT rows with blank/NaN SCAC can't match the rate card and would be
     # skipped by the optimiser.  Fix: look up the cheapest available carrier

@@ -50,6 +50,11 @@ from components.constraints.processor import (
 
 from components.reporting.carrier_flip import show_carrier_flip_report
 
+# JBH Allocation Model — runs the JB Hunt allocation rules (config-driven per
+# port) on an Inbound Container Milestone file. Self-contained: own uploader,
+# no dependency on the tender-optimization data flow.
+from optimization.jbh_allocation.ui import show_jbh_allocation_report
+
 # AI assistant (Bedrock-powered chatbot for analysis + constraint generation)
 from components.chatbot import show_chatbot_sidebar, get_applied_constraints_df
 
@@ -76,9 +81,20 @@ def main():
         # Validate and process data
         GVTdata = validate_and_process_gvt_data(GVTdata)
         Ratedata = validate_and_process_rate_data(Ratedata)
-        
+
         # Merge all data (this already calls apply_volume_weighted_performance internally)
         merged_data = merge_all_data(GVTdata, Ratedata, performance_clean, has_performance)
+
+    # Report future-dated Closed containers removed during GVT processing.
+    # Mirrors the deduplication notice below: state the count and why.
+    closed_future_removed = st.session_state.get('closed_future_removed', 0)
+    if closed_future_removed > 0:
+        cutoff = st.session_state.get('closed_future_cutoff', 'today')
+        st.info(
+            f"ℹ️ **Closed Container Removal:** Removed {closed_future_removed:,} container(s) marked "
+            f"**Closed** with an Ocean ETA after {cutoff}. A container can't be closed before it has "
+            f"arrived, so these future-dated closed records are excluded from the analysis."
+        )
     
     # Show performance assignments table
     show_performance_assignments_table()
@@ -228,6 +244,11 @@ def main():
     st.markdown("---")
     filtered_gvt, _, _, _, _ = apply_filters_to_data(GVTdata)
     show_carrier_flip_report(in_app_gvt=filtered_gvt, in_app_rate=Ratedata)
+
+    # JBH Allocation Model — independent of the filters/flow above; takes its own
+    # per-container Inbound Container Milestone upload and a port selection.
+    st.markdown("---")
+    show_jbh_allocation_report(in_app_gvt=GVTdata)
 
     # Footer
     show_footer()

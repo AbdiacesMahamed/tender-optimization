@@ -37,7 +37,7 @@ cases can never silently drift from the data.
 
 ## Running
 
-Needs Bedrock credentials (`tests/.env` — `AWS_BEDROCK_API_KEY` or
+Needs Bedrock credentials (`.env` — `AWS_BEDROCK_API_KEY` or
 `AWS_accessKeyId`/`AWS_secretAccessKey`) and `boto3`:
 
 ```bash

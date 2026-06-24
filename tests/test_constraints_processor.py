@@ -353,6 +353,67 @@ class TestScopeDimensionNormalization:
         assert c['Container Count'].sum() > 0
 
 
+class TestDayOfWeekConstraint:
+    """Day of Week scope filter: data carries an Excel WEEKDAY number (Sun=1 … Sat=7);
+    constraint accepts a number or a name and matches only that weekday's containers."""
+
+    def _day_data(self):
+        # Day of Week: 2=Mon, 3=Tue (Excel WEEKDAY). Same lane/week/carrier, different days.
+        return pd.DataFrame({
+            'Category': ['CD', 'CD', 'CD'],
+            'Dray SCAC(FL)': ['ABCD', 'ABCD', 'ABCD'],
+            'Lane': ['USLAXIUSF', 'USLAXIUSF', 'USLAXIUSF'],
+            'Discharged Port': ['LAX', 'LAX', 'LAX'],
+            'Week Number': [9, 9, 9],
+            'Day of Week': [2, 2, 3],
+            'Facility': ['IUSF-5', 'IUSF-5', 'IUSF-5'],
+            'Container Numbers': ['C001, C002', 'C003', 'C004, C005'],
+            'Container Count': [2, 1, 2],
+            'Base Rate': [100, 100, 100], 'Total Rate': [200, 100, 200],
+        })
+
+    def _constraint(self, day):
+        # Parsed through process_constraints_file so day strings/numbers are normalized.
+        from components.constraints.processor import process_constraints_file
+        import io
+        df = pd.DataFrame([{
+            'Priority Score': 10, 'Carrier': 'WXYZ',
+            'Maximum Container Count': 99, 'Day of Week': day,
+        }])
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False)
+        buf.seek(0)
+        return process_constraints_file(buf)
+
+    def test_numeric_day_matches_only_that_weekday(self):
+        # Day=2 (Monday) → only the 3 Monday containers (C001,C002,C003), not Tuesday's.
+        constraints = self._constraint(2)
+        c, _, _, _, _, _ = apply_constraints_to_data(self._day_data(), constraints)
+        assert c['Container Count'].sum() == 3
+        assert set(c['Day of Week'].unique()) == {2}
+
+    def test_name_day_matches(self):
+        # 'tue' → Excel 3 → only the 2 Tuesday containers.
+        constraints = self._constraint('tue')
+        c, _, _, _, _, _ = apply_constraints_to_data(self._day_data(), constraints)
+        assert c['Container Count'].sum() == 2
+        assert set(c['Day of Week'].unique()) == {3}
+
+    def test_full_name_day_matches(self):
+        constraints = self._constraint('Monday')
+        c, _, _, _, _, _ = apply_constraints_to_data(self._day_data(), constraints)
+        assert c['Container Count'].sum() == 3
+
+    def test_day_appears_in_scope_and_exclusion(self):
+        constraints = self._constraint('monday')
+        _, _, summary, max_carriers, _, _ = \
+            apply_constraints_to_data(self._day_data(), constraints)
+        # Scope dict surfaces the parsed Excel day number.
+        assert summary[0]['scope'].get('Day of Week') == 2
+        # Max constraint registers the day for scoped optimizer exclusion.
+        assert max_carriers[0]['day'] == 2
+
+
 # ==================== constraint_summary diagnostics ====================
 
 def _make_constraint(**fields):

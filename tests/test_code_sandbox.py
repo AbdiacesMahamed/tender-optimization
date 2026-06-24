@@ -415,3 +415,32 @@ def test_executor_dispatches_run_analysis_and_flags_errors(df):
     bad_result, is_err = ex("run_analysis", {"code": "import os\nresult = 1"})
     assert is_err is True  # surfaced as an error turn so the model can retry
     assert bad_result["ok"] is False
+
+
+# ==================== analysis-memory + serialization hardening ===========
+
+def test_memory_nested_mutable_not_corrupted_across_turns(df):
+    # A snippet mutating a value NESTED inside a recalled memory object must not
+    # corrupt the stored object (regression: shallow copy leaked nested mutables).
+    mem = {"grp": {"carriers": ["A", "B"], "n": 2},
+           "lst": [pd.DataFrame({"x": [10]})]}
+    out = run_sandboxed_code(df, "memory['grp']['carriers'].append('PWNED')\nresult=1",
+                             memory=mem)
+    assert out["ok"] is True
+    assert mem["grp"]["carriers"] == ["A", "B"], "nested list in store was corrupted"
+    run_sandboxed_code(df, "memory['lst'][0].iloc[0,0] = -7\nresult=1", memory=mem)
+    assert int(mem["lst"][0].iloc[0, 0]) == 10, "nested DataFrame in store was corrupted"
+
+
+def test_circular_result_does_not_raise(df):
+    # A self-referential result must serialize to a clean dict, never RecursionError
+    # (the sandbox's "never raises" contract).
+    for code in ("d={}\nd['self']=d\nresult=d", "l=[]\nl.append(l)\nresult=l"):
+        out = run_sandboxed_code(df, code)
+        assert isinstance(out, dict)
+        assert out.get("ok") is True  # serialized via the depth guard, not crashed
+
+
+def test_circular_result_via_run_analysis_save_as(df):
+    out = T.run_analysis(df, "d={}\nd['self']=d\nresult=d", save_as="circ")
+    assert isinstance(out, dict) and out.get("ok") is True

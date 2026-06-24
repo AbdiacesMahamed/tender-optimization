@@ -578,7 +578,7 @@ body(doc, "Applied AI constraints are merged with any uploaded constraint file a
           "processed together by priority, exactly like file rows.")
 
 h2(doc, "3.5 Setup & Credentials")
-body(doc, "The assistant needs AWS Bedrock credentials, configured in tests/.env:")
+body(doc, "The assistant needs AWS Bedrock credentials, configured in .env:")
 add_table(
     doc,
     ["Variable", "Purpose"],

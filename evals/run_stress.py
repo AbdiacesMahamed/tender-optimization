@@ -27,7 +27,7 @@ def run_all(case_filter: Optional[str] = None, repeat: int = 1,
     client = H.BedrockChatClient()
     if not client.has_credentials:
         print("ERROR: No Bedrock credentials found. Add AWS_BEDROCK_API_KEY (or "
-              "AWS_accessKeyId / AWS_secretAccessKey) to tests/.env.")
+              "AWS_accessKeyId / AWS_secretAccessKey) to .env.")
         sys.exit(2)
 
     wd, rd = F.working_data(), F.rate_data()

@@ -22,15 +22,18 @@ from typing import Optional
 
 import pandas as pd
 
+from ..core.utils import parse_day_of_week
+
 # The exact constraint-file schema understood by constraints_processor.py.
 CONSTRAINT_COLUMNS = [
-    "Category", "Carrier", "Lane", "Port", "Week Number", "Terminal", "SSL",
-    "Vessel", "Maximum Container Count", "Minimum Container Count",
-    "Percent Allocation", "Excluded FC", "Priority Score",
+    "Category", "Carrier", "Lane", "Port", "Week Number", "Day of Week",
+    "Terminal", "SSL", "Vessel", "Maximum Container Count",
+    "Minimum Container Count", "Percent Allocation", "Excluded FC", "Priority Score",
 ]
 
 # Columns the user may filter / scope a constraint by (everything except amounts).
-_SCOPE_FIELDS = ["Category", "Carrier", "Lane", "Port", "Week Number", "Terminal", "SSL", "Vessel"]
+_SCOPE_FIELDS = ["Category", "Carrier", "Lane", "Port", "Week Number", "Day of Week",
+                 "Terminal", "SSL", "Vessel"]
 _AMOUNT_FIELDS = ["Maximum Container Count", "Minimum Container Count", "Percent Allocation"]
 
 # Map a constraint scope field -> the column it filters in comprehensive_data.
@@ -40,6 +43,7 @@ _DATA_COLUMN_FOR = {
     "Lane": "Lane",
     "Port": "Discharged Port",
     "Week Number": "Week Number",
+    "Day of Week": "Day of Week",
     "Terminal": "Terminal",
     "SSL": "SSL",
     "Vessel": "Vessel",
@@ -450,7 +454,9 @@ def apply_constraints(staged_constraints: Optional[list]) -> dict:
 
 # ==================== open-ended analysis (sandboxed) ====================
 
-def run_analysis(df: Optional[pd.DataFrame], code, max_rows=200) -> dict:
+def run_analysis(df: Optional[pd.DataFrame], code, max_rows=200,
+                 save_as: Optional[str] = None,
+                 memory: Optional[dict] = None) -> dict:
     """Tool handler: run model-written pandas against a read-only copy of the data.
 
     This is the escape hatch for analytical questions the fixed tools can't
@@ -459,6 +465,13 @@ def run_analysis(df: Optional[pd.DataFrame], code, max_rows=200) -> dict:
     is sandboxed (see ``code_sandbox`` for the security model) — model code cannot
     import, open files, touch the network, or read process credentials, and runs
     against a copy so it can never mutate the dashboard's data.
+
+    ANALYSIS MEMORY (multi-turn): ``memory`` is a dict of named results from
+    earlier turns, exposed to the snippet as a read-only ``memory`` dict so a
+    later analysis can build on prior work (e.g. ``memory['lax_breakdown']``).
+    When ``save_as`` is set, the success payload carries the RAW result under
+    ``_save`` ({"name", "value"}) so the chat layer can store it in session memory
+    for a future turn to recall — this function stays pure (no session state).
 
     IMPORTANT: numbers produced here come from arbitrary code, not the tested
     cost model — they are NOT subject to the unrated-lane / ambiguity guards that
@@ -472,7 +485,54 @@ def run_analysis(df: Optional[pd.DataFrame], code, max_rows=200) -> dict:
     except (TypeError, ValueError):
         cap = DEFAULT_MAX_ROWS
     cap = max(1, min(cap, 2000))
-    return run_sandboxed_code(df, code, max_rows=cap)
+    want_raw = not _is_blank(save_as)
+    out = run_sandboxed_code(df, code, max_rows=cap, memory=memory, return_raw=want_raw)
+    # Detach the raw object into a _save directive for the chat layer; never leak
+    # the un-coerced object back to the model (it isn't JSON-serializable).
+    raw = out.pop("raw", None)
+    if out.get("ok") and want_raw and raw is not None:
+        out["_save"] = {"name": str(save_as).strip(), "value": raw}
+        out["saved_as"] = str(save_as).strip()
+    return out
+
+
+def list_analysis_memory(memory: Optional[dict] = None) -> dict:
+    """List the named results saved in analysis memory this session.
+
+    The multi-turn recall companion to ``run_analysis(save_as=...)``: returns a
+    compact, JSON-safe catalogue (name, kind, shape/columns or value) of every
+    stored result so the assistant can decide what to ``recall`` (read via the
+    ``memory`` dict) in a follow-up snippet instead of recomputing.
+    """
+    memory = memory or {}
+    if not memory:
+        return {
+            "count": 0, "results": [],
+            "note": ("No analysis results saved yet. Run run_analysis with save_as "
+                     "to remember a result for later turns."),
+        }
+    results = []
+    for name, val in memory.items():
+        item = {"name": str(name)}
+        if isinstance(val, pd.DataFrame):
+            item["kind"] = "dataframe"
+            item["rows"] = int(len(val))
+            item["columns"] = [str(c) for c in val.columns][:30]
+        elif isinstance(val, pd.Series):
+            item["kind"] = "series"
+            item["length"] = int(len(val))
+            item["name_of_series"] = None if val.name is None else str(val.name)
+        elif isinstance(val, (list, tuple, set)):
+            item["kind"] = "list"
+            item["length"] = len(val)
+        elif isinstance(val, dict):
+            item["kind"] = "dict"
+            item["keys"] = [str(k) for k in list(val.keys())[:30]]
+        else:
+            item["kind"] = "scalar"
+            item["value"] = _plain(val)
+        results.append(item)
+    return {"count": len(results), "results": results}
 
 
 # ==================== data diagnostics (read-only) ====================
@@ -720,6 +780,13 @@ def validate_constraint(constraint: dict, valid_carriers: Optional[set] = None) 
     if not _is_blank(wk) and _coerce_num(wk) is None:
         problems.append("Week Number must be a number if provided.")
 
+    dow = constraint.get("Day of Week")
+    if not _is_blank(dow) and parse_day_of_week(dow) is None:
+        problems.append(
+            "Day of Week must be a number 1-7 (1=Sunday) or a day name "
+            "(mon/monday/…) if provided."
+        )
+
     if valid_carriers is not None and has_carrier:
         if str(carrier).strip() not in valid_carriers:
             problems.append(
@@ -757,6 +824,15 @@ def _normalize_constraint(raw: dict) -> dict:
         if not _is_blank(row[col]):
             num = _coerce_num(row[col])
             row[col] = num if num is not None else row[col]
+    # Parse Day of Week (number 1-7 or name like 'monday') to the Excel WEEKDAY
+    # number the matcher expects. The chatbot apply path goes straight to
+    # apply_constraints_to_data, bypassing process_constraints_file where this
+    # parsing normally happens — so do it here too. Unrecognized values are left
+    # as-is so validation can flag them rather than silently dropping the filter.
+    if not _is_blank(row["Day of Week"]):
+        parsed_dow = parse_day_of_week(row["Day of Week"])
+        if parsed_dow is not None:
+            row["Day of Week"] = parsed_dow
     # Preserve provenance tag if the source row carried one.
     if raw.get("_origin"):
         row["_origin"] = raw["_origin"]
@@ -934,6 +1010,11 @@ def _scope_match(df: Optional[pd.DataFrame], constraint: dict) -> Optional[dict]
         if field == "Week Number":
             num = _coerce_num(val)
             mask &= df[col] == num
+        elif field == "Day of Week":
+            # Data carries the Excel WEEKDAY number; parse the value (name or number)
+            # so the preview matches even if it wasn't pre-normalized.
+            dow = parse_day_of_week(val)
+            mask &= pd.to_numeric(df[col], errors="coerce") == dow
         elif field == "Lane":
             lane_val = str(val).strip()
             if len(lane_val) <= 4:
@@ -1032,7 +1113,7 @@ _COARSE_PARTITION_DIMS = {"Category", "Port"}
 # Fine-grained dimensions. A value here being absent from the data is more likely
 # a typo, a stale code, or a value that lives under a different week/port — worth
 # a human look regardless of priority.
-_FINE_GRAINED_DIMS = {"Lane", "Terminal", "Vessel", "SSL", "Week", "Week Number"}
+_FINE_GRAINED_DIMS = {"Lane", "Terminal", "Vessel", "SSL", "Week", "Week Number", "Day of Week"}
 
 # Failure classes. The first two are "fine to fail" (the rule is well-formed; the
 # run just can't honour it); the rest are genuine misconfigurations to surface.
@@ -1301,6 +1382,451 @@ def summarize_applied_constraints(constraint_summary: Optional[list]) -> dict:
     }
 
 
+# ==================== deep constraint analysis & repair ====================
+#
+# diagnose_constraints/repair_constraints turn the working set + the loaded data
+# (and, when present, the applied-constraints outcome) into a structured report
+# of the THREE failure modes a hand-written constraint list keeps hitting:
+#   1. over-subscription — fixed caps + percent rules for one (Port, Category)
+#      scope together ask for more containers than the scope holds. The processor
+#      computes each percent against the FROZEN ORIGINAL pool, so summed percents
+#      can exceed 100% of what's actually left; lower-priority rules then starve.
+#   2. tiny pools — a scope with very few containers but many rules; the
+#      lower-priority rules can never bind because higher ones drain the handful.
+#   3. dead scopes — a rule whose scope matches zero rows. Split (via the same
+#      root-cause triage as summarize_applied_constraints) into fixable typos
+#      (dead_filter_value) vs acceptable out-of-scope-this-run rules.
+# repair_constraints then produces a corrected working set: rescale over-subscribed
+# percents to fit the pool, drop only the fixable dead rules, and collapse
+# redundant rules on a tiny pool to the carriers actually present there. Lockouts
+# (0% / max 0) are NEVER rescaled or dropped — they are meaningful blocks.
+
+# Thresholds for the "tiny pool, many rules" heuristic. A scope at or below
+# TINY_POOL_CONTAINERS containers carrying at least TINY_POOL_MIN_RULES rules is
+# over-ruled: the volume can't satisfy that many competing rules.
+TINY_POOL_CONTAINERS = 10
+TINY_POOL_MIN_RULES = 3
+
+
+def _canonical_scope_key(constraint: dict):
+    """(port_bucket, category_bucket) a constraint groups under for pool math.
+
+    Port is upper-cased (alias expansion is handled by the data side); Category is
+    routed through the shared canonicalizer so 'Retail CD'/'FBA FCL'/'CD' all
+    collapse to one bucket. Either side may be None (means 'all' for that
+    dimension), and a (None, None) scope is the whole run.
+    """
+    from config.category_mapping import canonical_category
+    port = constraint.get("Port")
+    cat = constraint.get("Category")
+    port_key = str(port).strip().upper() if not _is_blank(port) else None
+    cat_key = canonical_category(cat) if not _is_blank(cat) else None
+    return (port_key, cat_key)
+
+
+def _rule_label(constraint: dict, index: Optional[int] = None) -> dict:
+    """Compact, JSON-safe identity of a rule for a diagnosis payload."""
+    label = {}
+    if index is not None:
+        label["index"] = index
+    for col in ("Priority Score", "Carrier", "Port", "Category", "Lane",
+                "Week Number", "Day of Week", "Maximum Container Count",
+                "Minimum Container Count", "Percent Allocation", "Excluded FC"):
+        v = constraint.get(col)
+        if not _is_blank(v):
+            label[col] = _plain(v)
+    return label
+
+
+def _is_lockout(constraint: dict) -> bool:
+    """True if the rule is a lockout (0% or Max 0) — a meaningful block, not a no-op."""
+    pct = _coerce_num(constraint.get("Percent Allocation"))
+    mx = _coerce_num(constraint.get("Maximum Container Count"))
+    return pct == 0 or mx == 0
+
+
+def diagnose_constraints(constraints: Optional[list], df: Optional[pd.DataFrame],
+                         constraint_summary: Optional[list] = None) -> dict:
+    """Deep-analyze a constraint working set against the loaded data.
+
+    Detects over-subscribed scopes (caps + percents exceed the pool), tiny pools
+    carrying too many rules, and dead scopes (zero matching containers, split into
+    fixable typos vs acceptable out-of-scope rules). When an applied-constraints
+    ``constraint_summary`` is supplied, its shortfalls/needs_attention are folded
+    in so the report reflects what the optimizer actually did, not just the rules
+    on paper. Returns a JSON-safe structured report plus a ``recommended_fixes``
+    list that repair_constraints consumes.
+    """
+    constraints = [c for c in (constraints or []) if isinstance(c, dict)]
+    if not constraints:
+        return {
+            "analyzable": False,
+            "note": ("No constraints in the working set to diagnose. Ask the user to "
+                     "upload a constraint file or draft rules first."),
+        }
+    have_data = df is not None and len(df) > 0 and "Container Count" in getattr(df, "columns", [])
+
+    # ---- group rules by (Port, Category) scope and size each scope's pool ----
+    scopes: dict = {}
+    for i, c in enumerate(constraints):
+        key = _canonical_scope_key(c)
+        scopes.setdefault(key, []).append((i, c))
+
+    scope_reports = []
+    over_subscribed = []
+    for (port_key, cat_key), members in scopes.items():
+        # Pool = containers matching just the (Port, Category) scope (no carrier).
+        pool = None
+        if have_data:
+            probe = {}
+            if port_key is not None:
+                probe["Port"] = port_key
+            if cat_key is not None:
+                probe["Category"] = cat_key
+            match = _scope_match(df, probe)
+            pool = match["matched_containers"] if match else None
+
+        # Sum the demand this scope's rules place on the pool.
+        fixed_demand = 0          # Max caps + Min floors (absolute counts)
+        pct_demand = 0.0          # percent share of the pool
+        pct_rules, fixed_rules = [], []
+        for idx, c in members:
+            if _is_lockout(c):
+                continue  # lockouts don't consume the pool, they block a carrier
+            mx = _coerce_num(c.get("Maximum Container Count"))
+            mn = _coerce_num(c.get("Minimum Container Count"))
+            pct = _coerce_num(c.get("Percent Allocation"))
+            # A lane-scoped rule draws from a sub-pool, not the whole (Port,Cat)
+            # pool, so it isn't additive here — note it but don't sum it.
+            lane_scoped = not _is_blank(c.get("Lane"))
+            if pct is not None and pct > 0 and not lane_scoped:
+                pct_demand += pct
+                pct_rules.append((idx, c, pct))
+            if (mx is not None and mx > 0) or (mn is not None and mn > 0):
+                amt = mx if (mx is not None and mx > 0) else mn
+                if not lane_scoped:
+                    fixed_demand += amt
+                    fixed_rules.append((idx, c, amt))
+
+        requested = None
+        is_over = False
+        if pool is not None:
+            requested = int(round(fixed_demand + pool * (pct_demand / 100.0)))
+            is_over = requested > pool and (pct_demand > 0 or fixed_demand > 0)
+
+        report = {
+            "port": port_key, "category": cat_key,
+            "available_containers": pool,
+            "percent_requested": round(pct_demand, 2),
+            "fixed_requested": int(fixed_demand),
+            "total_requested_containers": requested,
+            "rule_count": len(members),
+            "over_subscribed": is_over,
+            "rules": [_rule_label(c, idx) for idx, c in members],
+        }
+        scope_reports.append(report)
+        if is_over:
+            over_subscribed.append(report)
+
+    # ---- per-rule scope-match: dead scopes + tiny-pool detection ----
+    dead_fixable, dead_acceptable, tiny_pools = [], [], []
+    rule_scope_containers = {}
+    if have_data:
+        for i, c in enumerate(constraints):
+            match = _scope_match(df, c)
+            cnt = match["matched_containers"] if match else None
+            rule_scope_containers[i] = cnt
+            if cnt == 0:
+                # Reuse the root-cause triage: a fine-grained dead value (lane/
+                # terminal/...) is a fixable typo; a coarse absent Category/Port is
+                # acceptable (this run just lacks that segment).
+                dims = [d for d in ("Lane", "Terminal", "Vessel", "SSL", "Week Number", "Day of Week")
+                        if not _is_blank(c.get(d))]
+                coarse_only = not dims and (
+                    not _is_blank(c.get("Category")) or not _is_blank(c.get("Port")))
+                entry = _rule_label(c, i)
+                entry["dead_dimensions"] = dims or (["Category/Port"] if coarse_only else [])
+                if dims:
+                    dead_fixable.append(entry)
+                else:
+                    dead_acceptable.append(entry)
+
+        # Tiny pool: a (Port, Category) scope with a small pool but many rules.
+        for rep in scope_reports:
+            pool = rep["available_containers"]
+            if pool is not None and pool <= TINY_POOL_CONTAINERS \
+                    and rep["rule_count"] >= TINY_POOL_MIN_RULES:
+                carriers_present = []
+                if rep["port"] is not None or rep["category"] is not None:
+                    probe = {}
+                    if rep["port"] is not None:
+                        probe["Port"] = rep["port"]
+                    if rep["category"] is not None:
+                        probe["Category"] = rep["category"]
+                    carriers_present = _carriers_in_scope(df, probe)
+                tiny_pools.append({
+                    "port": rep["port"], "category": rep["category"],
+                    "available_containers": pool, "rule_count": rep["rule_count"],
+                    "carriers_present": carriers_present,
+                    "rules": rep["rules"],
+                })
+
+    # ---- fold in the applied-outcome triage if a summary is available ----
+    applied = None
+    if constraint_summary:
+        applied = summarize_applied_constraints(constraint_summary)
+
+    # ---- recommended fixes (the seed repair_constraints consumes) ----
+    fixes = []
+    for rep in over_subscribed:
+        fixes.append({
+            "type": "rescale_oversubscription",
+            "port": rep["port"], "category": rep["category"],
+            "detail": (f"{rep['rule_count']} rule(s) request "
+                       f"{rep['total_requested_containers']} containers from a "
+                       f"{rep['available_containers']}-container pool. Rescale percent "
+                       f"rules so caps + percents fit the pool."),
+        })
+    for tp in tiny_pools:
+        fixes.append({
+            "type": "collapse_tiny_pool",
+            "port": tp["port"], "category": tp["category"],
+            "detail": (f"{tp['rule_count']} rules target a {tp['available_containers']}-"
+                       f"container pool (carriers present: {tp['carriers_present'] or 'none'}). "
+                       f"Collapse to the viable carrier(s)."),
+        })
+    if dead_fixable:
+        fixes.append({
+            "type": "drop_dead_rules",
+            "detail": (f"{len(dead_fixable)} rule(s) target a scope value not in the "
+                       f"data (likely typos / stale codes). Drop or correct them."),
+            "rules": dead_fixable,
+        })
+
+    return {
+        "analyzable": True,
+        "have_data": bool(have_data),
+        "rule_count": len(constraints),
+        "scopes": scope_reports,
+        "over_subscribed_scopes": over_subscribed,
+        "tiny_pools": tiny_pools,
+        "dead_scopes": {"fixable": dead_fixable, "acceptable": dead_acceptable},
+        "applied_outcome": applied,
+        "recommended_fixes": fixes,
+        "note": (
+            "over_subscribed_scopes/tiny_pools/dead_scopes.fixable are the real "
+            "problems; dead_scopes.acceptable are rules whose segment just isn't in "
+            "this run (fine to leave). Use repair_constraints to stage a corrected set."
+        ),
+    }
+
+
+def _carriers_in_scope(df: Optional[pd.DataFrame], probe: dict) -> list:
+    """Carrier SCACs that actually have containers in a (Port, Category) scope."""
+    if df is None or len(df) == 0:
+        return []
+    carrier_col = _carrier_col(df)
+    if carrier_col not in df.columns:
+        return []
+    mask = pd.Series(True, index=df.index)
+    if not _is_blank(probe.get("Port")) and "Discharged Port" in df.columns:
+        mask &= df["Discharged Port"].astype(str).str.strip().str.upper() == str(probe["Port"]).strip().upper()
+    if not _is_blank(probe.get("Category")) and "Category" in df.columns:
+        from config.category_mapping import canonical_category
+        want = canonical_category(probe["Category"])
+        mask &= df["Category"].map(lambda v: canonical_category(v) == want)
+    sub = df[mask]
+    if not len(sub):
+        return []
+    return sorted({str(c).strip() for c in sub[carrier_col].dropna().unique()})
+
+
+def repair_constraints(constraints: Optional[list], df: Optional[pd.DataFrame],
+                       constraint_summary: Optional[list] = None,
+                       valid_carriers: Optional[set] = None) -> dict:
+    """Produce a corrected constraint working set (full cleanup), staged for review.
+
+    Consumes diagnose_constraints and applies three fixes:
+      * rescale over-subscribed percent rules so fixed caps + percents fit the pool;
+      * drop only fixable dead-scope rules (typos), keeping out-of-scope + lockouts;
+      * collapse redundant rules on a tiny pool to the carriers actually present.
+    Every surviving row is re-normalized + re-validated, stays 0-100 for percents,
+    and round-trips through the real processor. NEVER auto-applies — the caller
+    stages the result for the user to review. Returns
+    {"constraints": [...], "changes": [...], "summary": {...}}.
+    """
+    constraints = [dict(c) for c in (constraints or []) if isinstance(c, dict)]
+    if not constraints:
+        return {"constraints": [], "changes": [],
+                "summary": {"rescaled": 0, "dropped": 0, "collapsed": 0,
+                            "clamped": 0, "kept": 0, "original_count": 0},
+                "note": "Nothing to repair: the working set is empty."}
+
+    diag = diagnose_constraints(constraints, df, constraint_summary)
+    changes = []
+
+    # Index the dead-fixable rules and tiny-pool scopes for quick lookup.
+    dead_idx = {r["index"] for r in diag.get("dead_scopes", {}).get("fixable", [])
+                if "index" in r}
+    over_scopes = {(s["port"], s["category"]): s
+                   for s in diag.get("over_subscribed_scopes", [])}
+    tiny_scopes = {(t["port"], t["category"]): t for t in diag.get("tiny_pools", [])}
+
+    # ---- 1. collapse tiny-pool rules: keep lockouts + the highest-priority rule
+    #         per carrier-present; drop rules for carriers absent from the pool.
+    collapse_drop = set()
+    collapsed_n = 0
+    for (port_key, cat_key), tp in tiny_scopes.items():
+        present = {str(c).upper() for c in tp.get("carriers_present", [])}
+        for i, c in enumerate(constraints):
+            if _canonical_scope_key(c) != (port_key, cat_key):
+                continue
+            if _is_lockout(c):
+                continue  # keep blocks
+            carrier = str(c.get("Carrier") or "").strip().upper()
+            if carrier and present and carrier not in present and _is_blank(c.get("Lane")):
+                collapse_drop.add(i)
+                collapsed_n += 1
+                changes.append({
+                    "action": "drop_tiny_pool_rule", "index": i,
+                    "scope": {"port": port_key, "category": cat_key},
+                    "before": _rule_label(c, i),
+                    "why": (f"Carrier {carrier} has no containers in this "
+                            f"{tp['available_containers']}-container pool."),
+                })
+
+    # ---- 2. drop fixable dead-scope rules (typos / stale codes) ----
+    # A LOCKOUT (0% / Max 0) is the user's explicit "block this carrier here"
+    # intent — keep it even when its scope value is absent from THIS run's data
+    # (it will bind once that volume loads, same rationale as out_of_scope_data).
+    # Only non-lockout dead rules are dropped.
+    dropped_n = 0
+    dead_drop = set()
+    for i in dead_idx:
+        if i in collapse_drop or _is_lockout(constraints[i]):
+            continue
+        dead_drop.add(i)
+        changes.append({
+            "action": "drop_dead_rule", "index": i,
+            "before": _rule_label(constraints[i], i),
+            "why": "Scope value is not present in the data (likely a typo or stale code).",
+        })
+        dropped_n += 1
+    drop_all = collapse_drop | dead_drop
+
+    # ---- 3. rescale over-subscribed percent rules to fit the pool ----
+    rescaled_n = 0
+    rescale_factor = {}  # (port,cat) -> factor to multiply surviving percents by
+    for (port_key, cat_key), s in over_scopes.items():
+        pool = s.get("available_containers")
+        if not pool or pool <= 0:
+            continue
+        # Re-sum the SURVIVING (not-dropped, non-lockout, non-lane) demand.
+        fixed = 0.0
+        pct_total = 0.0
+        for i, c in enumerate(constraints):
+            if i in drop_all or _is_lockout(c) or not _is_blank(c.get("Lane")):
+                continue
+            if _canonical_scope_key(c) != (port_key, cat_key):
+                continue
+            mx = _coerce_num(c.get("Maximum Container Count"))
+            mn = _coerce_num(c.get("Minimum Container Count"))
+            pct = _coerce_num(c.get("Percent Allocation"))
+            if mx and mx > 0:
+                fixed += mx
+            elif mn and mn > 0:
+                fixed += mn
+            elif pct and pct > 0:
+                pct_total += pct
+        # Percent budget left after fixed caps claim their share of the pool.
+        pct_budget = max(0.0, 100.0 - (fixed / pool * 100.0))
+        if pct_total > pct_budget and pct_total > 0:
+            rescale_factor[(port_key, cat_key)] = pct_budget / pct_total
+
+    out_rows = []
+    for i, c in enumerate(constraints):
+        if i in drop_all:
+            continue
+        row = dict(c)
+        key = _canonical_scope_key(c)
+        factor = rescale_factor.get(key)
+        if factor is not None and not _is_lockout(c) and _is_blank(c.get("Lane")):
+            pct = _coerce_num(c.get("Percent Allocation"))
+            if pct and pct > 0:
+                new_pct = round(pct * factor, 1)
+                changes.append({
+                    "action": "rescale_percent", "index": i,
+                    "scope": {"port": key[0], "category": key[1]},
+                    "before": {"Percent Allocation": _plain(pct)},
+                    "after": {"Percent Allocation": new_pct},
+                    "why": ("Percent rules in this scope summed above the available "
+                            "pool; rescaled proportionally to fit."),
+                })
+                row["Percent Allocation"] = new_pct
+                rescaled_n += 1
+        out_rows.append((i, row))
+
+    # ---- 4. clamp out-of-range amounts so the corrected set is genuinely VALID,
+    #         not merely flagged. The point of "repair" is to hand back a set the
+    #         optimizer accepts; a surviving -10% or 130% (which the rescale pass
+    #         skips because the row is negative, lane-scoped, or on a dead scope)
+    #         would otherwise still carry a validation problem. Clamp percents to
+    #         [0,100] and negative caps to 0, recording each as a change. Lockouts
+    #         (already 0) are unaffected.
+    clamped_n = 0
+    for idx, row in out_rows:
+        pct = _coerce_num(row.get("Percent Allocation"))
+        if pct is not None and (pct < 0 or pct > 100):
+            new_pct = 0.0 if pct < 0 else 100.0
+            changes.append({
+                "action": "clamp_percent", "index": idx,
+                "before": {"Percent Allocation": _plain(pct)},
+                "after": {"Percent Allocation": new_pct},
+                "why": "Percent Allocation was outside 0-100; clamped to a valid value.",
+            })
+            row["Percent Allocation"] = new_pct
+            clamped_n += 1
+        for amt_col in ("Maximum Container Count", "Minimum Container Count"):
+            amt = _coerce_num(row.get(amt_col))
+            if amt is not None and amt < 0:
+                changes.append({
+                    "action": "clamp_amount", "index": idx,
+                    "before": {amt_col: _plain(amt)},
+                    "after": {amt_col: 0},
+                    "why": f"{amt_col} was negative; clamped to 0.",
+                })
+                row[amt_col] = 0
+                clamped_n += 1
+
+    # Re-normalize + re-validate every surviving row so the corrected set is
+    # guaranteed processor-acceptable; preserve origin, tag the repaired ones.
+    repaired = []
+    for i, row in out_rows:
+        norm = _normalize_constraint(row)
+        norm["_origin"] = row.get("_origin", "assistant")
+        norm["_problems"] = validate_constraint(norm, valid_carriers)
+        repaired.append(norm)
+
+    result = {
+        "constraints": repaired,
+        "changes": changes,
+        "summary": {
+            "rescaled": rescaled_n,
+            "dropped": dropped_n,
+            "collapsed": collapsed_n,
+            "clamped": clamped_n,
+            "kept": len(repaired),
+            "original_count": len(constraints),
+        },
+        "note": ("Corrected set is STAGED for review — not applied. Lockouts and "
+                 "out-of-scope rules were preserved. Review in the panel, then Apply "
+                 "or Download."),
+    }
+    if df is not None:
+        result["working_set"] = _working_set_summary(repaired, df)
+    return result
+
+
 # ==================== export ====================
 
 def constraints_to_dataframe(constraints: list) -> pd.DataFrame:
@@ -1320,6 +1846,331 @@ def constraints_to_excel_bytes(constraints: list) -> bytes:
         df.to_excel(writer, index=False, sheet_name="Constraints")
     buf.seek(0)
     return buf.getvalue()
+
+
+# ==================== analysis report artifacts (xlsx + docx) ====================
+#
+# Pure byte-builders that turn a diagnose_constraints report (and, optionally, a
+# repair_constraints corrected set) into downloadable artifacts. Both are pure:
+# they take plain dicts/lists and return bytes, so chat_ui can stash the bytes in
+# session_state and render a download button without these functions touching
+# Streamlit. openpyxl is a hard dependency; python-docx is guarded (the Word
+# builder returns None if it isn't installed, so a clean deploy degrades to xlsx).
+
+_REPORT_NAVY = "1F4E78"
+_REPORT_STATUS_FILL = {
+    "over": "FFC7CE", "tiny": "FFEB9C", "dead": "FFC7CE",
+    "ok": "C6EFCE", "info": "D9D9D9",
+}
+
+
+def _scope_label(port, category) -> str:
+    return _sanitize_cell(f"{port or 'ALL'} / {category or 'ALL'}")
+
+
+# Control chars openpyxl/lxml reject on write (C0 minus tab/newline/CR). A
+# constraint value carrying one of these would otherwise crash the byte-builders.
+_ILLEGAL_CELL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# Leading chars Excel/Sheets treat as the start of a formula. Prefixing a value
+# that begins with one of these neutralizes CSV/formula injection (e.g. a
+# constraint Carrier of "=cmd|'/c calc'!A1" must not become a live formula in the
+# downloaded report).
+_FORMULA_LEAD = ("=", "+", "-", "@")
+
+
+def _sanitize_cell(val):
+    """Make a value safe to write into an xlsx/docx cell.
+
+    Strips illegal control characters and neutralizes leading formula characters
+    (prefixing a zero-width-free apostrophe-style guard) so a hostile constraint
+    string can neither crash the writer nor execute as a formula when the user
+    opens the downloaded report. Non-strings pass through unchanged.
+    """
+    if not isinstance(val, str):
+        return val
+    s = _ILLEGAL_CELL_CHARS.sub("", val)
+    if s[:1] in _FORMULA_LEAD:
+        # A leading apostrophe forces Excel/Sheets to treat the cell as text.
+        s = "'" + s
+    return s
+
+
+def _sanitize_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply _sanitize_cell to every object/string cell of a DataFrame copy."""
+    out = df.copy()
+    for col in out.columns:
+        if out[col].dtype == object:
+            out[col] = out[col].map(_sanitize_cell)
+    return out
+
+
+def build_analysis_workbook_bytes(report: dict,
+                                  constraints_after: Optional[list] = None) -> bytes:
+    """Multi-sheet, styled .xlsx of a diagnose_constraints report.
+
+    Sheets: Diagnosis Summary, Scope Volume (available vs requested), Issues
+    (over-subscription / tiny pools / dead scopes), and — when a corrected set is
+    supplied — Corrected Constraints (clean template columns, no helper keys).
+    """
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    hdr_fill = PatternFill("solid", fgColor=_REPORT_NAVY)
+    hdr_font = Font(bold=True, color="FFFFFF", size=11)
+    thin = Side(style="thin", color="D0D0D0")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    wrap = Alignment(wrap_text=True, vertical="top")
+
+    def _frame(rows, columns):
+        df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+        return _sanitize_frame(df)
+
+    # --- Summary sheet ---
+    over = report.get("over_subscribed_scopes", []) or []
+    tiny = report.get("tiny_pools", []) or []
+    dead = report.get("dead_scopes", {}) or {}
+    fixable = dead.get("fixable", []) or []
+    acceptable = dead.get("acceptable", []) or []
+    summary_rows = [
+        {"Metric": "Total rules analyzed", "Value": report.get("rule_count", 0)},
+        {"Metric": "Over-subscribed scopes", "Value": len(over)},
+        {"Metric": "Tiny pools (few containers, many rules)", "Value": len(tiny)},
+        {"Metric": "Dead-scope rules (fixable / typos)", "Value": len(fixable)},
+        {"Metric": "Dead-scope rules (acceptable / out-of-scope)", "Value": len(acceptable)},
+        {"Metric": "Recommended fixes", "Value": len(report.get("recommended_fixes", []) or [])},
+    ]
+
+    scope_rows = []
+    for s in report.get("scopes", []) or []:
+        scope_rows.append({
+            "Scope": _scope_label(s.get("port"), s.get("category")),
+            "Available": s.get("available_containers"),
+            "% Requested": s.get("percent_requested"),
+            "Fixed Requested": s.get("fixed_requested"),
+            "Total Requested": s.get("total_requested_containers"),
+            "Rules": s.get("rule_count"),
+            "Over-subscribed": "YES" if s.get("over_subscribed") else "",
+        })
+
+    issue_rows = []
+    for s in over:
+        issue_rows.append({"Issue": "Over-subscription",
+                           "Scope": _scope_label(s.get("port"), s.get("category")),
+                           "Available": s.get("available_containers"),
+                           "Requested": s.get("total_requested_containers"),
+                           "Rules": s.get("rule_count"),
+                           "Detail": "Caps + percents exceed the pool; lower-priority rules starve."})
+    for t in tiny:
+        issue_rows.append({"Issue": "Tiny pool",
+                           "Scope": _scope_label(t.get("port"), t.get("category")),
+                           "Available": t.get("available_containers"),
+                           "Requested": "", "Rules": t.get("rule_count"),
+                           "Detail": f"Carriers present: {', '.join(t.get('carriers_present') or []) or 'none'}."})
+    for d in fixable:
+        issue_rows.append({"Issue": "Dead scope (fixable)",
+                           "Scope": _scope_label(d.get("Port"), d.get("Category")),
+                           "Available": 0, "Requested": "",
+                           "Rules": 1,
+                           "Detail": f"Dead value(s): {', '.join(d.get('dead_dimensions') or [])}. Carrier {d.get('Carrier','?')}, Lane {d.get('Lane','-')}."})
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        _frame(summary_rows, ["Metric", "Value"]).to_excel(writer, index=False, sheet_name="Diagnosis Summary")
+        _frame(scope_rows, ["Scope", "Available", "% Requested", "Fixed Requested",
+                            "Total Requested", "Rules", "Over-subscribed"]).to_excel(
+            writer, index=False, sheet_name="Scope Volume")
+        _frame(issue_rows, ["Issue", "Scope", "Available", "Requested", "Rules", "Detail"]).to_excel(
+            writer, index=False, sheet_name="Issues")
+        if constraints_after is not None:
+            clean = [c for c in constraints_after if not c.get("_problems")]
+            _sanitize_frame(constraints_to_dataframe(clean)).to_excel(
+                writer, index=False, sheet_name="Corrected Constraints")
+
+        wb = writer.book
+        widths = {
+            "Diagnosis Summary": [42, 12],
+            "Scope Volume": [22, 12, 13, 16, 16, 8, 16],
+            "Issues": [22, 18, 11, 11, 8, 60],
+            "Corrected Constraints": [12] * len(CONSTRAINT_COLUMNS),
+        }
+        for name in wb.sheetnames:
+            ws = wb[name]
+            for cell in ws[1]:
+                cell.fill = hdr_fill
+                cell.font = hdr_font
+                cell.border = border
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws.freeze_panes = "A2"
+            ws.row_dimensions[1].height = 20
+            for i, w in enumerate(widths.get(name, []), start=1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+            # Color the "Over-subscribed"/"Issue" column for quick scanning.
+            hdrs = [c.value for c in ws[1]]
+            flag_col = None
+            if "Over-subscribed" in hdrs:
+                flag_col = hdrs.index("Over-subscribed") + 1
+            elif "Issue" in hdrs:
+                flag_col = hdrs.index("Issue") + 1
+            for r in range(2, ws.max_row + 1):
+                for c in range(1, ws.max_column + 1):
+                    ws.cell(r, c).border = border
+                    ws.cell(r, c).alignment = wrap
+                if flag_col:
+                    val = str(ws.cell(r, flag_col).value or "")
+                    fill = None
+                    if val == "YES" or val.startswith("Over"):
+                        fill = _REPORT_STATUS_FILL["over"]
+                    elif val.startswith("Tiny"):
+                        fill = _REPORT_STATUS_FILL["tiny"]
+                    elif val.startswith("Dead"):
+                        fill = _REPORT_STATUS_FILL["dead"]
+                    if fill:
+                        ws.cell(r, flag_col).fill = PatternFill("solid", fgColor=fill)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def build_analysis_report_docx_bytes(report: dict,
+                                     repair: Optional[dict] = None) -> Optional[bytes]:
+    """Narrative Word report of a diagnosis (+ optional repair). None if python-docx absent.
+
+    The guarded import means a clean deploy without python-docx still works — the
+    caller produces the Excel workbook and notes that the Word version was skipped.
+    """
+    try:
+        from docx import Document
+        from docx.shared import Pt, RGBColor, Inches
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+    except Exception:
+        return None
+
+    navy = RGBColor(0x1F, 0x4E, 0x78)
+
+    def _shade(cell, hexc):
+        tcPr = cell._tc.get_or_add_tcPr()
+        sh = OxmlElement("w:shd")
+        sh.set(qn("w:val"), "clear")
+        sh.set(qn("w:fill"), hexc)
+        tcPr.append(sh)
+
+    def _h(doc, text, level=1):
+        p = doc.add_heading(text, level=level)
+        for r in p.runs:
+            r.font.color.rgb = navy
+        return p
+
+    def _table(doc, headers, rows, widths=None):
+        t = doc.add_table(rows=1, cols=len(headers))
+        t.style = "Light Grid Accent 1"
+        t.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for i, htext in enumerate(headers):
+            cell = t.rows[0].cells[i]
+            cell.text = ""
+            run = cell.paragraphs[0].add_run(htext)
+            run.bold = True
+            run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            run.font.size = Pt(9)
+            _shade(cell, _REPORT_NAVY)
+        for row in rows:
+            cells = t.add_row().cells
+            for i, val in enumerate(row):
+                cells[i].text = ""
+                # Strip control chars lxml rejects (no formula guard needed — a
+                # Word run is never evaluated as a formula).
+                text = "" if val is None else _ILLEGAL_CELL_CHARS.sub("", str(val))
+                r = cells[i].paragraphs[0].add_run(text)
+                r.font.size = Pt(8.5)
+        if widths:
+            for i, w in enumerate(widths):
+                for row in t.rows:
+                    row.cells[i].width = Inches(w)
+        return t
+
+    doc = Document()
+    title = doc.add_heading("Constraint Analysis Report", level=0)
+    for r in title.runs:
+        r.font.color.rgb = navy
+    doc.add_paragraph(
+        "Automated diagnosis of the current constraint working set against the "
+        "loaded data. Percentages are computed against the original scope pool; "
+        "higher Priority Score is processed first."
+    ).runs[0].italic = True
+
+    over = report.get("over_subscribed_scopes", []) or []
+    tiny = report.get("tiny_pools", []) or []
+    fixable = (report.get("dead_scopes", {}) or {}).get("fixable", []) or []
+    acceptable = (report.get("dead_scopes", {}) or {}).get("acceptable", []) or []
+
+    _h(doc, "Summary", 1)
+    _table(doc, ["Metric", "Value"], [
+        ["Total rules analyzed", report.get("rule_count", 0)],
+        ["Over-subscribed scopes", len(over)],
+        ["Tiny pools (few containers, many rules)", len(tiny)],
+        ["Dead-scope rules (fixable / typos)", len(fixable)],
+        ["Dead-scope rules (acceptable / out-of-scope)", len(acceptable)],
+    ], widths=[3.5, 1.2])
+
+    if over:
+        _h(doc, "Over-subscribed scopes", 1)
+        doc.add_paragraph(
+            "These scopes' fixed caps + percent rules together request more "
+            "containers than the pool holds, so lower-priority rules can't be met."
+        )
+        _table(doc, ["Scope", "Available", "Requested", "Rules"],
+               [[_scope_label(s.get("port"), s.get("category")),
+                 s.get("available_containers"), s.get("total_requested_containers"),
+                 s.get("rule_count")] for s in over],
+               widths=[2.2, 1.2, 1.2, 0.9])
+
+    if tiny:
+        _h(doc, "Tiny pools", 1)
+        doc.add_paragraph(
+            "A scope with very few containers but many rules — the lower-priority "
+            "rules can never bind because higher ones consume the handful."
+        )
+        _table(doc, ["Scope", "Containers", "Rules", "Carriers present"],
+               [[_scope_label(t.get("port"), t.get("category")),
+                 t.get("available_containers"), t.get("rule_count"),
+                 ", ".join(t.get("carriers_present") or []) or "none"] for t in tiny],
+               widths=[2.0, 1.1, 0.8, 2.2])
+
+    if fixable:
+        _h(doc, "Dead-scope rules (fixable)", 1)
+        doc.add_paragraph(
+            "These rules target a scope value not present in the data — likely a "
+            "typo or a stale code. Correct or drop them."
+        )
+        _table(doc, ["Carrier", "Port", "Lane", "Dead value(s)"],
+               [[d.get("Carrier", "?"), d.get("Port", "-"), d.get("Lane", "-"),
+                 ", ".join(d.get("dead_dimensions") or [])] for d in fixable],
+               widths=[1.2, 1.0, 1.2, 2.0])
+
+    if repair and repair.get("changes"):
+        _h(doc, "Applied corrections (staged for review)", 1)
+        s = repair.get("summary", {})
+        doc.add_paragraph(
+            f"The corrected set rescaled {s.get('rescaled', 0)} percent rule(s), "
+            f"dropped {s.get('dropped', 0)} dead rule(s), and collapsed "
+            f"{s.get('collapsed', 0)} redundant tiny-pool rule(s) — "
+            f"{s.get('kept', 0)} of {s.get('original_count', 0)} rules kept. "
+            "These changes are staged for review, not applied."
+        )
+
+    _h(doc, "Bottom line", 1)
+    doc.add_paragraph(
+        "The constraint engine is working correctly; the issues above are in the "
+        "constraint list itself. Use the corrected set (staged in the review panel) "
+        "to resolve over-subscription and remove rules that can't bind, then Apply "
+        "after reviewing. Full per-scope and per-rule data is in the companion "
+        "workbook."
+    )
+
+    out = io.BytesIO()
+    doc.save(out)
+    out.seek(0)
+    return out.getvalue()
 
 
 def constraints_from_dataframe(df, origin: str = "uploaded",

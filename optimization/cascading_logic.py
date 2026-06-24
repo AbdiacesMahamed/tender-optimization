@@ -53,6 +53,7 @@ CONSTRAINT_SCOPE_DIMENSIONS = [
     ("category",         "Category"     ),
     ("lane",             "Lane"         ),
     ("week",             "Week Number"  ),
+    ("day",              "Day of Week"  ),
     # Uncomment to add port-level scoping:
     # ("port",           "Discharged Port"),
 ]
@@ -156,6 +157,10 @@ def cascading_allocate_with_constraints(
         group_columns.insert(0, category_column)
     if week_column in data.columns and week_column not in group_columns:
         group_columns.append(week_column)
+    # Day of Week is part of the group key so a day-scoped exclusion stays exact
+    # (matches only that weekday's containers) rather than bleeding to the whole week.
+    if 'Day of Week' in data.columns and 'Day of Week' not in group_columns:
+        group_columns.append('Day of Week')
     
     # Get historical allocation percentages using unfiltered data source
     # This ensures historical percentages are stable regardless of UI filters

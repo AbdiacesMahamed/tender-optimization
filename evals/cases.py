@@ -128,6 +128,32 @@ def any_scope_has(calls: List[ToolCall], tool: str, key: str, wanted) -> bool:
     return False
 
 
+# A deliberately over-subscribed working set for the diagnose/repair/report
+# cases, seeded into chatbot_staged_constraints. BAL holds 14 containers in the
+# fixture (F.working_data); a 60-container cap plus two percents summing to 130%
+# can't be honoured, so diagnose_constraints must flag BAL as over-subscribed.
+# Rows use the full constraint-column schema with an 'uploaded' origin, matching
+# what constraints_from_dataframe produces.
+def _full_row(**kw):
+    cols = ["Category", "Carrier", "Lane", "Port", "Week Number", "Terminal",
+            "SSL", "Vessel", "Maximum Container Count", "Minimum Container Count",
+            "Percent Allocation", "Excluded FC", "Priority Score"]
+    row = {c: None for c in cols}
+    row.update(kw)
+    row["_origin"] = "uploaded"
+    return row
+
+
+_OVERSUB_WORKING_SET = [
+    _full_row(**{"Priority Score": 10, "Carrier": "RKNE", "Port": "BAL",
+                 "Maximum Container Count": 60}),
+    _full_row(**{"Priority Score": 9, "Carrier": "FRQT", "Port": "BAL",
+                 "Percent Allocation": 80}),
+    _full_row(**{"Priority Score": 9, "Carrier": "ATMI", "Port": "BAL",
+                 "Percent Allocation": 50}),
+]
+
+
 # ===========================================================================
 # The cases
 # ===========================================================================
@@ -444,5 +470,44 @@ def all_cases() -> List[IntentCase]:
                 ),
             )],
             answer_contains_any=[holder_c8, "JB Hunt"],
+        ),
+
+        # ---- 20. deep-analyze the constraint set -> diagnose_constraints ----
+        IntentCase(
+            id="diagnose_my_constraints",
+            prompt="Analyze my constraints and tell me what's wrong with them.",
+            intent=("diagnose_constraints reads the staged working set and reports "
+                    "over-subscription / tiny pools / dead scopes — not a per-rule draft."),
+            seed_session_state={"chatbot_staged_constraints": _OVERSUB_WORKING_SET},
+            expect_tools=["diagnose_constraints"],
+            forbid_tools=["generate_constraints", "apply_constraints"],
+            answer_contains_any=["over-subscrib", "oversubscrib", "exceed", "pool",
+                                 "too many", "more than"],
+        ),
+
+        # ---- 21. fix the constraints -> repair_constraints, staged not applied ----
+        IntentCase(
+            id="fix_my_constraints",
+            prompt="Fix the over-subscription in my constraints.",
+            intent=("repair_constraints stages a corrected set (rescaled percents); the "
+                    "assistant says it is staged for review, and does NOT apply it."),
+            seed_session_state={"chatbot_staged_constraints": _OVERSUB_WORKING_SET},
+            expect_tools=["repair_constraints"],
+            forbid_tools=["apply_constraints"],
+            answer_contains_any=["staged", "review", "Apply", "download", "Download",
+                                 "corrected", "rescal"],
+            answer_not_contains=["I applied", "I have applied", "now in effect"],
+        ),
+
+        # ---- 22. produce a downloadable report -> generate_analysis_report ----
+        IntentCase(
+            id="report_my_constraints",
+            prompt="Make me a spreadsheet and a doc analyzing my constraints that I can download.",
+            intent=("generate_analysis_report builds the Excel/Word artifacts; the assistant "
+                    "tells the user the download is ready in the panel."),
+            seed_session_state={"chatbot_staged_constraints": _OVERSUB_WORKING_SET},
+            expect_tools=["generate_analysis_report"],
+            answer_contains_any=["download", "Download", "Excel", "spreadsheet", "Word",
+                                 "report", "panel"],
         ),
     ]

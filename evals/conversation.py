@@ -19,7 +19,7 @@ Usage
     python -m evals.conversation --json out.json  # dump full structured trace
     python -m evals.conversation --quiet          # timing summary only
 
-It needs Bedrock credentials (``tests/.env``) and ``boto3``. Without them it
+It needs Bedrock credentials (``.env``) and ``boto3``. Without them it
 exits early rather than faking a run.
 
 Reusing the engine
@@ -54,6 +54,13 @@ for _stream in (sys.stdout, sys.stderr):
 from unittest.mock import MagicMock
 sys.modules.setdefault("streamlit", MagicMock())
 import streamlit as _st  # noqa: E402
+
+# A bare MagicMock returns truthy mocks for st.secrets.get(<key>), which the
+# bedrock client's _load_streamlit_secrets() would copy into os.environ and
+# poison AWS_REGION (resolving it to a MagicMock string -> InvalidRegionError).
+# A real empty dict makes secrets look "unconfigured", so region/creds resolve
+# from tests/.env exactly as in a local run.
+_st.secrets = {}
 
 
 class _SessionState(dict):
@@ -417,7 +424,7 @@ def run_script(script: List[str], seed_upload: bool = False,
     client = BedrockChatClient()
     if not client.has_credentials:
         print("ERROR: No Bedrock credentials found. Add AWS_BEDROCK_API_KEY (or "
-              "AWS_accessKeyId / AWS_secretAccessKey) to tests/.env.")
+              "AWS_accessKeyId / AWS_secretAccessKey) to .env.")
         sys.exit(2)
 
     convo = Conversation(client=client)

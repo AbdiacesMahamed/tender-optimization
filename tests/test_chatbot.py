@@ -800,6 +800,58 @@ def test_preview_missing_column_ignored(sample_df):
     assert out["matched_containers"] == 15
 
 
+# ==================== Day of Week scope ====================
+
+@pytest.fixture
+def dow_df():
+    # Day of Week carries the Excel WEEKDAY number (2=Mon, 3=Tue).
+    return pd.DataFrame({
+        "Week Number": [9, 9, 9],
+        "Category": ["CD", "CD", "CD"],
+        "Discharged Port": ["LAX", "LAX", "LAX"],
+        "Dray SCAC(FL)": ["ABCD", "ABCD", "ABCD"],
+        "Facility": ["IUSF", "IUSF", "IUSF"],
+        "Lane": ["USLAXIUSF", "USLAXIUSF", "USLAXIUSF"],
+        "Day of Week": [2, 2, 3],
+        "Container Count": [10, 5, 7],
+        "Base Rate": [100.0, 100.0, 100.0],
+        "Total Rate": [1000.0, 500.0, 700.0],
+    })
+
+
+def test_preview_day_of_week_numeric(dow_df):
+    # Day=2 (Monday) → the two Monday rows (10+5).
+    out = T.preview_constraint_scope(dow_df, {"Day of Week": 2})
+    assert out["matched_containers"] == 15
+
+
+def test_preview_day_of_week_name(dow_df):
+    # 'tue' → Excel 3 → the single Tuesday row.
+    out = T.preview_constraint_scope(dow_df, {"Day of Week": "tue"})
+    assert out["matched_containers"] == 7
+
+
+def test_normalize_parses_day_name_to_excel_number():
+    # The apply path bypasses process_constraints_file, so _normalize_constraint
+    # must parse the day name → Excel number itself.
+    row = T._normalize_constraint({"Priority Score": 90, "Carrier": "ABCD",
+                                   "day_of_week": "monday", "maximum_container_count": 5})
+    assert row["Day of Week"] == 2
+
+
+def test_normalize_keeps_numeric_day():
+    row = T._normalize_constraint({"Priority Score": 90, "day_of_week": 7})
+    assert row["Day of Week"] == 7
+
+
+def test_validate_flags_bad_day_of_week():
+    problems = T.validate_constraint(
+        {"Priority Score": 90, "Carrier": "ABCD",
+         "Maximum Container Count": 5, "Day of Week": "someday"}
+    )
+    assert any("Day of Week" in p for p in problems)
+
+
 # ==================== export: roundtrip ====================
 
 def test_excel_roundtrip_strips_helper_keys():
@@ -1627,3 +1679,145 @@ def test_pill_selected_queues_prompt_and_clears_widget(monkeypatch):
     assert ss["chatbot_pending_prompt"] == "Compare ATMI vs RKNE on USLAXLGB4"
     # Widget reset so it does not re-fire on the next rerun.
     assert ss["hist_3_pills"] is None
+
+
+# ==================== _heal_dangling_tool_use: wedged-transcript recovery ====================
+#
+# stream_conversation appends the assistant turn (with its toolUse blocks) to
+# chatbot_messages IN PLACE before running the tools and appending the matching
+# toolResult user turn. If the UI's event loop raises in between (an st.json
+# render error, a logging failure), the transcript is left ending on a toolUse
+# with no answering toolResult — a shape Bedrock 400s on, wedging EVERY later
+# turn. _heal_dangling_tool_use repairs that at the start of the next turn.
+
+
+def test_heal_no_dangling_tool_use_is_noop():
+    import components.chatbot.chat_ui as ui
+    # Clean transcript ending on an assistant text turn — nothing to repair.
+    msgs = [
+        {"role": "user", "content": [{"text": "hi"}]},
+        {"role": "assistant", "content": [{"text": "hello"}]},
+    ]
+    before = [dict(m) for m in msgs]
+    assert ui._heal_dangling_tool_use(msgs) == 0
+    assert msgs == before  # untouched
+
+
+def test_heal_empty_and_user_ending_are_noop():
+    import components.chatbot.chat_ui as ui
+    assert ui._heal_dangling_tool_use([]) == 0
+    # Ending on a user turn (e.g. the normal pre-send state) is valid as-is.
+    msgs = [{"role": "user", "content": [{"text": "hi"}]}]
+    assert ui._heal_dangling_tool_use(msgs) == 0
+    assert len(msgs) == 1
+
+
+def test_heal_completes_dangling_tool_use():
+    import components.chatbot.chat_ui as ui
+    # The wedged shape: assistant requested a tool, no toolResult followed.
+    msgs = [
+        {"role": "user", "content": [{"text": "summarize"}]},
+        {"role": "assistant", "content": [
+            {"toolUse": {"toolUseId": "tu_1", "name": "analyze_data",
+                         "input": {"query_type": "overview"}}},
+        ]},
+    ]
+    n = ui._heal_dangling_tool_use(msgs)
+    assert n == 1
+    # A toolResult user turn was synthesized, answering the exact toolUseId.
+    assert len(msgs) == 3
+    healed = msgs[-1]
+    assert healed["role"] == "user"
+    block = healed["content"][0]["toolResult"]
+    assert block["toolUseId"] == "tu_1"
+    assert block["status"] == "error"
+    # The pair is now complete: every toolUseId has a matching toolResult.
+    used = {b["toolUse"]["toolUseId"] for m in msgs
+            for b in m.get("content", []) if "toolUse" in b}
+    answered = {b["toolResult"]["toolUseId"] for m in msgs
+                for b in m.get("content", []) if "toolResult" in b}
+    assert used == answered
+
+
+def test_heal_completes_all_parallel_tool_uses():
+    import components.chatbot.chat_ui as ui
+    # An assistant turn can request several tools at once; each needs a result.
+    msgs = [
+        {"role": "user", "content": [{"text": "x"}]},
+        {"role": "assistant", "content": [
+            {"toolUse": {"toolUseId": "a", "name": "analyze_data", "input": {}}},
+            {"toolUse": {"toolUseId": "b", "name": "missing_rate_audit", "input": {}}},
+        ]},
+    ]
+    assert ui._heal_dangling_tool_use(msgs) == 2
+    answered = {b["toolResult"]["toolUseId"] for m in msgs
+                for b in m.get("content", []) if "toolResult" in b}
+    assert answered == {"a", "b"}
+
+
+def test_heal_does_not_double_repair_completed_tool_turn():
+    import components.chatbot.chat_ui as ui
+    # Already-complete: toolUse followed by its toolResult. Ends on a user turn,
+    # so there's nothing to repair — and the healer must not append a duplicate.
+    msgs = [
+        {"role": "user", "content": [{"text": "x"}]},
+        {"role": "assistant", "content": [
+            {"toolUse": {"toolUseId": "a", "name": "analyze_data", "input": {}}},
+        ]},
+        {"role": "user", "content": [
+            {"toolResult": {"toolUseId": "a", "content": [{"json": {"ok": 1}}],
+                            "status": "success"}},
+        ]},
+    ]
+    assert ui._heal_dangling_tool_use(msgs) == 0
+    assert len(msgs) == 3
+
+
+def test_handle_user_message_heals_before_sending(sample_df, monkeypatch):
+    # End-to-end: a transcript wedged on a dangling toolUse must be repaired
+    # before the new user turn is appended, so the history sent to the model is
+    # valid (toolUse answered) rather than the Bedrock-rejected dangling shape.
+    import components.chatbot.chat_ui as ui
+
+    class _FakeSS(dict):
+        def __getattr__(self, k): return self[k]
+        def __setattr__(self, k, v): self[k] = v
+        def setdefault(self, k, d=None): return super().setdefault(k, d)
+
+    ss = _FakeSS()
+    ss["chatbot_display"] = []
+    ss["chatbot_messages"] = [
+        {"role": "user", "content": [{"text": "earlier question"}]},
+        {"role": "assistant", "content": [
+            {"toolUse": {"toolUseId": "tu_x", "name": "analyze_data", "input": {}}},
+        ]},
+    ]
+    ss["chatbot_staged_constraints"] = []
+    ss["chatbot_applied_constraints"] = []
+    monkeypatch.setattr(ui.st, "session_state", ss, raising=False)
+    monkeypatch.setattr(ui.st, "chat_message", lambda *a, **k: _nullctx(), raising=False)
+    monkeypatch.setattr(ui.st, "container", lambda *a, **k: _nullctx(), raising=False)
+    monkeypatch.setattr(ui.st, "empty", lambda *a, **k: _Empty(), raising=False)
+
+    captured = {}
+
+    class _FakeClient:
+        has_credentials = True
+        def stream_conversation(self, messages, system, tool_specs, tool_executor):
+            captured["messages"] = [dict(m) for m in messages]
+            yield {"type": "done", "text": "ok", "messages": messages, "tool_calls": []}
+
+    monkeypatch.setattr(ui, "BedrockChatClient", lambda *a, **k: _FakeClient())
+
+    ui._handle_user_message("new question", sample_df)
+
+    sent = captured["messages"]
+    # Order: original user, assistant toolUse, synthesized toolResult, NEW user.
+    roles = [m["role"] for m in sent]
+    assert roles == ["user", "assistant", "user", "user"]
+    # The dangling toolUse now has its matching error toolResult.
+    used = {b["toolUse"]["toolUseId"] for m in sent
+            for b in m.get("content", []) if "toolUse" in b}
+    answered = {b["toolResult"]["toolUseId"] for m in sent
+                for b in m.get("content", []) if "toolResult" in b}
+    assert used == answered == {"tu_x"}

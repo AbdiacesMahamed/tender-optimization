@@ -219,11 +219,46 @@ class _SafePandas:
     NaT = pd.NaT
 
 
-def _build_namespace(df: pd.DataFrame) -> Dict[str, Any]:
+def _deep_copy_memory_value(val: Any) -> Any:
+    """Recursively copy a recalled-memory value so a snippet can't mutate the store.
+
+    A shallow ``dict(val)`` / ``list(val)`` still shares NESTED mutables (a list
+    inside a dict, a DataFrame inside a list), so a snippet doing
+    ``memory['x']['rows'].append(...)`` would corrupt what a future turn recalls.
+    pandas objects get ``.copy()`` (deepcopy of a big frame is needlessly slow and
+    .copy() already detaches the data); dict/list/tuple/set recurse; everything
+    else is returned as-is (scalars are immutable).
+    """
+    if isinstance(val, (pd.DataFrame, pd.Series)):
+        return val.copy()
+    if isinstance(val, dict):
+        return {k: _deep_copy_memory_value(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_deep_copy_memory_value(v) for v in val]
+    if isinstance(val, tuple):
+        return tuple(_deep_copy_memory_value(v) for v in val)
+    if isinstance(val, set):
+        return set(val)
+    return val
+
+
+def _build_namespace(df: pd.DataFrame,
+                     memory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    # ``memory`` exposes named results from EARLIER analysis turns (the
+    # XBE-Wizard ``_df_context`` pattern) so a later snippet can build on prior
+    # work — e.g. ``result = memory['lax_breakdown'].head()``. The values are
+    # prior snippet outputs (DataFrames/Series/scalars), so they add no new
+    # external surface; they are DEEP-copied (incl. nested containers) so a
+    # snippet can't mutate what a future turn will recall.
+    safe_memory: Dict[str, Any] = {
+        str(name): _deep_copy_memory_value(val)
+        for name, val in (memory or {}).items()
+    }
     return {
         "__builtins__": dict(_SAFE_BUILTINS),
         "df": df,
         "pd": _SafePandas(),
+        "memory": safe_memory,
         "result": None,
     }
 
@@ -259,9 +294,23 @@ def _scalar(v: Any) -> Any:
     return str(v)
 
 
+# How deep jsonify_result will descend into nested containers before bailing.
+# Bounds both pathologically deep nesting AND self-referential cycles (a dict
+# that contains itself) so serialization can never blow the stack.
+_MAX_JSON_DEPTH = 12
+
+
 def jsonify_result(result: Any, max_rows: int = DEFAULT_MAX_ROWS,
-                   max_cells: int = DEFAULT_MAX_CELLS) -> Dict[str, Any]:
-    """Turn an arbitrary snippet result into a capped, JSON-serializable dict."""
+                   max_cells: int = DEFAULT_MAX_CELLS, _depth: int = 0) -> Dict[str, Any]:
+    """Turn an arbitrary snippet result into a capped, JSON-serializable dict.
+
+    ``_depth`` guards against self-referential / pathologically nested results:
+    past ``_MAX_JSON_DEPTH`` the structure is summarized instead of recursed, so
+    a snippet returning ``d={}; d['self']=d`` is serialized, never a stack blow-up.
+    """
+    if _depth >= _MAX_JSON_DEPTH:
+        return {"type": "truncated", "note": "nesting too deep to serialize",
+                "repr": _scalar(result)}
     if isinstance(result, pd.DataFrame):
         n_rows, n_cols = result.shape
         ncols = max(1, n_cols)
@@ -299,7 +348,7 @@ def jsonify_result(result: Any, max_rows: int = DEFAULT_MAX_ROWS,
             "type": "dict",
             "length": len(result),
             "rows_omitted": max(0, len(result) - len(items)),
-            "data": {str(k): _scalar_or_nested(v, max_rows) for k, v in items},
+            "data": {str(k): _scalar_or_nested(v, max_rows, _depth + 1) for k, v in items},
         }
 
     if isinstance(result, (list, tuple, set, frozenset)):
@@ -309,17 +358,17 @@ def jsonify_result(result: Any, max_rows: int = DEFAULT_MAX_ROWS,
             "type": "list",
             "length": len(seq),
             "rows_omitted": max(0, len(seq) - len(head)),
-            "data": [_scalar_or_nested(v, max_rows) for v in head],
+            "data": [_scalar_or_nested(v, max_rows, _depth + 1) for v in head],
         }
 
     # Scalar / unknown.
     return {"type": "scalar", "value": _scalar(result)}
 
 
-def _scalar_or_nested(v: Any, max_rows: int) -> Any:
-    """Used inside dict/list serialization: keep one level of nesting safe."""
+def _scalar_or_nested(v: Any, max_rows: int, _depth: int = 0) -> Any:
+    """Used inside dict/list serialization: recurse with the depth guard carried."""
     if isinstance(v, (pd.DataFrame, pd.Series, dict, list, tuple, set, frozenset)):
-        return jsonify_result(v, max_rows=min(max_rows, 50))
+        return jsonify_result(v, max_rows=min(max_rows, 50), _depth=_depth)
     return _scalar(v)
 
 
@@ -334,6 +383,8 @@ def run_sandboxed_code(
     timeout_s: float = DEFAULT_TIMEOUT_S,
     max_rows: int = DEFAULT_MAX_ROWS,
     max_cells: int = DEFAULT_MAX_CELLS,
+    memory: Optional[Dict[str, Any]] = None,
+    return_raw: bool = False,
 ) -> Dict[str, Any]:
     """Run an analysis snippet against a read-only copy of ``df``.
 
@@ -341,6 +392,12 @@ def run_sandboxed_code(
     input. On success: ``{"ok": True, "result": {...}, "stdout": "..."}``. On any
     failure (policy violation, snippet exception, timeout): ``{"ok": False,
     "error": ...}`` — plus ``"violations"`` for static-check failures.
+
+    ``memory`` is an optional dict of named results from earlier turns, exposed to
+    the snippet as a read-only ``memory`` dict (the multi-turn analysis-memory
+    pattern). When ``return_raw`` is True the success payload also carries the
+    *raw* result object under ``"raw"`` (not JSON-coerced) so the caller can store
+    it in memory for a later turn to recall.
     """
     if df is None or len(df) == 0:
         return {"ok": False, "error": "No data is loaded. Upload GVT and Rate files first."}
@@ -354,7 +411,7 @@ def run_sandboxed_code(
         }
 
     # Layer 3: the snippet only ever sees a copy.
-    namespace = _build_namespace(df.copy())
+    namespace = _build_namespace(df.copy(), memory=memory)
 
     holder: Dict[str, Any] = {}
     stdout_buf = io.StringIO()
@@ -403,10 +460,22 @@ def run_sandboxed_code(
             **({"stdout": stdout} if stdout.strip() else {}),
         }
 
-    payload: Dict[str, Any] = {
-        "ok": True,
-        "result": jsonify_result(result, max_rows=max_rows, max_cells=max_cells),
-    }
+    # Honour the "never raises" contract even if serialization hits something
+    # pathological the depth-guard didn't anticipate (e.g. an object whose repr
+    # itself throws). Fall back to a clean error dict rather than propagating.
+    try:
+        serialized = jsonify_result(result, max_rows=max_rows, max_cells=max_cells)
+    except Exception as e:  # noqa: BLE001 — serialization must never escape
+        out = {"ok": False,
+               "error": f"Result could not be serialized ({type(e).__name__})."}
+        if stdout.strip():
+            out["stdout"] = stdout
+        return out
+
+    payload: Dict[str, Any] = {"ok": True, "result": serialized}
+    if return_raw:
+        # The un-coerced result, for the caller to stash in analysis memory.
+        payload["raw"] = result
     if stdout.strip():
         payload["stdout"] = stdout
     return payload

@@ -87,9 +87,11 @@ CONSTRAINT SCHEMA (one row = one rule; all fields optional except Priority Score
   - Carrier (SCAC code): the carrier the rule assigns volume TO. It is the TARGET,
     never a filter — a rule never means "containers already on this carrier".
     REQUIRED for Maximum, Minimum, Excluded FC, and Percent rules.
-  - Scope filters — Category, Lane, Port, Week Number, Terminal, SSL, Vessel:
-    narrow which containers the rule applies to. They STACK (logical AND); blank =
-    match all values for that dimension.
+  - Scope filters — Category, Lane, Port, Week Number, Day of Week, Terminal, SSL,
+    Vessel: narrow which containers the rule applies to. They STACK (logical AND);
+    blank = match all values for that dimension. Day of Week filters on the day of
+    the container's Ocean ETA; accept a number 1-7 (1=Sunday … 7=Saturday) or a name
+    (mon/monday/…). The week starts Sunday (Excel WEEKDAY convention).
   - Maximum Container Count: hard cap. The carrier gets at most this many in scope;
     it is also excluded from receiving MORE in the optimizer for that scope. Excess
     containers stay in the unconstrained pool for other carriers.
@@ -197,6 +199,39 @@ DRIVING THE FIX — A MULTI-TURN INTENT CONVERSATION, NOT A ONE-SHOT DUMP:
     edit_constraints to stage the corrected rows, preview_constraint_scope to prove the new
     scope actually has volume, and only apply_constraints after the user confirms. Never
     silently rewrite a rule whose intent you're guessing at.
+
+DEEP CONSTRAINT ANALYSIS, REPAIR & REPORTS:
+  - When the user asks to "analyze / audit my constraints", "what's wrong with my list",
+    "why are so many rules failing", or wants a full picture across the whole set, call
+    diagnose_constraints. It scans every (Port, Category) scope and returns: over-subscribed
+    scopes (fixed caps + percent rules together exceed the pool — because percents are taken
+    against the FROZEN original pool, summed percents can pass 100% and lower-priority rules
+    starve), tiny pools (a scope with very few containers but many rules), and dead scopes
+    split into fixable (lane/terminal/etc. typos) vs acceptable (a Category/Port simply not in
+    this run). LEAD with over_subscribed_scopes / tiny_pools / dead_scopes.fixable; mention
+    dead_scopes.acceptable only as FYI. Ground every number in the tool result.
+  - When the user asks you to "fix / clean up / make my constraints pass / fix the
+    over-subscription", call repair_constraints. It stages a CORRECTED working set:
+    over-subscribed percents rescaled to fit the pool, fixable dead rules dropped, tiny-pool
+    redundancy collapsed to the carriers actually present — while preserving lockouts (0% /
+    Max 0) and acceptable out-of-scope rules. It does NOT apply: report the change log
+    (rescaled / dropped / collapsed counts), tell the user it's staged in the review panel to
+    Apply or Download, and follow the DIRECT-APPLY PROTOCOL (apply only after an explicit yes).
+  - When the user wants "a report / spreadsheet / doc / something to download or share",
+    call generate_analysis_report (include_fix=true to also add the corrected set). It builds a
+    multi-sheet Excel and, if available, a Word narrative, and surfaces download buttons in the
+    panel; the tool returns only an acknowledgement (it cannot return the file bytes). Tell the
+    user the report is ready to download and what it contains.
+  - Typical flow: diagnose_constraints -> explain the real issues -> offer to repair and/or
+    generate a report. Don't dump raw JSON; summarize in plain terms with the key numbers.
+
+MULTI-TURN ANALYSIS MEMORY:
+  - run_analysis can REMEMBER a result across turns: pass save_as to store the result under a
+    name, and in a later turn pass recall=[names] so the snippet can read them from a read-only
+    `memory` dict instead of recomputing. Use list_analysis_memory to see what's saved.
+  - Reach for this when the user builds on earlier work ("now compare that to LAX", "rank those
+    by rate", "what changed vs the breakdown from before"). Save results you expect to reuse;
+    recall them rather than re-deriving. Memory holds the most-recent few results per session.
 
 OPEN-ENDED ANALYSIS WITH run_analysis:
   - For questions the fixed tools don't cover — custom pivots, multi-dimension
@@ -395,6 +430,10 @@ _CONSTRAINT_FIELD_PROPS = {
     "lane": {"type": "string", "description": "Optional scope filter (lane code)."},
     "port": {"type": "string", "description": "Optional scope filter (discharge port)."},
     "week_number": {"type": "number", "description": "Optional scope filter."},
+    "day_of_week": {"type": "string",
+                    "description": ("Optional scope filter. Day of the container's Ocean ETA. "
+                                    "Accepts a number 1-7 (1=Sunday … 7=Saturday, Excel WEEKDAY) "
+                                    "or a name (mon/monday/tue/…). Week starts Sunday.")},
     "terminal": {"type": "string", "description": "Optional scope filter."},
     "ssl": {"type": "string", "description": "Optional scope filter (steamship line)."},
     "vessel": {"type": "string", "description": "Optional scope filter."},
@@ -705,7 +744,11 @@ TOOL_SPECS = [
                 "(simulate_flip / flip_report for pricing a flip, analyze_data for "
                 "standard summaries) — their numbers are validated against the cost "
                 "model; numbers from this tool are NOT. Use it for the long tail of "
-                "questions those don't cover."
+                "questions those don't cover. ANALYSIS MEMORY (multi-turn): set "
+                "`save_as` to remember this result under a name; in a later turn the "
+                "snippet can read prior results from a read-only `memory` dict (pass "
+                "their names in `recall`, e.g. memory['lax_breakdown']) instead of "
+                "recomputing. Call list_analysis_memory to see what's saved."
             ),
             "inputSchema": {
                 "json": {
@@ -715,7 +758,8 @@ TOOL_SPECS = [
                             "type": "string",
                             "description": (
                                 "Python/pandas snippet. `df` is the data; assign the "
-                                "answer to `result`. No imports. Example: "
+                                "answer to `result`. A read-only `memory` dict holds "
+                                "results saved earlier (see recall). No imports. Example: "
                                 "result = df.groupby('Dray SCAC(FL)')['Container Count']"
                                 ".sum().sort_values(ascending=False).head(10)"
                             ),
@@ -723,6 +767,21 @@ TOOL_SPECS = [
                         "max_rows": {
                             "type": "integer",
                             "description": "Max result rows to return (default 200).",
+                        },
+                        "save_as": {
+                            "type": "string",
+                            "description": (
+                                "Remember this result under this name so a later turn can "
+                                "recall it (multi-turn analysis memory)."
+                            ),
+                        },
+                        "recall": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Names of earlier saved results to load into the `memory` "
+                                "dict before running this snippet."
+                            ),
                         },
                     },
                     "required": ["code"],
@@ -1009,6 +1068,96 @@ TOOL_SPECS = [
                     "required": ["confirm"],
                 }
             },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "diagnose_constraints",
+            "description": (
+                "Deep-analyze the WHOLE constraint working set against the loaded data "
+                "and (if any are applied) their outcome. Detects the three problems a "
+                "hand-written list keeps hitting: (1) OVER-SUBSCRIBED scopes — a "
+                "(Port, Category) whose fixed caps + percent rules together request more "
+                "containers than the pool holds, so lower-priority rules starve (percents "
+                "are against the frozen original pool, so summed percents can exceed "
+                "100%); (2) TINY POOLS — a scope with very few containers but many rules; "
+                "(3) DEAD SCOPES — rules matching zero rows, split into 'fixable' (a "
+                "lane/terminal/etc. typo or stale code) vs 'acceptable' (a Category/Port "
+                "simply absent this run — fine to leave). Returns per-scope available-vs-"
+                "requested volume, the issue lists, and a recommended_fixes seed. Use this "
+                "when the user asks 'analyze/audit my constraints', 'what's wrong with my "
+                "list', 'why are rules failing', or before generating a report or a fix. "
+                "Lead with the real problems (over_subscribed_scopes, tiny_pools, "
+                "dead_scopes.fixable); treat dead_scopes.acceptable as FYI."
+            ),
+            "inputSchema": {"json": {"type": "object", "properties": {}}},
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "repair_constraints",
+            "description": (
+                "Generate a CORRECTED constraint working set from diagnose_constraints and "
+                "STAGE it for review (never auto-applied). Full cleanup: rescales over-"
+                "subscribed percent rules so fixed caps + percents fit the pool; DROPS only "
+                "fixable dead-scope rules (typos/stale codes), keeping out-of-scope rules "
+                "and all lockouts (0% / Max 0); and COLLAPSES redundant rules on a tiny pool "
+                "to the carriers actually present there. Every kept row is re-validated and "
+                "stays processor-acceptable. Returns the corrected set plus a per-change log "
+                "(rescale_percent / drop_dead_rule / drop_tiny_pool_rule). The result is "
+                "staged in the review panel — tell the user to review and Apply/Download; "
+                "follow the DIRECT-APPLY PROTOCOL (only apply after an explicit yes). Use "
+                "when the user says 'fix my constraints', 'fix the over-subscription', "
+                "'clean up the list', or 'make them pass'."
+            ),
+            "inputSchema": {"json": {"type": "object", "properties": {}}},
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "generate_analysis_report",
+            "description": (
+                "Build downloadable report files from a constraint diagnosis: a multi-sheet "
+                "Excel workbook (Diagnosis Summary, Scope Volume, Issues, and — when a fix "
+                "is included — Corrected Constraints) and, when python-docx is available, a "
+                "formatted Word narrative. The files are surfaced as download buttons in the "
+                "chat panel; this tool returns only an acknowledgement (sheet list, whether "
+                "Word was produced) — not the bytes. Use when the user asks for 'a report', "
+                "'a spreadsheet', 'a doc', 'something I can download/share', or 'export this "
+                "analysis'. Set include_fix=true to also run the repair and add the corrected "
+                "set to the workbook/doc."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "include_fix": {
+                            "type": "boolean",
+                            "description": ("Also generate the corrected constraint set and add it "
+                                            "to the report (default true)."),
+                        },
+                        "filename": {
+                            "type": "string",
+                            "description": ("Optional base name for the downloads (default "
+                                            "'constraint_analysis')."),
+                        },
+                    },
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "list_analysis_memory",
+            "description": (
+                "List the named analysis results saved this session via "
+                "run_analysis(save_as=...). Returns each result's name, kind, and "
+                "shape/columns (or value) so you can decide what to recall in a follow-up "
+                "run_analysis snippet (pass the names in `recall`) instead of recomputing. "
+                "Use for multi-turn analysis: 'compare this to the LAX breakdown from "
+                "earlier', 'what did we compute before?'."
+            ),
+            "inputSchema": {"json": {"type": "object", "properties": {}}},
         }
     },
 ]

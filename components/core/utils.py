@@ -177,6 +177,59 @@ def get_grouping_columns(
     return [c for c in cols if c in data.columns]
 
 
+# Day-of-week names → Excel WEEKDAY(date, 1) number (Sun=1 … Sat=7), matching the
+# Sunday-start week convention the rest of the pipeline uses for Week Number.
+_DOW_NAME_TO_EXCEL = {
+    'sun': 1, 'sunday': 1,
+    'mon': 2, 'monday': 2,
+    'tue': 3, 'tues': 3, 'tuesday': 3,
+    'wed': 4, 'weds': 4, 'wednesday': 4,
+    'thu': 5, 'thur': 5, 'thurs': 5, 'thursday': 5,
+    'fri': 6, 'friday': 6,
+    'sat': 7, 'saturday': 7,
+}
+
+
+def excel_weekday(date_value: Any) -> Optional[int]:
+    """Return Excel WEEKDAY(date, 1) for a date: Sun=1, Mon=2, …, Sat=7.
+
+    Mirrors the Sunday-start week the pipeline already uses for Week Number
+    (Excel WEEKNUM). Returns None for unparseable/missing dates.
+    """
+    ts = pd.to_datetime(date_value, errors='coerce')
+    if pd.isna(ts):
+        return None
+    # pandas weekday(): Mon=0 … Sun=6. Excel WEEKDAY(,1): Sun=1 … Sat=7.
+    return (ts.weekday() + 1) % 7 + 1
+
+
+def excel_weekday_series(series: pd.Series) -> pd.Series:
+    """Vectorized excel_weekday for a Series of dates (NaT-safe, nullable Int)."""
+    ts = pd.to_datetime(series, errors='coerce')
+    return ((ts.dt.weekday + 1) % 7 + 1).astype('Int64')
+
+
+def parse_day_of_week(value: Any) -> Optional[int]:
+    """Parse a day-of-week constraint value to an Excel WEEKDAY number (Sun=1 … Sat=7).
+
+    Accepts a number (1–7, where 1=Sunday per the Sunday-start convention) or a name
+    (``mon``/``monday``/``Mon`` …, case-insensitively). Returns None if the value is
+    blank or unrecognized.
+    """
+    if pd.isna(value):
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    # Numeric form: '1'..'7' (also tolerates floats like '3.0' from Excel cells).
+    try:
+        n = int(float(s))
+        return n if 1 <= n <= 7 else None
+    except (ValueError, TypeError):
+        pass
+    return _DOW_NAME_TO_EXCEL.get(s)
+
+
 def normalize_facility_code(facility_str: Any) -> str:
     """
     Normalize facility code for comparison.

@@ -64,7 +64,8 @@ the unconstrained remainder is reallocated. Total cost always includes both.
 ## 4. Constraints — quick card (mechanics & interactions are detailed above)
 One row = one rule. Fields: Priority Score (REQUIRED), Carrier (the assignment
 TARGET, not a filter), scope filters (Category, Lane, Port, Week Number,
-Terminal, SSL, Vessel — stack with AND, blank = all), and one or more actions:
+Day of Week, Terminal, SSL, Vessel — stack with AND, blank = all; Day of Week
+takes 1-7 with 1=Sunday, or a name like 'monday'), and one or more actions:
   - Maximum Container Count — hard cap; excess stays in the unconstrained pool.
   - Minimum Container Count — floor; reports a shortfall if too few are eligible.
   - Percent Allocation (0-100) — share of the ORIGINAL scope volume.
@@ -135,6 +136,19 @@ Constraints — draft / edit / read:
     Pre-triages failures by root cause: needs_attention (real fixes) vs
     acceptable_failures (superseded / out-of-scope — fine to leave). Lead with the
     former; never report a failure as broken without checking which bucket it's in.
+Constraints — deep analysis, repair & reports:
+  - diagnose_constraints — analyze the WHOLE working set vs the data: over-subscribed
+    scopes (caps+percents exceed the pool), tiny pools (few containers, many rules),
+    dead scopes (fixable typos vs acceptable out-of-scope). The deep audit.
+  - repair_constraints — stage a CORRECTED set: rescale over-subscription, drop
+    fixable dead rules, collapse tiny-pool redundancy; lockouts/out-of-scope kept.
+    Staged for review, never auto-applied.
+  - generate_analysis_report — build a downloadable Excel (+ Word) report of the
+    diagnosis and corrected set; surfaced as download buttons in the panel.
+Analysis memory (multi-turn):
+  - run_analysis save_as/recall + list_analysis_memory — name a computed result to
+    remember it, recall earlier results into a later snippet's `memory` dict, and
+    list what's saved. Lets follow-up analysis build on prior work without recomputing.
 Constraints — apply (mutates the live optimization; needs explicit user yes +
 confirm:true, per the DIRECT-APPLY PROTOCOL above):
   - apply_constraints — apply the working set to the live optimization.

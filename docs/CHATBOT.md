@@ -74,7 +74,7 @@ Edit `skill.py` to change what the assistant always knows about the product.
 The tool functions in `tools.py` are pure (DataFrame in, JSON-serializable dict out), so they
 are exercised directly by `tests/test_chatbot.py` without network access.
 
-## Configuration (`tests/.env`)
+## Configuration (`.env`)
 
 | Variable | Purpose |
 |---|---|

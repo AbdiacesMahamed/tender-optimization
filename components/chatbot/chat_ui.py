@@ -134,6 +134,12 @@ def _render_followup_pills(suggestions, key_prefix: str):
 
 # ==================== session state ====================
 
+# Analysis memory cap: keep the most-recent N named results per session (the
+# bounded, drop-oldest idea from XBE-Wizard's DataFrameSessionCache, simplified —
+# Streamlit already scopes session_state per user session).
+_ANALYSIS_MEMORY_MAX = 8
+
+
 def _init_state():
     ss = st.session_state
     ss.setdefault("chatbot_messages", [])
@@ -141,21 +147,110 @@ def _init_state():
     ss.setdefault("chatbot_staged_constraints", [])
     ss.setdefault("chatbot_applied_constraints", [])
     ss.setdefault("chatbot_constraint_source_sig", None)
+    # Multi-turn analysis memory: name -> raw result (DataFrame/Series/scalar/...).
+    ss.setdefault("chatbot_analysis_memory", {})
+    # Downloadable report artifacts produced by generate_analysis_report.
+    ss.setdefault("chatbot_report_xlsx_bytes", None)
+    ss.setdefault("chatbot_report_docx_bytes", None)
+    ss.setdefault("chatbot_report_name", None)
+
+
+def _remember_analysis(name: str, value):
+    """Store a named analysis result, evicting the oldest past the cap.
+
+    A plain dict preserves insertion order, so popping the first key drops the
+    least-recently-added entry — the simplified LRU the XBE-Wizard cache uses.
+    """
+    ss = st.session_state
+    mem = ss.get("chatbot_analysis_memory")
+    if not isinstance(mem, dict):
+        mem = {}
+    mem.pop(name, None)  # re-insert at the end if the name already exists
+    mem[name] = value
+    while len(mem) > _ANALYSIS_MEMORY_MAX:
+        mem.pop(next(iter(mem)))
+    ss.chatbot_analysis_memory = mem
+
+
+def _build_and_stash_report(df, ss, tool_input, valid_carriers=None) -> dict:
+    """Build the Excel (+ optional Word) report, stash bytes in session_state.
+
+    Returns a JSON acknowledgement for the model (bytes can't go back to Bedrock).
+    The download buttons are rendered from session_state by _render_report_downloads
+    on every fragment rerun.
+    """
+    staged = ss.get("chatbot_staged_constraints")
+    if not staged:
+        return {"error": ("No constraints in the working set to report on. Ask the user "
+                          "to upload a constraint file or draft rules first.")}
+    diag = T.diagnose_constraints(
+        staged, df, constraint_summary=ss.get("chatbot_constraint_summary")
+    )
+    if not diag.get("analyzable"):
+        return diag
+    include_fix = tool_input.get("include_fix", True)
+    repair = None
+    constraints_after = None
+    if include_fix:
+        repair = T.repair_constraints(
+            staged, df, constraint_summary=ss.get("chatbot_constraint_summary"),
+            valid_carriers=valid_carriers,
+        )
+        constraints_after = repair.get("constraints")
+
+    xlsx = T.build_analysis_workbook_bytes(diag, constraints_after=constraints_after)
+    docx = T.build_analysis_report_docx_bytes(diag, repair=repair)
+
+    base = str(tool_input.get("filename") or "constraint_analysis").strip() or "constraint_analysis"
+    ss.chatbot_report_name = base
+    ss.chatbot_report_xlsx_bytes = xlsx
+    ss.chatbot_report_docx_bytes = docx
+
+    ack = {
+        "report_ready": True,
+        "filename_base": base,
+        "excel": {"bytes": len(xlsx),
+                  "sheets": ["Diagnosis Summary", "Scope Volume", "Issues"]
+                  + (["Corrected Constraints"] if constraints_after is not None else [])},
+        "word": {"generated": docx is not None,
+                 "note": None if docx is not None
+                 else "python-docx not installed on this host — Excel still produced."},
+        "diagnosis_headline": {
+            "over_subscribed_scopes": len(diag.get("over_subscribed_scopes", []) or []),
+            "tiny_pools": len(diag.get("tiny_pools", []) or []),
+            "dead_fixable": len((diag.get("dead_scopes", {}) or {}).get("fixable", []) or []),
+        },
+        "note": ("Download buttons are now shown in the chat panel. Tell the user the "
+                 "report is ready to download" + (" and that a corrected constraint set "
+                 "is staged for review." if include_fix else ".")),
+    }
+    if repair is not None:
+        ack["repair_summary"] = repair.get("summary")
+    return ack
 
 
 def _reset_chat():
-    """Clear only the conversation behind the 'New chat' button.
+    """Full reset behind the 'New chat' button.
 
-    Wipes the LLM transcript and the rendered chat bubbles, but deliberately
-    LEAVES the constraint state untouched — staged (proposed) constraints,
-    applied constraints, and the source signature all survive. So "New chat"
-    starts a fresh conversation without disturbing the optimization or any
-    constraints the user is still working with; the dashboard does not need to
-    recompute.
+    Wipes the LLM transcript, the rendered chat bubbles, AND the constraint
+    state — staged (proposed) and applied constraints are both cleared, and the
+    apply flag is dropped. After this, get_applied_constraints_df() returns None,
+    so the dashboard feeds nothing to the optimizer and allocation returns to
+    unconstrained. "New chat" therefore means a genuinely clean slate.
+
+    The source signature is intentionally KEPT: an already-consumed upload must
+    not immediately re-seed the just-cleared working set on the next rerun (the
+    seeding guard in _seed_working_set_from_df only fires when the signature
+    changes). Re-uploading the file, or uploading a different one, re-seeds.
     """
     ss = st.session_state
     ss.chatbot_messages = []
     ss.chatbot_display = []
+    ss.chatbot_staged_constraints = []
+    ss.chatbot_applied_constraints = []
+    # Drop the apply flag entirely (tests assert the key is absent, not falsy).
+    if "chatbot_apply_happened" in ss:
+        del ss["chatbot_apply_happened"]
 
 
 def get_applied_constraints_df():
@@ -330,11 +425,24 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
                 ), False
 
             if name == "run_analysis":
+                # Analysis memory (multi-turn): load the requested prior results,
+                # run, and persist a new one if save_as was set. The store lives in
+                # session_state; tools.run_analysis stays pure.
+                mem_store = ss.get("chatbot_analysis_memory") or {}
+                recall = tool_input.get("recall") or []
+                loaded = {k: mem_store[k] for k in recall if k in mem_store}
                 result = T.run_analysis(
                     df, tool_input.get("code"), tool_input.get("max_rows", 200),
+                    save_as=tool_input.get("save_as"), memory=loaded,
                 )
+                save = result.pop("_save", None)
+                if save and save.get("name"):
+                    _remember_analysis(save["name"], save["value"])
                 # Surface a failed snippet as an error turn so the model can retry.
                 return result, (not result.get("ok", False))
+
+            if name == "list_analysis_memory":
+                return T.list_analysis_memory(ss.get("chatbot_analysis_memory")), False
 
             # ---- data diagnostics (read-only) ----
             if name == "historic_volume_share":
@@ -362,6 +470,28 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
             if name == "read_constraints_summary":
                 return T.summarize_applied_constraints(
                     st.session_state.get("chatbot_constraint_summary"),
+                ), False
+
+            if name == "diagnose_constraints":
+                return T.diagnose_constraints(
+                    ss.get("chatbot_staged_constraints"), df,
+                    constraint_summary=ss.get("chatbot_constraint_summary"),
+                ), False
+
+            if name == "repair_constraints":
+                result = T.repair_constraints(
+                    ss.get("chatbot_staged_constraints"), df,
+                    constraint_summary=ss.get("chatbot_constraint_summary"),
+                    valid_carriers=carriers or None,
+                )
+                # Stage the corrected set for review — never auto-apply.
+                if "constraints" in result:
+                    ss.chatbot_staged_constraints = result["constraints"]
+                return result, False
+
+            if name == "generate_analysis_report":
+                return _build_and_stash_report(
+                    df, ss, tool_input, valid_carriers=carriers or None
                 ), False
 
             if name == "preview_constraint_scope":
@@ -497,6 +627,48 @@ def _render_staged_panel():
             st.rerun()
 
 
+def _render_report_downloads():
+    """Download buttons for the analysis report produced by generate_analysis_report.
+
+    Rendered unconditionally from session_state on every fragment rerun (Streamlit
+    clears widgets not re-declared each run, so the bytes must live in session_state,
+    not be returned inline) — mirrors the staged-panel download pattern.
+    """
+    ss = st.session_state
+    xlsx = ss.get("chatbot_report_xlsx_bytes")
+    if not xlsx:
+        return
+    base = ss.get("chatbot_report_name") or "constraint_analysis"
+    docx = ss.get("chatbot_report_docx_bytes")
+
+    st.markdown("**📄 Analysis report**")
+    cols = st.columns(2 if docx else 1)
+    with cols[0]:
+        st.download_button(
+            "📊 Excel",
+            data=xlsx,
+            file_name=f"{base}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="chatbot_report_xlsx",
+        )
+    if docx:
+        with cols[1]:
+            st.download_button(
+                "📝 Word",
+                data=docx,
+                file_name=f"{base}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key="chatbot_report_docx",
+            )
+    if st.button("🗑️ Clear report", use_container_width=True, key="chatbot_report_clear"):
+        ss.chatbot_report_xlsx_bytes = None
+        ss.chatbot_report_docx_bytes = None
+        ss.chatbot_report_name = None
+        st.rerun()
+
+
 _TOOL_LABELS = {
     "analyze_data": "Analyzing the data",
     "describe_selection": "Inspecting the selection",
@@ -515,6 +687,10 @@ _TOOL_LABELS = {
     "run_analysis": "Running analysis",
     "describe_constraints": "Reading the constraints",
     "read_constraints_summary": "Reading the applied-constraints impact",
+    "diagnose_constraints": "Diagnosing the constraint set",
+    "repair_constraints": "Drafting a corrected constraint set",
+    "generate_analysis_report": "Building the downloadable report",
+    "list_analysis_memory": "Recalling saved analysis",
     "preview_constraint_scope": "Previewing constraint scope",
     "generate_constraints": "Drafting constraints",
     "edit_constraints": "Editing constraints",
@@ -576,6 +752,52 @@ def _render_tool_activity(name, tool_input, result, is_error, parent=None):
             st.write(result)
 
 
+def _heal_dangling_tool_use(messages: list) -> int:
+    """Repair a transcript left ending on a tool call with no result.
+
+    ``stream_conversation`` appends the assistant turn (with its ``toolUse``
+    blocks) to ``chatbot_messages`` IN PLACE before it runs the tools and
+    appends the matching ``toolResult`` user turn. If the UI's event loop raises
+    in between (e.g. an ``st.json`` render error or a logging failure while a
+    ``tool_result`` event is being handled), the transcript is left ending on an
+    assistant turn whose ``toolUse`` has no answering ``toolResult``. Bedrock
+    rejects that shape with a ValidationException, so EVERY later turn 400s and
+    the chat is silently wedged — recoverable only by losing the whole history.
+
+    This synthesizes an error ``toolResult`` for each unanswered ``toolUse`` in
+    the trailing assistant turn, so the next turn is valid and self-heals an
+    already-wedged session. Returns the number of results synthesized.
+    """
+    if not messages:
+        return 0
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "assistant":
+        return 0
+    tool_uses = [
+        b["toolUse"] for b in last.get("content", [])
+        if isinstance(b, dict) and b.get("toolUse")
+    ]
+    if not tool_uses:
+        return 0
+    # The assistant turn requested tools but no toolResult user turn followed it —
+    # answer each one with an error result so the pair is complete.
+    repair_blocks = [
+        {
+            "toolResult": {
+                "toolUseId": tu.get("toolUseId"),
+                "content": [{"json": {"error": (
+                    "Tool result was lost before it could be recorded "
+                    "(the previous turn was interrupted). Please retry."
+                )}}],
+                "status": "error",
+            }
+        }
+        for tu in tool_uses
+    ]
+    messages.append({"role": "user", "content": repair_blocks})
+    return len(repair_blocks)
+
+
 def _handle_user_message(user_text: str, df, rate_data=None, rate_type="Base Rate",
                          constraints_file=None):
     """Send a user message through the Converse loop and stream the reply."""
@@ -589,6 +811,12 @@ def _handle_user_message(user_text: str, df, rate_data=None, rate_type="Base Rat
     if constraints_file is not None:
         _seed_from_uploaded_file(constraints_file, "main", df)
 
+    # Self-heal a transcript wedged by a prior interrupted turn: if the last
+    # assistant turn requested a tool but its result was never recorded (the UI
+    # raised mid-stream), Bedrock would 400 on every subsequent turn. Complete
+    # the dangling tool call with an error result before sending the new message.
+    _heal_dangling_tool_use(ss.chatbot_messages)
+
     ss.chatbot_display.append({"role": "user", "text": user_text})
     ss.chatbot_messages.append({"role": "user", "content": [{"text": user_text}]})
 
@@ -600,7 +828,7 @@ def _handle_user_message(user_text: str, df, rate_data=None, rate_type="Base Rat
     client = BedrockChatClient()
     if not client.has_credentials:
         msg = ("⚠️ No Bedrock credentials found. Add AWS_BEDROCK_API_KEY to "
-               "tests/.env (or AWS_accessKeyId / AWS_secretAccessKey).")
+               ".env (or AWS_accessKeyId / AWS_secretAccessKey).")
         ss.chatbot_display.append({"role": "assistant", "text": msg})
         with st.chat_message("assistant"):
             st.markdown(msg)
@@ -794,9 +1022,10 @@ def _chat_panel(comprehensive_data, rate_data, rate_type, constraints_file):
     ``st.sidebar`` here — Streamlit disallows that in a fragment). Because its
     widgets live in the fragment body, interacting with them (sending a message,
     "New chat") reruns ONLY this panel, not all of ``main()`` — so clearing the
-    chat is instant instead of recomputing the whole dashboard. "New chat" clears
-    only the conversation via an ``on_click`` callback; constraints (staged +
-    applied) are left untouched, so the optimization never has to recompute.
+    chat is instant instead of recomputing the whole dashboard. "New chat" is a
+    FULL reset via an ``on_click`` callback: it clears the conversation AND the
+    constraint state (staged + applied), so the optimization returns to
+    unconstrained on the next run.
     """
     ss = st.session_state
 
@@ -837,6 +1066,9 @@ def _chat_panel(comprehensive_data, rate_data, rate_type, constraints_file):
     # Proposed-constraints review panel.
     _render_staged_panel()
 
+    # Downloadable analysis report (Excel / Word), if one was generated.
+    _render_report_downloads()
+
     # Input — typed message, or a follow-up/starter pill queued via _queue_followup.
     typed = st.chat_input("Ask about the data, price a carrier flip, or describe a constraint…")
     user_text = ss.pop("chatbot_pending_prompt", None) or typed
@@ -845,11 +1077,12 @@ def _chat_panel(comprehensive_data, rate_data, rate_type, constraints_file):
                              constraints_file=constraints_file)
         st.rerun()
 
-    # "New chat" clears only the conversation, leaving constraints (staged +
-    # applied) in place. The on_click callback clears state BEFORE the rerun;
+    # "New chat" is a full reset — it clears the conversation AND constraints
+    # (staged + applied). The on_click callback clears state BEFORE the rerun;
     # since this button lives in the fragment, the click triggers a fragment-only
-    # rerun automatically — instant, no full dashboard recompute, no explicit
-    # st.rerun() needed.
+    # rerun automatically — instant, no explicit st.rerun() needed. The dashboard
+    # picks up the now-empty applied set on its next run and recomputes
+    # unconstrained.
     if ss.chatbot_display:
         st.button("🧹 New chat", use_container_width=True,
                   key="chatbot_reset", on_click=_reset_chat)
