@@ -2,7 +2,7 @@
 Amazon Bedrock client for the Tender Optimization assistant.
 
 Talks to Claude (Anthropic) on Amazon Bedrock through the Converse API using
-boto3. Credentials are loaded from an .env file (tests/.env or project .env):
+boto3. Credentials are loaded from the project-root .env file:
 
 - AWS_BEDROCK_API_KEY  -> exported as AWS_BEARER_TOKEN_BEDROCK (bearer-token auth)
 - AWS_accessKeyId / AWS_secretAccessKey -> SigV4 fallback if no bearer token
@@ -37,9 +37,57 @@ _MODEL_ID_FIXUPS = {
 
 _ENV_LOADED = False
 
+# Streamlit secret keys we know how to consume, mapped to the env var the rest
+# of this module (and botocore) already reads. Keys may live at the top level of
+# st.secrets or nested under an [aws] table — both are checked.
+_SECRET_KEYS = (
+    "AWS_BEDROCK_API_KEY",
+    "AWS_accessKeyId",
+    "AWS_secretAccessKey",
+    "BEDROCK_MODEL_ID",
+    "BEDROCK_REGION",
+    "AWS_REGION",
+    "S3_REGION",
+)
+
+
+def _load_streamlit_secrets() -> None:
+    """Copy known credentials from st.secrets into os.environ (env wins).
+
+    No-op when Streamlit is not installed or no secrets file exists, so local
+    .env runs and unit tests are unaffected.
+    """
+    try:
+        import streamlit as st
+    except Exception:
+        return
+
+    try:
+        secrets = st.secrets
+    except Exception:
+        # Accessing st.secrets with no secrets configured raises; that's fine.
+        return
+
+    # Support both flat keys and an [aws] section in secrets.toml.
+    sources = [secrets]
+    try:
+        if "aws" in secrets:
+            sources.append(secrets["aws"])
+    except Exception:
+        pass
+
+    for src in sources:
+        for key in _SECRET_KEYS:
+            try:
+                val = src.get(key)
+            except Exception:
+                val = None
+            if val and not os.environ.get(key):
+                os.environ[key] = str(val).strip()
+
 
 def _load_env() -> None:
-    """Load credentials from tests/.env or project .env exactly once.
+    """Load credentials from the project-root .env exactly once.
 
     Maps AWS_BEDROCK_API_KEY -> AWS_BEARER_TOKEN_BEDROCK so botocore picks up the
     Bedrock bearer token automatically. Existing process env vars win, so a real
@@ -55,10 +103,17 @@ def _load_env() -> None:
         load_dotenv = None
 
     root = Path(__file__).resolve().parents[2]
-    for candidate in (root / "tests" / ".env", root / ".env"):
+    # The .env lives at the project root. (tests/.env kept as a legacy fallback.)
+    for candidate in (root / ".env", root / "tests" / ".env"):
         if candidate.exists() and load_dotenv is not None:
             # Do not override anything already set in the real environment.
             load_dotenv(candidate, override=False)
+
+    # Streamlit Community Cloud: there is no .env file on the host. Credentials
+    # live in the app's Secrets store (Settings -> Secrets), exposed as
+    # st.secrets. Copy them into the environment so the resolution logic below
+    # is identical to local .env runs. Existing env vars still win.
+    _load_streamlit_secrets()
 
     # Bedrock bearer token: botocore reads AWS_BEARER_TOKEN_BEDROCK.
     bearer = os.environ.get("AWS_BEDROCK_API_KEY")
@@ -156,7 +211,7 @@ class BedrockChatClient:
         if not self.has_credentials:
             raise BedrockClientError(
                 "No Bedrock credentials found. Set AWS_BEDROCK_API_KEY (or "
-                "AWS_accessKeyId / AWS_secretAccessKey) in tests/.env."
+                "AWS_accessKeyId / AWS_secretAccessKey) in the project-root .env."
             )
         try:
             self._client = self._build_client(force_sigv4=self._use_sigv4)
