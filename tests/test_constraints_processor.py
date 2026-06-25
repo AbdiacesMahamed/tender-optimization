@@ -855,3 +855,185 @@ class TestDiagnoseNoMatch:
         specs = build_scope_filters(_series(**{'Week Number': 9}), data)
         assert list(specs[0]['mask'].index) == [100, 200, 300]
         assert int(specs[0]['mask'].sum()) == 2
+
+
+class TestSummaryPortScopeFilter:
+    """The Applied Constraints Summary must respect the active sidebar Port filter:
+    constraints scoped to other ports are hidden, global ones always show."""
+
+    def _summary(self):
+        return [
+            {'priority': 1, 'scope': {'Port': 'TIW'}, 'status': 'Applied', 'containers_allocated': 10},
+            {'priority': 2, 'scope': {'Port': 'SAV'}, 'status': 'Skipped', 'containers_allocated': 0},
+            {'priority': 3, 'scope': {'Category': 'CD'}, 'status': 'Applied', 'containers_allocated': 5},
+            {'priority': 4, 'scope': {'Port': 'tiw '}, 'status': 'Applied', 'containers_allocated': 2},
+            {'priority': 5, 'scope': {}, 'status': 'Applied', 'containers_allocated': 1},
+        ]
+
+    def _kept(self, ports):
+        import streamlit as st
+        from components.constraints.processor import _filter_summary_by_active_ports
+        st.session_state['filter_ports'] = ports
+        return [i['priority'] for i in _filter_summary_by_active_ports(self._summary())]
+
+    def test_no_filter_keeps_all(self):
+        assert self._kept([]) == [1, 2, 3, 4, 5]
+
+    def test_single_port_hides_other_ports_keeps_global(self):
+        # TIW filter: TIW (1) + case/space variant (4) + global Category (3) + empty scope (5).
+        assert self._kept(['TIW']) == [1, 3, 4, 5]
+
+    def test_other_port_hides_tiw(self):
+        assert self._kept(['SAV']) == [2, 3, 5]
+
+    def test_multi_port_filter(self):
+        assert self._kept(['TIW', 'SAV']) == [1, 2, 3, 4, 5]
+
+
+class TestScopedMaxCeilingVsBroaderRule:
+    """A scoped Maximum (e.g. a vessel cap) must bind as a HARD ceiling against
+    every other rule — including a broader, higher-priority Minimum on the same
+    carrier — and the cap must hold on the UNCONSTRAINED table too, so the carrier
+    can never end up over-cap after the scenario optimizer runs.
+
+    Models the real PNW case: HJBT min-130 at a port + HJBT max-40 on one vessel.
+    The min rule must not pull more than 40 of that vessel's containers onto HJBT,
+    and any vessel volume left unconstrained must not stay on HJBT.
+    """
+
+    def _data(self):
+        # One port (TIW), week 27. 6 containers on VESSEL_A (the capped vessel) +
+        # 6 on VESSEL_B, all currently HJBT, plus an alternate carrier RKNE present
+        # on the lane so stripped volume has somewhere to go.
+        rows = []
+        for i in range(6):
+            rows.append({'Dray SCAC(FL)': 'HJBT', 'Discharged Port': 'TIW',
+                         'Vessel': 'VESSEL_A', 'Lane': 'USTIWOLM1', 'Week Number': 27,
+                         'Category': 'TL', 'Facility': 'OLM1',
+                         'Container Numbers': f'AAAU000000{i}', 'Container Count': 1,
+                         'Base Rate': 100, 'Total Rate': 100})
+        for i in range(6):
+            rows.append({'Dray SCAC(FL)': 'HJBT', 'Discharged Port': 'TIW',
+                         'Vessel': 'VESSEL_B', 'Lane': 'USTIWOLM1', 'Week Number': 27,
+                         'Category': 'TL', 'Facility': 'OLM1',
+                         'Container Numbers': f'BBBU000000{i}', 'Container Count': 1,
+                         'Base Rate': 100, 'Total Rate': 100})
+        # Alternate carrier rows on the same lane (so RKNE is a known lane carrier).
+        for i in range(2):
+            rows.append({'Dray SCAC(FL)': 'RKNE', 'Discharged Port': 'TIW',
+                         'Vessel': 'VESSEL_B', 'Lane': 'USTIWOLM1', 'Week Number': 27,
+                         'Category': 'TL', 'Facility': 'OLM1',
+                         'Container Numbers': f'RRRU000000{i}', 'Container Count': 1,
+                         'Base Rate': 120, 'Total Rate': 120})
+        return pd.DataFrame(rows)
+
+    def _constraints(self):
+        # Priority 1: HJBT min 8 at TIW/wk27 (broad). Priority 2: HJBT max 2 on VESSEL_A.
+        c_min = _make_constraint(**{
+            'Priority Score': 1, 'Carrier': 'HJBT', 'Port': 'TIW',
+            'Week Number': 27, 'Minimum Container Count': 8})
+        c_cap = _make_constraint(**{
+            'Priority Score': 2, 'Carrier': 'HJBT', 'Port': 'TIW',
+            'Week Number': 27, 'Vessel': 'VESSEL_A', 'Maximum Container Count': 2})
+        return pd.concat([c_min, c_cap], ignore_index=True)
+
+    def test_vessel_cap_holds_against_broader_min_in_constrained(self):
+        data = self._data()
+        con, unc, summary, maxc, *_ = apply_constraints_to_data(data, self._constraints())
+        hjbt_vessel_a = con[(con['Dray SCAC(FL)'] == 'HJBT')
+                            & (con['Vessel'] == 'VESSEL_A')]['Container Count'].sum()
+        assert hjbt_vessel_a <= 2, f"vessel cap violated in constrained: {hjbt_vessel_a}"
+
+    def test_capped_carrier_stripped_from_unconstrained_on_capped_vessel(self):
+        data = self._data()
+        con, unc, summary, maxc, *_ = apply_constraints_to_data(data, self._constraints())
+        # No HJBT may remain on VESSEL_A in the unconstrained table beyond the cap —
+        # those over-cap rows must have been moved off HJBT.
+        if len(unc) and 'Vessel' in unc.columns:
+            hjbt_va_unc = unc[(unc['Dray SCAC(FL)'] == 'HJBT')
+                              & (unc['Vessel'] == 'VESSEL_A')]['Container Count'].sum()
+            assert hjbt_va_unc == 0, f"over-cap HJBT left unconstrained on VESSEL_A: {hjbt_va_unc}"
+
+    def test_total_vessel_a_hjbt_never_exceeds_cap(self):
+        # Across BOTH tables, HJBT on VESSEL_A must be <= the cap of 2.
+        data = self._data()
+        con, unc, summary, maxc, *_ = apply_constraints_to_data(data, self._constraints())
+        def va(df):
+            if not len(df) or 'Vessel' not in df.columns:
+                return 0
+            return df[(df['Dray SCAC(FL)'] == 'HJBT')
+                      & (df['Vessel'] == 'VESSEL_A')]['Container Count'].sum()
+        assert va(con) + va(unc) <= 2
+
+    def test_container_conservation(self):
+        data = self._data()
+        con, unc, summary, maxc, *_ = apply_constraints_to_data(data, self._constraints())
+        tot_c = con['Container Count'].sum() if len(con) else 0
+        tot_u = unc['Container Count'].sum() if len(unc) else 0
+        assert tot_c + tot_u == data['Container Count'].sum()
+
+
+class TestMaxCeilingHoldsForEveryScopeDimension:
+    """A scoped Maximum must bind as a hard ceiling no matter WHICH dimension scopes
+    it — Category, Lane, Port, Week, Terminal, SSL, or Vessel — because the cap pre-scan
+    and the allocation loop share build_scope_filters (the single source of truth for
+    scope matching). One broad min rule tries to over-fill the carrier; the scoped cap
+    must still hold across BOTH the constrained and unconstrained tables.
+    """
+
+    SCOPES = [
+        ("Category", "TL"),
+        ("Lane", "USTIWOLM1"),
+        ("Week Number", 27),
+        ("Terminal", "T18"),
+        ("SSL", "MAEU"),
+        ("Vessel", "VES_A"),
+    ]
+
+    def _data(self):
+        rows = []
+        for i in range(10):
+            rows.append({'Dray SCAC(FL)': 'HJBT', 'Discharged Port': 'TIW', 'Category': 'TL',
+                         'Lane': 'USTIWOLM1', 'Week Number': 27, 'Terminal': 'T18', 'SSL': 'MAEU',
+                         'Vessel': 'VES_A', 'Facility': 'OLM1',
+                         'Container Numbers': f'A{i:07d}', 'Container Count': 1,
+                         'Base Rate': 100, 'Total Rate': 100})
+        # An alternate carrier on the lane so stripped volume can be reassigned.
+        for i in range(5):
+            rows.append({'Dray SCAC(FL)': 'RKNE', 'Discharged Port': 'TIW', 'Category': 'TL',
+                         'Lane': 'USTIWOLM1', 'Week Number': 27, 'Terminal': 'T18', 'SSL': 'MAEU',
+                         'Vessel': 'VES_A', 'Facility': 'OLM1',
+                         'Container Numbers': f'R{i:07d}', 'Container Count': 1,
+                         'Base Rate': 120, 'Total Rate': 120})
+        return pd.DataFrame(rows)
+
+    @pytest.mark.parametrize("col,val", SCOPES)
+    def test_cap_holds_against_broad_min(self, col, val):
+        cap = _make_constraint(**{'Priority Score': 2, 'Carrier': 'HJBT',
+                                   'Maximum Container Count': 3})
+        cap.at[0, col] = val
+        # Broad min at the port pulls HJBT hard; the scoped cap of 3 must still win.
+        c_min = _make_constraint(**{'Priority Score': 1, 'Carrier': 'HJBT',
+                                    'Port': 'TIW', 'Minimum Container Count': 9})
+        cons = pd.concat([c_min, cap], ignore_index=True)
+        con, unc, summary, maxc, *_ = apply_constraints_to_data(self._data(), cons)
+
+        def in_scope(df):
+            if not len(df) or col not in df.columns:
+                return 0
+            return df[(df['Dray SCAC(FL)'] == 'HJBT')
+                      & (df[col].astype(str) == str(val))]['Container Count'].sum()
+        assert in_scope(con) + in_scope(unc) <= 3, f"cap violated for scope {col}={val}"
+
+    def test_min_respected_when_no_conflicting_cap(self):
+        c_min = _make_constraint(**{'Priority Score': 1, 'Carrier': 'HJBT',
+                                    'Lane': 'USTIWOLM1', 'Minimum Container Count': 6})
+        con, unc, *_ = apply_constraints_to_data(self._data(), c_min)
+        assert con[con['Dray SCAC(FL)'] == 'HJBT']['Container Count'].sum() >= 6
+
+    def test_percent_respected_per_dimension(self):
+        c_pct = _make_constraint(**{'Priority Score': 1, 'Carrier': 'HJBT',
+                                    'Category': 'TL', 'Percent Allocation': 40})
+        con, unc, *_ = apply_constraints_to_data(self._data(), c_pct)
+        # 40% of the 15-container TL pool = 6.
+        assert con[con['Dray SCAC(FL)'] == 'HJBT']['Container Count'].sum() == 6

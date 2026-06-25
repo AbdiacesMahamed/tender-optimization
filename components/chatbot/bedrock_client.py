@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -36,6 +37,65 @@ _MODEL_ID_FIXUPS = {
 }
 
 _ENV_LOADED = False
+
+
+def _json_sanitize(value):
+    """Recursively scrub a tool result of anything Bedrock's Converse rejects.
+
+    Two failure modes both surface as the SAME opaque ValidationException
+    ("The format of the value at messages.N…toolResult…json is invalid") and
+    both WEDGE the whole conversation, because the bad toolResult is persisted
+    in the message history and re-sent on every later turn:
+
+    1. Non-finite floats. ``json.dumps`` emits the bare tokens ``NaN`` /
+       ``Infinity`` for these, which are not valid JSON. (e.g. a percent delta
+       divided by a zero baseline.) -> replaced with ``None``.
+    2. Empty-string object keys. Bedrock forbids ``""`` as a property name, so a
+       result that buckets by a value that can be blank (e.g. a container with
+       no assigned carrier SCAC, producing a ``carrier_mix[""]`` entry) poisons
+       the session. -> the key is renamed to ``"(unassigned)"`` so the data is
+       preserved rather than silently dropped. Whitespace-only keys are treated
+       the same way.
+
+    Also coerces numpy scalars (which expose ``.item()``) to native Python.
+    Scrubbing at this boundary means no tool can ever wedge a conversation with
+    a value it happened to produce on one edge-case input.
+    """
+    import math
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            key = k if (isinstance(k, str) and k.strip()) else (
+                "(unassigned)" if isinstance(k, str) else k)
+            out[key] = _json_sanitize(v)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_json_sanitize(v) for v in value]
+    # numpy scalars expose .item(); fall back to the value untouched otherwise.
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _json_sanitize(item())
+        except Exception:
+            return value
+    return value
+
+
+def _as_tool_result_json(result_obj):
+    """Coerce a tool's return value into a clean JSON OBJECT for Converse.
+
+    Bedrock's ``toolResult.content[0].json`` field requires a JSON object — a
+    bare list, scalar, or ``None`` is rejected with a ValidationException, and
+    because the offending toolResult is then persisted in the message history,
+    EVERY subsequent turn in the conversation also 400s (the assistant wedges
+    permanently). Most tools already return a dict, but the boundary must not
+    depend on that: wrap any non-dict result, and deep-scrub non-finite floats,
+    so neither a stray list/scalar nor a NaN can poison the session.
+    """
+    obj = result_obj if isinstance(result_obj, dict) else {"result": result_obj}
+    return _json_sanitize(obj)
 
 # Streamlit secret keys we know how to consume, mapped to the env var the rest
 # of this module (and botocore) already reads. Keys may live at the top level of
@@ -174,19 +234,62 @@ class BedrockChatClient:
         )
 
     @property
+    def has_role(self) -> bool:
+        _load_env()
+        return bool(os.environ.get("BEDROCK_ROLE_ARN") and os.environ["BEDROCK_ROLE_ARN"].strip())
+
+    @property
     def has_credentials(self) -> bool:
-        return self.has_bearer_token or self.has_sigv4
+        return self.has_role or self.has_bearer_token or self.has_sigv4
+
+    def _assume_role_credentials(self):
+        """Assume BEDROCK_ROLE_ARN via STS and return temporary credentials.
+
+        Returns a dict with aws_access_key_id / aws_secret_access_key /
+        aws_session_token, or None when no role is configured. The base
+        credentials used to call STS come from the default boto3 chain (env
+        vars, shared config, instance profile), so the role can be assumed from
+        the IAM user keys in the .env or from an ambient identity. Sessions are
+        short-lived (the role caps duration at 1h), so the client is rebuilt per
+        BedrockChatClient instance rather than cached process-wide.
+        """
+        role_arn = os.environ.get("BEDROCK_ROLE_ARN")
+        if not role_arn or not role_arn.strip():
+            return None
+        import boto3
+
+        session_name = os.environ.get("BEDROCK_ROLE_SESSION_NAME", "tender-optimization-bedrock")
+        sts = boto3.client("sts", region_name=self.region)
+        resp = sts.assume_role(RoleArn=role_arn.strip(), RoleSessionName=session_name)
+        creds = resp["Credentials"]
+        return {
+            "aws_access_key_id": creds["AccessKeyId"],
+            "aws_secret_access_key": creds["SecretAccessKey"],
+            "aws_session_token": creds["SessionToken"],
+        }
 
     def _build_client(self, force_sigv4: bool):
         """Create a bedrock-runtime client.
 
-        Bearer-token auth is automatic when AWS_BEARER_TOKEN_BEDROCK is set. When
-        forcing SigV4 (bearer token rejected) we build the client with explicit
-        access-key credentials and a v4-signing Config so botocore does not fall
-        back to the (broken) bearer scheme at request time.
+        Auth precedence:
+        1. BEDROCK_ROLE_ARN set -> assume the role via STS and use the temporary
+           credentials (SigV4). This is the preferred path: short-lived creds.
+        2. Bearer-token auth is automatic when AWS_BEARER_TOKEN_BEDROCK is set
+           (and we're not forcing SigV4).
+        3. force_sigv4 with static access keys -> explicit v4-signed client so
+           botocore does not fall back to the (broken) bearer scheme.
         """
         import boto3
         from botocore.config import Config
+
+        assumed = self._assume_role_credentials()
+        if assumed is not None:
+            return boto3.client(
+                "bedrock-runtime",
+                region_name=self.region,
+                config=Config(signature_version="v4"),
+                **assumed,
+            )
 
         if force_sigv4 and self.has_sigv4:
             return boto3.client(
@@ -396,10 +499,15 @@ class BedrockChatClient:
         generated. Yields event dicts:
 
           - {"type": "text", "text": <fragment>}      incremental assistant text
+          - {"type": "reasoning", "text"}              the model's thinking emitted
+                                                       just before it called tools
+                                                       this round (its rationale for
+                                                       the calls that follow)
           - {"type": "tool_use", "name", "input"}      a tool is about to run
-          - {"type": "tool_result", "name", "is_error", "input", "result"}
-                                                       a tool finished (carries the
-                                                       result so the UI can show it)
+          - {"type": "tool_result", "name", "is_error", "input", "result",
+             "duration_ms"}                            a tool finished (carries the
+                                                       result so the UI can show it,
+                                                       and how long it took)
           - {"type": "done", "text", "messages", "tool_calls"}  final payload
 
         The terminal "done" event carries the same dict ``run_conversation``
@@ -440,6 +548,17 @@ class BedrockChatClient:
                 }
                 return
 
+            # The model usually narrates its plan in a text block BEFORE the
+            # toolUse blocks in the same turn ("I'll first check the rate sheet…").
+            # That is the assistant's reasoning for the tool calls about to run —
+            # surface it as a discrete event so the UI/log can attribute it to the
+            # tools that follow, rather than letting it blur into the final answer.
+            reasoning = "".join(
+                b.get("text", "") for b in content_blocks if "text" in b
+            ).strip()
+            if reasoning:
+                yield {"type": "reasoning", "text": reasoning}
+
             # Execute every requested tool and send all results back in one turn.
             tool_result_blocks = []
             for block in content_blocks:
@@ -449,13 +568,17 @@ class BedrockChatClient:
                 name = tool_use.get("name")
                 tool_input = tool_use.get("input", {}) or {}
                 yield {"type": "tool_use", "name": name, "input": tool_input}
+                started = time.perf_counter()
                 try:
                     result_obj, is_error = tool_executor(name, tool_input)
                 except Exception as e:  # tool crashed — report back, don't die
                     result_obj, is_error = {"error": f"Tool '{name}' raised: {e}"}, True
+                duration_ms = round((time.perf_counter() - started) * 1000, 1)
 
                 tool_calls.append(
-                    {"name": name, "input": tool_input, "result": result_obj, "is_error": is_error}
+                    {"name": name, "input": tool_input, "result": result_obj,
+                     "is_error": is_error, "duration_ms": duration_ms,
+                     "reasoning": reasoning}
                 )
                 yield {
                     "type": "tool_result",
@@ -463,12 +586,14 @@ class BedrockChatClient:
                     "is_error": is_error,
                     "input": tool_input,
                     "result": result_obj,
+                    "duration_ms": duration_ms,
+                    "reasoning": reasoning,
                 }
                 tool_result_blocks.append(
                     {
                         "toolResult": {
                             "toolUseId": tool_use.get("toolUseId"),
-                            "content": [{"json": result_obj}],
+                            "content": [{"json": _as_tool_result_json(result_obj)}],
                             "status": "error" if is_error else "success",
                         }
                     }
@@ -526,6 +651,11 @@ class BedrockChatClient:
                 ).strip()
                 return {"text": text, "messages": messages, "tool_calls": tool_calls}
 
+            # The model's pre-tool narration is its reasoning for the calls below.
+            reasoning = "".join(
+                b.get("text", "") for b in content_blocks if "text" in b
+            ).strip()
+
             # Execute every requested tool and send all results back in one turn.
             tool_result_blocks = []
             for block in content_blocks:
@@ -534,19 +664,23 @@ class BedrockChatClient:
                     continue
                 name = tool_use.get("name")
                 tool_input = tool_use.get("input", {}) or {}
+                started = time.perf_counter()
                 try:
                     result_obj, is_error = tool_executor(name, tool_input)
                 except Exception as e:  # tool crashed — report back, don't die
                     result_obj, is_error = {"error": f"Tool '{name}' raised: {e}"}, True
+                duration_ms = round((time.perf_counter() - started) * 1000, 1)
 
                 tool_calls.append(
-                    {"name": name, "input": tool_input, "result": result_obj, "is_error": is_error}
+                    {"name": name, "input": tool_input, "result": result_obj,
+                     "is_error": is_error, "duration_ms": duration_ms,
+                     "reasoning": reasoning}
                 )
                 tool_result_blocks.append(
                     {
                         "toolResult": {
                             "toolUseId": tool_use.get("toolUseId"),
-                            "content": [{"json": result_obj}],
+                            "content": [{"json": _as_tool_result_json(result_obj)}],
                             "status": "error" if is_error else "success",
                         }
                     }

@@ -212,6 +212,71 @@ def diagnose_no_match(constraint, source_df):
     )
 
 
+def compute_scoped_max_ceilings(constraints_df, data):
+    """Pre-scan every Maximum Container Count rule into a per-(carrier, scope) ceiling.
+
+    Returns a list of dicts ``{carrier, mask, cap, allocated, desc}`` where ``mask`` is
+    a boolean Series over ``data.index`` selecting the rows the cap binds (built from
+    the SAME build_scope_filters used by allocation, so all scope dimensions are
+    covered). ``allocated`` starts at 0 and is mutated by callers as they consume
+    headroom. This is the single source of truth for scoped maxima so both the file
+    constraint pass AND the peel pile honor the same caps.
+    """
+    ceilings = []
+    if constraints_df is None or len(constraints_df) == 0:
+        return ceilings
+    if 'Maximum Container Count' not in constraints_df.columns or 'Carrier' not in constraints_df.columns:
+        return ceilings
+    for _, mc in constraints_df.iterrows():
+        cap_val = mc.get('Maximum Container Count')
+        cap_carrier = mc.get('Carrier')
+        if not (pd.notna(cap_val) and cap_val > 0 and is_valid_value(cap_carrier)):
+            continue
+        specs = build_scope_filters(mc, data)
+        mask = pd.Series(True, index=data.index)
+        for s in specs:
+            mask &= s['mask'].reindex(data.index, fill_value=False)
+        ceilings.append({
+            'carrier': str(cap_carrier).strip(),
+            'mask': mask,
+            'cap': int(cap_val),
+            'allocated': 0,
+            'desc': ', '.join(s['desc'] for s in specs) or 'all data',
+        })
+    return ceilings
+
+
+def ceiling_headroom(ceilings, row_index, carrier):
+    """Smallest remaining headroom across all ceilings binding this (row, carrier).
+    None means no ceiling applies (unbounded)."""
+    if not carrier:
+        return None
+    carrier_key = norm_text(carrier)
+    hr = None
+    for c in ceilings:
+        if norm_text(c['carrier']) != carrier_key:
+            continue
+        m = c['mask']
+        if row_index in m.index and bool(m.loc[row_index]):
+            remaining = max(0, c['cap'] - c['allocated'])
+            hr = remaining if hr is None else min(hr, remaining)
+    return hr
+
+
+def credit_ceilings(ceilings, row_index, carrier, n):
+    """Count ``n`` containers allocated to ``carrier`` from ``row_index`` against every
+    ceiling that binds them, so later rows/rules see the reduced cap."""
+    if not carrier or n <= 0:
+        return
+    carrier_key = norm_text(carrier)
+    for c in ceilings:
+        if norm_text(c['carrier']) != carrier_key:
+            continue
+        m = c['mask']
+        if row_index in m.index and bool(m.loc[row_index]):
+            c['allocated'] += n
+
+
 def allocate_specific_containers(row, num_containers, allocated_tracker, target_carrier, week_num, priority=None):
     """
     Allocate specific container IDs from a row, tracking which containers are allocated
@@ -603,7 +668,26 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     # None values mean "no filter on this dimension" (applies globally for that dimension).
     # Example: {'carrier': 'HDDR', 'category': 'Import', 'lane': 'USNYCREWR', 'port': None, 'week': None}
     max_constrained_carriers = []
-    
+
+    # ========== PRE-SCAN SCOPED MAX CEILINGS ==========
+    # A Maximum Container Count constraint caps how many containers its TARGET carrier
+    # may hold WITHIN ITS SCOPE — and that cap must bind against EVERY other rule, not
+    # just the cap rule's own allocation. Example: "HJBT max 40 on Vessel VIENNA EXPRESS"
+    # must hold even when a broader "HJBT min 130 at TIW" rule (different scope, often a
+    # different priority) would otherwise pull MORE VIENNA EXPRESS containers onto HJBT.
+    # We pre-scan every max rule into a per-(carrier, scope) ceiling and enforce it during
+    # allocation, so the bound holds regardless of which constraint priority runs first.
+    # Each ceiling: {carrier, mask (over original_data index), cap, allocated, desc}.
+    # Single source of truth (also consumed by the peel pile) — see
+    # compute_scoped_max_ceilings / ceiling_headroom / credit_ceilings at module scope.
+    scoped_max_ceilings = compute_scoped_max_ceilings(constraints_df, original_data)
+
+    def _ceiling_headroom(row_index, carrier):
+        return ceiling_headroom(scoped_max_ceilings, row_index, carrier)
+
+    def _credit_ceilings(row_index, carrier, n):
+        credit_ceilings(scoped_max_ceilings, row_index, carrier, n)
+
     # ========== PRE-COLLECT ALL CARRIER+FACILITY EXCLUSIONS ==========
     # This ensures exclusions from ALL constraint rows are applied, even exclusion-only rows
     # Key: carrier, Value: set of normalized facility codes
@@ -1229,6 +1313,17 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                 # How many MORE containers do we need?
                 containers_needed = target_containers - allocated_containers_count
 
+                # Hard scoped-max ceiling: never let THIS row push the target carrier past
+                # a max rule binding this row (e.g. a vessel cap), even when the current
+                # constraint is a different (broader) rule like min-130. If a ceiling is
+                # exhausted for this row, skip it — those containers stay free for other
+                # carriers rather than violating the cap.
+                headroom = _ceiling_headroom(row_idx, target_carrier) if target_carrier else None
+                if headroom is not None:
+                    if headroom <= 0:
+                        continue
+                    containers_needed = min(containers_needed, headroom)
+
                 # Allocate specific container IDs from this row
                 week_num = row.get('Week Number', None)
                 allocated_ids, remaining_ids = allocate_specific_containers(
@@ -1260,6 +1355,11 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
 
                     constrained_records.append(constrained_record)
                     allocated_containers_count += len(allocated_ids)
+
+                    # Credit these containers against every scoped max ceiling that binds
+                    # this row+carrier, so subsequent rows (and later constraints) see the
+                    # reduced headroom and the cap holds across the whole run.
+                    _credit_ceilings(row_idx, target_carrier, len(allocated_ids))
 
                     # Bucket this row's count by (data port, data category) so later rules
                     # can credit the carrier's allocation regardless of how this constraint
@@ -1454,9 +1554,77 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             'reason': constraint_reason,
         })
     
+    # ========== ENFORCE SCOPED MAX CEILINGS ON THE UNCONSTRAINED TABLE ==========
+    # A scoped Maximum caps a carrier's TOTAL volume in its scope — across BOTH the
+    # constrained table AND whatever stays in the unconstrained (reoptimizable) table.
+    # The constrained side is already capped (headroom logic above), but volume can be
+    # left on its ORIGINAL carrier in remaining_data when that carrier's ceiling is full
+    # (e.g. a vessel that is over-subscribed: 40 HJBT containers are locked, the rest
+    # must not stay on HJBT or the flip/optimizer would report >40 on that vessel).
+    # Here we strip any such over-cap carrier off those unconstrained rows so the cap
+    # holds end-to-end: reassign to an eligible alternate carrier on the lane if one
+    # exists, otherwise clear the carrier (the scenario optimizer then places it, and
+    # the lockout list keeps it off the capped carrier).
+    if scoped_max_ceilings and len(remaining_data) > 0:
+        carrier_col_rd = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in remaining_data.columns else 'Carrier'
+        lane_carriers_rd = {}
+        if 'Lane' in remaining_data.columns:
+            lane_carriers_rd = remaining_data.groupby('Lane')[carrier_col_rd].apply(
+                lambda s: set(v for v in s.unique() if v and str(v).strip())
+            ).to_dict()
+        rate_lane_carriers_rd = {}
+        if rate_data is not None and 'Lane' in rate_data.columns and 'Lookup' in rate_data.columns:
+            _rv = rate_data[rate_data['Lookup'].notna() & (rate_data['Lookup'].astype(str).str.len() >= 4)].copy()
+            _rv['_scac'] = _rv['Lookup'].astype(str).str[:4]
+            rate_lane_carriers_rd = _rv.groupby('Lane')['_scac'].apply(
+                lambda s: set(v for v in s.unique() if str(v).strip())
+            ).to_dict()
+
+        def _overcap_carrier_for_row(idx, carrier):
+            """True if `carrier` has NO remaining headroom in a ceiling binding this row."""
+            if not carrier:
+                return False
+            ck = norm_text(carrier)
+            for _ceil in scoped_max_ceilings:
+                if norm_text(_ceil['carrier']) != ck:
+                    continue
+                m = _ceil['mask']
+                if idx in m.index and bool(m.loc[idx]) and (_ceil['cap'] - _ceil['allocated']) <= 0:
+                    return True
+            return False
+
+        stripped = 0
+        for idx in remaining_data.index:
+            cur = remaining_data.at[idx, carrier_col_rd] if carrier_col_rd in remaining_data.columns else None
+            if not _overcap_carrier_for_row(idx, cur):
+                continue
+            # Find an alternate carrier on this lane that is NOT itself over-cap here and
+            # is not a lockout carrier for this row.
+            lane = remaining_data.at[idx, 'Lane'] if 'Lane' in remaining_data.columns else ''
+            candidates = (lane_carriers_rd.get(lane, set()) | rate_lane_carriers_rd.get(lane, set()))
+            alt = None
+            for c in sorted(candidates):
+                if norm_text(c) == norm_text(cur):
+                    continue
+                if _overcap_carrier_for_row(idx, c):
+                    continue
+                alt = c
+                break
+            remaining_data.at[idx, carrier_col_rd] = alt if alt else ''
+            if 'Carrier' in remaining_data.columns and carrier_col_rd != 'Carrier':
+                remaining_data.at[idx, 'Carrier'] = alt if alt else ''
+            stripped += 1
+        if stripped:
+            log_explanation(
+                f"Scoped-max enforcement: moved {stripped} unconstrained row(s) off carriers "
+                "that had exhausted their max ceiling in-scope, so the cap holds across the "
+                "unconstrained allocation too.",
+                'info'
+            )
+
     # Remove rows with zero containers from remaining data
     remaining_data = remaining_data[remaining_data['Container Count'] > 0].copy()
-    
+
     # Create constrained dataframe
     if constrained_records:
         constrained_data = pd.DataFrame(constrained_records)
@@ -1495,13 +1663,50 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     return constrained_data, remaining_data, constraint_summary, max_constrained_carriers, carrier_facility_exclusions, explanation_logs
 
 
+def _filter_summary_by_active_ports(constraint_summary):
+    """Hide constraints whose Port scope doesn't intersect the active Port filter.
+
+    The Applied Constraints Summary is built from the FULL constraint set, but the
+    rest of the view is narrowed by the sidebar Port filter. Without this, filtering
+    to (say) TIW still lists SAV-scoped constraints with Allocated=0, which reads as
+    "the filter isn't working". We keep:
+      - constraints with no Port scope (global — apply everywhere), and
+      - constraints whose Port resolves to at least one of the active ports.
+    A constraint's Port shorthand (e.g. 'NYC') is expanded via resolve_port_filter
+    to the same Discharged Port codes the sidebar filter stores, then compared
+    case/space-insensitively. When no Port filter is active, nothing is hidden.
+    """
+    active_ports = st.session_state.get('filter_ports') or []
+    if not active_ports:
+        return constraint_summary
+
+    active_norm = {norm_text(p) for p in active_ports}
+    kept = []
+    for item in constraint_summary:
+        scope = item.get('scope') or {}
+        port_val = scope.get('Port')
+        if not is_valid_value(port_val):
+            kept.append(item)  # global constraint — always relevant
+            continue
+        resolved = {norm_text(p) for p in resolve_port_filter(port_val)}
+        if resolved & active_norm:
+            kept.append(item)
+    return kept
+
+
 def show_constraints_summary(constraint_summary, explanation_logs=None):
     """Display summary of applied constraints with downloadable explanations"""
     if not constraint_summary:
         return
-    
+
+    # Respect the active sidebar Port filter: drop constraints scoped to other ports
+    # so the summary matches the rest of the filtered view.
+    constraint_summary = _filter_summary_by_active_ports(constraint_summary)
+    if not constraint_summary:
+        return
+
     from ..core.config_styling import section_header
-    
+
     section_header("📊 Applied Constraints Summary")
     
     def _format_scope(scope):

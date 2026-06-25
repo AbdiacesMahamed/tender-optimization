@@ -10,10 +10,47 @@ import pytest
 
 from optimization.cascading_logic import (
     _get_excluded_carriers_for_group,
+    build_lockout_mask,
     cascading_allocate_with_constraints,
     CONSTRAINT_SCOPE_DIMENSIONS,
     DEFAULT_MAX_GROWTH_PCT,
 )
+
+
+class TestBuildLockoutMask:
+    """build_lockout_mask flags rows whose carrier is locked out in that row's scope,
+    using the same case-insensitive carrier match and scope rules as the optimizer."""
+
+    def _df(self):
+        return pd.DataFrame({
+            'Category': ['CD', 'CD', 'TL'],
+            'Lane': ['USLAXIUSF', 'USLAXIUSF', 'USLAXIUSF'],
+            'Week Number': [9, 9, 9],
+            'Dray SCAC(FL)': ['ABCD', 'EFGH', 'ABCD'],
+        })
+
+    def test_no_lockouts_all_false(self):
+        mask = build_lockout_mask(self._df(), [], 'Dray SCAC(FL)')
+        assert not mask.any()
+
+    def test_global_lockout_case_insensitive(self):
+        # lowercase + whitespace must still match the data's 'ABCD' rows.
+        locks = [{'carrier': ' abcd ', 'category': None, 'lane': None,
+                  'port': None, 'week': None, 'day': None}]
+        mask = build_lockout_mask(self._df(), locks, 'Dray SCAC(FL)')
+        assert list(mask) == [True, False, True]
+
+    def test_category_scoped_lockout(self):
+        # ABCD locked only in CD → row 0 (CD) flagged, row 2 (TL) not.
+        locks = [{'carrier': 'ABCD', 'category': 'CD', 'lane': None,
+                  'port': None, 'week': None, 'day': None}]
+        mask = build_lockout_mask(self._df(), locks, 'Dray SCAC(FL)')
+        assert list(mask) == [True, False, False]
+
+    def test_empty_df_returns_false_series(self):
+        empty = pd.DataFrame({'Dray SCAC(FL)': []})
+        mask = build_lockout_mask(empty, [{'carrier': 'ABCD'}], 'Dray SCAC(FL)')
+        assert len(mask) == 0
 
 
 # ==================== FIXTURES ====================
@@ -131,6 +168,18 @@ class TestGetExcludedCarriersForGroup:
         )
         assert 'ABCD' in result
 
+    def test_excluded_carrier_name_is_normalized(self):
+        """The returned excluded set holds normalized carrier names so a lockout
+        written in a different case/spacing than the data still matches downstream."""
+        for raw in ('abcd', ' ABCD ', 'aBcD'):
+            mc = [{'carrier': raw, 'category': None, 'lane': None, 'port': None, 'week': None}]
+            result = _get_excluded_carriers_for_group(
+                mc, ('CD', 'USLAXIUSF', 9),
+                ['Category', 'Lane', 'Week Number'],
+                'Category', 'Lane', 'Week Number',
+            )
+            assert 'ABCD' in result, f"{raw!r} should normalize to ABCD"
+
     def test_week_scope_mismatch(self):
         mc = [{'carrier': 'ABCD', 'category': None, 'lane': None, 'port': None, 'week': 10}]
         result = _get_excluded_carriers_for_group(
@@ -199,6 +248,21 @@ class TestCascadingAllocateWithConstraints:
         # At minimum, total should be preserved
         assert total == optimization_data['Container Count'].sum()
 
+    def test_lockout_matches_carrier_case_insensitively(self, optimization_data):
+        """A 0%/max lockout written in a different case than the data must still
+        zero out the carrier in the optimized allocation (regression: case-sensitive
+        carrier match let locked-out carriers receive volume)."""
+        excluded = [{'carrier': 'efgh', 'category': None, 'lane': None,
+                     'port': None, 'week': None}]  # data carrier is 'EFGH'
+        result = cascading_allocate_with_constraints(
+            optimization_data,
+            excluded_carriers=excluded,
+        )
+        efgh_volume = result[result['Dray SCAC(FL)'] == 'EFGH']['Container Count'].sum()
+        assert efgh_volume == 0, "lowercase lockout should still zero out EFGH"
+        # Total volume is conserved — it just goes to other carriers.
+        assert result['Container Count'].sum() == optimization_data['Container Count'].sum()
+
     def test_custom_weights(self, optimization_data):
         """Different cost/performance weights should produce a valid result."""
         result = cascading_allocate_with_constraints(
@@ -238,3 +302,41 @@ class TestCascadingAllocateWithConstraints:
         result = cascading_allocate_with_constraints(data)
         assert result['Container Count'].sum() == 10
         assert result.iloc[0]['Dray SCAC(FL)'] == 'ABCD'
+
+
+class TestGrowthConstrainedFlag:
+    """The Growth_Constrained display flag must match the allocator's real cap.
+
+    Regression: a NEW carrier (no history) is capped at max_growth_pct of the
+    group, but the flag used a 100% baseline, so a carrier genuinely held at
+    e.g. 30% reported 'No'. The flag must mirror _cascade_allocate_volume.
+    """
+
+    def test_new_carrier_held_at_growth_cap_is_flagged_yes(self):
+        # Incumbent OLDC has 100% history; new carrier NEWC has none. With a 30%
+        # growth cap NEWC can take at most 30% of the group, so it is genuinely
+        # growth-constrained and must report 'Yes'.
+        current = pd.DataFrame({
+            'Category': ['CD', 'CD'],
+            'Lane': ['USLAXIUSF', 'USLAXIUSF'],
+            'Week Number': [9, 9],
+            'Dray SCAC(FL)': ['OLDC', 'NEWC'],
+            'Container Count': [7, 3],
+            'Container Numbers': [', '.join(f'O{i}' for i in range(7)),
+                                  ', '.join(f'N{i}' for i in range(3))],
+            'Base Rate': [120, 80],
+            'Total Rate': [840, 240],
+            'Performance_Score': [0.6, 0.99],
+        })
+        historical = pd.DataFrame({
+            'Category': ['CD'], 'Lane': ['USLAXIUSF'], 'Week Number': [5],
+            'Dray SCAC(FL)': ['OLDC'], 'Container Count': [10],
+            'Container Numbers': [', '.join(f'H{i}' for i in range(10))],
+            'Base Rate': [120], 'Total Rate': [1200], 'Performance_Score': [0.6],
+        })
+        result = cascading_allocate_with_constraints(
+            current, max_growth_pct=0.30, historical_data=historical)
+        newc = result[result['Dray SCAC(FL)'] == 'NEWC'].iloc[0]
+        # NEWC sits at its 30% cap -> the flag must say it was growth-constrained.
+        assert round(float(newc['New_Allocation_Pct'])) == 30
+        assert newc['Growth_Constrained'] == 'Yes'

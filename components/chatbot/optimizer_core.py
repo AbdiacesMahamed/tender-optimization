@@ -515,6 +515,24 @@ def constraint_impact_core(
     delta = _round(new_cost - cur_cost)
     delta_pct = _round(100.0 * (new_cost - cur_cost) / cur_cost, 1) if cur_cost else None
 
+    # Where the volume moves: per-carrier current-vs-proposed container counts so
+    # the user sees which carriers shed volume and which pick it up under these
+    # constraints (same delta shape run_allocation_core reports for scenarios).
+    from config.carrier_mapping import get_carrier_name
+    per_cur = _per_carrier_volume(filtered_data)
+    per_new = _per_carrier_volume(proposed_frame)
+    movement = []
+    for scac in sorted(set(per_cur) | set(per_new)):
+        cur, new = int(per_cur.get(scac, 0)), int(per_new.get(scac, 0))
+        if cur == 0 and new == 0:
+            continue
+        movement.append({"carrier": scac, "name": get_carrier_name(scac),
+                         "current_containers": cur, "new_containers": new,
+                         "delta": new - cur})
+    movement.sort(key=lambda d: abs(d["delta"]), reverse=True)
+    # Conserved volume => net gained == net shed; surface it as one headline number.
+    reallocated = sum(d["delta"] for d in movement if d["delta"] > 0)
+
     return {
         "current": current,
         "proposed": proposed,
@@ -523,8 +541,12 @@ def constraint_impact_core(
         "cheaper": (new_cost < cur_cost) if cur_cost else None,
         "constrained_containers": _containers(constrained),
         "reoptimized_containers": _containers(reoptimized),
+        "containers_reallocated": int(reallocated),
+        "reallocated_metric": "net containers shifted between carriers under these constraints",
+        "per_carrier_movement": movement,
         "constraint_summary": constraint_summary,
         "note": ("Proposed = constrained containers (locked to their target carrier) + the "
                  "unconstrained remainder reoptimized with the capped carriers excluded. "
-                 "Current is the allocation as loaded."),
+                 "Current is the allocation as loaded. per_carrier_movement shows where "
+                 "the volume moves: negative delta = carrier sheds volume, positive = gains."),
     }

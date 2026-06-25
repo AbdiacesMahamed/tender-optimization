@@ -16,8 +16,10 @@ as we can without bloating the log with raw data:
     confirms the assistant saw the data correctly,
   - the system prompt, snapshotted to ``execution logs/prompt_snapshots/`` with
     its size and the per-turn "Session status" line,
-  - every tool call in order, with inputs, a compact result summary, the full
-    result, and whether it errored,
+  - the turn's ``steps`` in chronological order — the model's reasoning before a
+    round of tool calls (``type: reasoning``) interleaved with each tool call
+    (``type: tool``) carrying its inputs, a compact result summary, the full
+    result, whether it errored, and how long it took (``duration_ms``),
   - the final answer (or the error that stopped the turn).
 
 Design rules:
@@ -382,8 +384,11 @@ class ExecutionLogger:
                  prior_message_count=None):
         self.started = datetime.now()
         self.user_message = user_message or ""
+        # The reasoning text of the most-recent tool round, so a round that fires
+        # several tools logs its shared narration once (see log_tool).
+        self._last_reasoning = None
         self.record: dict = {
-            "schema_version": 2,
+            "schema_version": 3,
             "timestamp": self.started.isoformat(timespec="seconds"),
             "user_message": self.user_message,
             "app": _APP_INFO,
@@ -403,6 +408,7 @@ class ExecutionLogger:
             },
             "system_prompt": None,
             "tool_calls_count": 0,
+            "tool_time_ms_total": None,
             "had_error": False,
             "steps": [],
             "final_reply": None,
@@ -442,17 +448,43 @@ class ExecutionLogger:
             info["snapshot_error"] = str(e)
         self.record["system_prompt"] = info
 
-    def log_tool(self, name, tool_input, result, is_error):
-        """Record one tool call: what it was asked, what it returned, did it fail."""
+    def log_tool(self, name, tool_input, result, is_error,
+                 duration_ms=None, reasoning=None):
+        """Record one tool call: the model's reasoning for it, what it was asked,
+        what it returned, whether it failed, and how long it took.
+
+        ``reasoning`` is the assistant's narration that preceded this round of
+        tool calls — its rationale for the call. The model emits it once per
+        round even when it then fires several tools, so it is logged as its own
+        ``reasoning`` step the FIRST time a round's text is seen and elided on the
+        sibling tool steps; this keeps the steps reading in true chronological
+        order (thought -> tool -> tool -> thought -> final reply) without
+        repeating the same paragraph on every tool.
+        """
+        reasoning = (reasoning or "").strip()
+        if reasoning and reasoning != self._last_reasoning:
+            self._last_reasoning = reasoning
+            self.record["steps"].append({
+                "step": len(self.record["steps"]) + 1,
+                "type": "reasoning",
+                "thought": reasoning[:_MAX_STRING_LEN],
+            })
+
         self.record["steps"].append({
             "step": len(self.record["steps"]) + 1,
+            "type": "tool",
             "tool": name,
             "is_error": bool(is_error),
+            "duration_ms": duration_ms,
             "input": _safe(tool_input or {}),
             "result_summary": _summarize_result(result),
             "result": _safe(result),
         })
-        self.record["tool_calls_count"] = len(self.record["steps"])
+        self.record["tool_calls_count"] += 1
+        if duration_ms is not None:
+            self.record["tool_time_ms_total"] = round(
+                (self.record.get("tool_time_ms_total") or 0) + duration_ms, 1
+            )
         if is_error:
             self.record["had_error"] = True
 

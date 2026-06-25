@@ -13,6 +13,7 @@ from ..core.utils import (
 )
 from ..reporting.container_tracer import add_detailed_carrier_flips_column
 from optimization.performance_logic import allocate_to_highest_performance
+from optimization.cascading_logic import build_lockout_mask
 
 logger = logging.getLogger(__name__)
 
@@ -99,18 +100,32 @@ def apply_optimized_strategy(display_data_with_rates, carrier_col,
     else:
         display_data = optimization_source
 
-    # Calculate how many containers were reallocated/impacted
-    if 'Volume_Change' in display_data.columns:
-        volume_change_numeric = pd.to_numeric(display_data['Volume_Change'], errors='coerce').fillna(0)
-        reallocated = int(abs(volume_change_numeric).sum() / 2)  # Divide by 2 to avoid double counting
-
-        group_cols = [col for col in ['Category', 'Lane', 'Week Number'] if col in display_data.columns]
-        if group_cols and reallocated > 0:
-            groups_impacted = int(
-                display_data.loc[volume_change_numeric != 0, group_cols]
-                .drop_duplicates()
-                .shape[0]
-            )
+    # Calculate how many containers were reallocated/impacted. The optimized
+    # output carries one row per carrier per group with that carrier's
+    # Historical_Allocation_Pct and its post-optimization Container Count, so the
+    # net containers that MOVED is half the sum of |new - historical| container
+    # counts per group (each shifted container shows up once as a loss and once
+    # as a gain). NOTE: Volume_Change is a label string ("↑ Increase"), NOT a
+    # number — parsing it numerically yields all-zeros and a permanently-zero
+    # metric, so derive the delta from the percentages against the group total.
+    needed = {'Historical_Allocation_Pct', 'New_Allocation_Pct', 'Container Count'}
+    group_cols = [col for col in ['Category', 'Lane', 'Week Number'] if col in display_data.columns]
+    if needed.issubset(display_data.columns) and group_cols:
+        work = display_data.copy()
+        work['Container Count'] = pd.to_numeric(work['Container Count'], errors='coerce').fillna(0)
+        hist_pct = pd.to_numeric(work['Historical_Allocation_Pct'], errors='coerce').fillna(0)
+        new_pct = pd.to_numeric(work['New_Allocation_Pct'], errors='coerce').fillna(0)
+        # Group total is the same for every row in a group; rebuild it from the new
+        # allocation (new_pct sums to 100% of the group), falling back to the row
+        # count when a group's new_pct is degenerate.
+        group_totals = work.groupby(group_cols)['Container Count'].transform('sum')
+        hist_containers = hist_pct / 100.0 * group_totals
+        delta = (work['Container Count'] - hist_containers).abs()
+        per_group_moved = (
+            delta.groupby([work[c] for c in group_cols]).sum() / 2.0
+        )
+        reallocated = int(round(per_group_moved.sum()))
+        groups_impacted = int((per_group_moved > 0.5).sum())
 
     return display_data, reallocated, groups_impacted
 
@@ -120,8 +135,13 @@ def apply_optimized_strategy(display_data_with_rates, carrier_col,
 # ---------------------------------------------------------------------------
 
 def apply_performance_strategy(display_data_with_rates, carrier_col,
-                               carrier_facility_exclusions):
+                               carrier_facility_exclusions,
+                               max_constrained_carriers=None):
     """Reallocate volume to highest-performance carriers.
+
+    Locked-out carriers (0%/max-0 constraints in max_constrained_carriers) are
+    barred from being selected as a group's winner, while their containers still
+    count toward the group total — matching the Optimized scenario.
 
     Returns:
         (display_data, reallocated_count, groups_impacted)
@@ -130,11 +150,15 @@ def apply_performance_strategy(display_data_with_rates, carrier_col,
     if carrier_col in performance_source.columns:
         performance_source['Original Carrier'] = performance_source[carrier_col]
 
-    # Try cached result from calculate_enhanced_metrics
+    has_lockouts = bool(max_constrained_carriers)
+
+    # Try cached result from calculate_enhanced_metrics. Skip the cache when lockouts
+    # are active: the cached allocation was computed without them, so reusing it would
+    # silently let a locked-out carrier win the performance pick.
     cached_perf = st.session_state.pop('_cached_perf_allocated', None)
     allocated = None
 
-    if cached_perf is not None and len(cached_perf) > 0:
+    if cached_perf is not None and len(cached_perf) > 0 and not has_lockouts:
         allocated = cached_perf
     else:
         perf_input = filter_excluded_carrier_facility_rows(
@@ -143,6 +167,10 @@ def apply_performance_strategy(display_data_with_rates, carrier_col,
         if 'Container Numbers' in perf_input.columns:
             perf_input['Container Count'] = perf_input['Container Numbers'].apply(count_containers)
 
+        lockout_mask = build_lockout_mask(
+            perf_input, max_constrained_carriers, carrier_column=carrier_col
+        ) if has_lockouts else None
+
         try:
             allocated = allocate_to_highest_performance(
                 perf_input,
@@ -150,6 +178,7 @@ def apply_performance_strategy(display_data_with_rates, carrier_col,
                 container_column='Container Count',
                 performance_column='Performance_Score',
                 container_numbers_column='Container Numbers',
+                excluded_mask=lockout_mask,
             )
         except ValueError as exc:
             st.warning(f"Unable to build performance scenario: {exc}")
@@ -243,8 +272,13 @@ def apply_performance_strategy(display_data_with_rates, carrier_col,
 
 def apply_cheapest_strategy(source_data, carrier_col, carrier_facility_exclusions,
                             has_constraints, constrained_data, metrics,
-                            final_filtered_data, unconstrained_data):
+                            final_filtered_data, unconstrained_data,
+                            max_constrained_carriers=None):
     """Find the cheapest carrier per lane/week/category.
+
+    Locked-out carriers (0%/max-0 constraints in max_constrained_carriers) cannot
+    be picked as a group's cheapest carrier, while their containers still count
+    toward the group total — matching the Optimized scenario.
 
     Unlike the other strategies this branch builds its own column set and
     description, so it returns a richer tuple:
@@ -276,7 +310,22 @@ def apply_cheapest_strategy(source_data, carrier_col, carrier_facility_exclusion
     working['Container Count'] = pd.to_numeric(working['Container Count'], errors='coerce').fillna(0)
     working['_rate_sort'] = working[rate_cols['rate']].fillna(float('inf'))
     working['_carrier_sort'] = working[carrier_col].astype(str)
-    working = working.sort_values(['_rate_sort', '_carrier_sort'], ascending=[True, True])
+
+    # Lockout: locked-out carriers sort last so the per-group .first() never picks
+    # them, but their rows stay in `working` so the group's container total (summed
+    # below) still includes their volume — it just gets reassigned to an allowed
+    # carrier. If every carrier in a group is locked, the group keeps its cheapest
+    # locked carrier rather than disappearing.
+    sort_keys = ['_rate_sort', '_carrier_sort']
+    sort_asc = [True, True]
+    if max_constrained_carriers:
+        working['_lockout_sort'] = build_lockout_mask(
+            working, max_constrained_carriers, carrier_column=carrier_col
+        ).astype(int)
+        sort_keys.insert(0, '_lockout_sort')  # 0 (allowed) before 1 (locked)
+        sort_asc.insert(0, True)
+
+    working = working.sort_values(sort_keys, ascending=sort_asc)
 
     cheapest_per_group = working.groupby(group_cols, as_index=False).first()
 
@@ -329,7 +378,7 @@ def apply_cheapest_strategy(source_data, carrier_col, carrier_facility_exclusion
     )
 
     # Clean up helper columns
-    for col in ['_rate_sort', '_carrier_sort', '_total_containers',
+    for col in ['_rate_sort', '_carrier_sort', '_lockout_sort', '_total_containers',
                 '_container_numbers', '_current_total_cost', '_actual_container_count', '_summed_count']:
         if col in cheapest_per_group.columns:
             cheapest_per_group.drop(columns=col, inplace=True)

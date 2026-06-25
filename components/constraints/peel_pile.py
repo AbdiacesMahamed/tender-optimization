@@ -7,7 +7,8 @@ in a focused, debuggable file.
 import streamlit as st
 import pandas as pd
 from ..core.config_styling import section_header
-from ..core.utils import count_containers
+from ..core.utils import count_containers, parse_container_ids, join_container_ids
+from .processor import ceiling_headroom, credit_ceilings
 
 
 def show_peel_pile_analysis(data):
@@ -269,32 +270,44 @@ def show_peel_pile_analysis(data):
     )
 
 
-def apply_peel_pile_as_constraints(filtered_data, constrained_data, unconstrained_data, constraint_summary):
+def apply_peel_pile_as_constraints(filtered_data, constrained_data, unconstrained_data,
+                                   constraint_summary, scoped_max_ceilings=None):
     """
     Apply peel pile allocations from session state as constraints.
-    
+
     Supports splitting a peel pile group across multiple carriers with equal split.
     Matching rows are divided evenly among the selected carriers. Any remainder
     rows (from integer division) stay in the unconstrained pool.
-    
+
     This mirrors the constraint processor behavior:
     - Matching rows are moved from unconstrained_data to constrained_data
     - The carrier on those rows is reassigned to the chosen SCAC(s)
     - Each carrier is added to max_constrained_carriers so optimization skips it
-    
+
+    Respecting file-constraint max caps: ``scoped_max_ceilings`` (from
+    ``processor.compute_scoped_max_ceilings``, with its ``allocated`` tallies already
+    advanced by the file-constraint pass) caps how many containers a carrier may take
+    in a given scope. A peel pile assignment that would push a carrier past such a cap
+    is clamped to the remaining headroom; the over-cap rows stay unconstrained so a
+    manual peel-pile override can never silently bust a max the user already set.
+
     Args:
         filtered_data: Full filtered dataset (for reference)
         constrained_data: Existing constrained DataFrame (may be empty)
         unconstrained_data: Existing unconstrained DataFrame
         constraint_summary: Existing constraint summary list
-    
+        scoped_max_ceilings: Optional list of ceiling dicts to honor (see above).
+            Ceilings are matched against ``unconstrained_data``'s index, so pass the
+            same frame here that was used to compute them.
+
     Returns:
         tuple: (constrained_data, unconstrained_data, constraint_summary, peel_pile_carriers)
                peel_pile_carriers is a set of carrier names that were assigned peel pile volume
     """
     peel_pile_allocations = st.session_state.get('peel_pile_allocations', {})
     peel_pile_carriers = set()
-    
+    ceilings = scoped_max_ceilings or []
+
     if not peel_pile_allocations:
         return constrained_data, unconstrained_data, constraint_summary, peel_pile_carriers
     
@@ -362,28 +375,59 @@ def apply_peel_pile_as_constraints(filtered_data, constrained_data, unconstraine
             count_for_carrier = base_per_carrier + (1 if i < remainder_count else 0)
             carrier_indices = matched_indices[offset:offset + count_for_carrier]
             offset += count_for_carrier
-            
+
             if not carrier_indices:
                 continue
-            
-            carrier_rows = remaining.loc[carrier_indices]
-            
-            # Move these rows to constrained, reassigning carrier
+
+            # Respect any file-constraint max cap on this carrier in this scope: only
+            # take up to the remaining headroom. Rows (or the tail of a boundary row)
+            # beyond the cap stay unconstrained so a peel-pile override can't bust a max.
+            assigned_count_for_carrier = 0
+            capped_out = False
             for idx in carrier_indices:
                 row = remaining.loc[idx]
+                row_n = count_containers(row.get('Container Numbers')) if 'Container Numbers' in row.index \
+                    else int(pd.to_numeric(pd.Series([row.get('Container Count', 0)]), errors='coerce').fillna(0).iloc[0])
+
+                headroom = ceiling_headroom(ceilings, idx, carrier)
+                if headroom is not None and headroom <= 0:
+                    # No room left for this carrier here — leave the whole row unconstrained.
+                    capped_out = True
+                    continue
+
+                take_n = row_n if headroom is None else min(row_n, headroom)
+                if take_n <= 0:
+                    capped_out = True
+                    continue
+
                 constrained_row = row.copy()
                 constrained_row[carrier_col] = carrier
                 if 'Carrier' in constrained_row.index and carrier_col != 'Carrier':
                     constrained_row['Carrier'] = carrier
-                
+
+                if take_n < row_n and 'Container Numbers' in row.index:
+                    # Boundary row: split container IDs — `take_n` go to the capped
+                    # carrier (constrained), the rest stay on the row in `remaining`.
+                    ids = parse_container_ids(row.get('Container Numbers'))
+                    taken_ids, left_ids = ids[:take_n], ids[take_n:]
+                    constrained_row['Container Numbers'] = join_container_ids(taken_ids)
+                    constrained_row['Container Count'] = len(taken_ids)
+                    remaining.loc[idx, 'Container Numbers'] = join_container_ids(left_ids)
+                    remaining.loc[idx, 'Container Count'] = len(left_ids)
+                    capped_out = True  # this group hit the cap mid-row
+                else:
+                    assigned_indices.add(idx)
+
                 split_desc = f" (equal split {num_carriers}-way)" if num_carriers > 1 else ""
                 constrained_row['Constraint_Description'] = f"Peel Pile: {key_values[0]} → {carrier}{split_desc}"
                 new_constrained_rows.append(constrained_row)
-                assigned_indices.add(idx)
-            
-            container_count = carrier_rows['Container Count'].sum()
+                credit_ceilings(ceilings, idx, carrier, take_n)
+                assigned_count_for_carrier += take_n
+
+            if assigned_count_for_carrier <= 0:
+                continue
             peel_pile_carriers.add(carrier)
-            
+
             # Add per-carrier constraint summary entry
             if num_carriers > 1:
                 method_desc = f'Equal Split {num_carriers}-way'
@@ -391,17 +435,22 @@ def apply_peel_pile_as_constraints(filtered_data, constrained_data, unconstraine
             else:
                 method_desc = '100% Allocation'
                 carrier_desc = f"Peel Pile: {', '.join(desc_parts)} → {carrier}"
-            
+            status = 'Applied'
+            if capped_out:
+                carrier_desc += " (clamped by max cap)"
+                status = 'Applied (capped)'
+
             constraint_summary.append({
                 'priority': 'Peel Pile',
                 'description': carrier_desc,
                 'method': method_desc,
-                'status': 'Applied',
-                'containers_allocated': int(container_count),
-                'target_containers': int(container_count),
+                'status': status,
+                'containers_allocated': int(assigned_count_for_carrier),
+                'target_containers': int(assigned_count_for_carrier),
             })
-        
-        # Remove all assigned rows from remaining
+
+        # Remove all fully-assigned rows from remaining (boundary-split rows were
+        # already reduced in place above and must stay).
         remaining = remaining.drop(index=list(assigned_indices))
     
     # Merge new constrained rows with existing constrained data

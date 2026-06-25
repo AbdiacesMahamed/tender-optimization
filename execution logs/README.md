@@ -30,7 +30,7 @@ produce one CSV, not 50. Same for the system prompt under `prompt_snapshots/`.
 
 | Field | Meaning |
 |---|---|
-| `schema_version` | Log format version (currently 2) |
+| `schema_version` | Log format version (currently 3) |
 | `timestamp` | When the turn started |
 | `user_message` | The exact question asked |
 | `app` | `version`, `git` (branch + commit), `platform`, `python` — which build answered |
@@ -40,12 +40,28 @@ produce one CSV, not 50. Same for the system prompt under `prompt_snapshots/`.
 | `data` | Links + checks for the data tables — see below |
 | `system_prompt` | Size, token estimate, the per-turn "Session status" line, and a link to the full prompt snapshot |
 | `tool_calls_count` | How many tools the LLM ran |
+| `tool_time_ms_total` | Total time spent inside tools this turn (ms) |
 | `had_error` | True if any tool errored or the turn failed |
-| `steps[]` | Every tool call in order: `tool`, `input`, `result_summary`, full `result`, `is_error` |
+| `steps[]` | The turn's activity in chronological order — see below |
 | `final_reply` | The answer shown to the user (the follow-up block is stripped out) |
 | `suggested_followups` | The clickable follow-up pills offered after the answer |
 | `error` | Set only if the turn failed |
 | `duration_seconds` | Wall-clock time for the turn |
+
+## `steps[]` — the model's reasoning + tool calls, in order
+
+Each entry has a `type` and reads top-to-bottom as the turn actually unfolded:
+
+- **`type: "reasoning"`** — the model's own narration (`thought`) explaining *why*
+  it is about to call the tools that follow. Emitted once per tool round even
+  when that round fires several tools, so a shared rationale isn't repeated.
+- **`type: "tool"`** — one tool call: `tool` (name), `input`, `result_summary`,
+  the full `result`, `is_error`, and **`duration_ms`** (how long that tool took).
+
+So a typical turn reads: reasoning → tool → tool → reasoning → tool → `final_reply`.
+To find a slow turn's culprit, scan `duration_ms` across the tool steps (or check
+`tool_time_ms_total` against `duration_seconds` to see if the time went to tools
+or to model generation).
 
 ## `data` — the data tables (linked) + correctness checks
 

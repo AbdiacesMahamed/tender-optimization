@@ -399,6 +399,40 @@ class TestRunAnalysis:
         res = cf.run_carrier_flip_analysis(tender_dfs=[clean])
         assert 'ZZZZ' not in res['unrecognized_carriers']
 
+    def test_constraint_wins_over_unconstrained_for_same_container(self):
+        # A container the user LOCKED to RKNE via a constraint, but the
+        # unconstrained optimizer assigned to ATMI, must report the CONSTRAINED
+        # carrier in the flip report — constraints are authoritative. (Regression:
+        # the old dedup kept the alphabetically-first SCAC, silently dropping the
+        # constraint and reporting ATMI.)
+        unconstrained = pd.DataFrame({
+            'NEW SCAC': ['ATMI'], 'Container Numbers': ['ZZZU1234567'],
+            'Lane': ['USTIWTIW1']})
+        constrained = pd.DataFrame({
+            'NEW SCAC': ['RKNE'], 'Container Numbers': ['ZZZU1234567'],
+            'Lane': ['USTIWTIW1']})
+        gvt = _gvt(['ZZZU1234567'], ['HJBT'],
+                   **{'Discharged Port': ['TIW'], 'Facility': ['TIW1']})
+        res = cf.run_carrier_flip_analysis(
+            tender_dfs=[unconstrained], constrained_dfs=[constrained], gvt_df=gvt)
+        assert res['gvt_merged'].iloc[0]['NEW SCAC'] == 'RKNE'
+
+    def test_constraint_priority_independent_of_scac_alphabetical_order(self):
+        # Guard that the constrained source wins even when its SCAC sorts LATER
+        # alphabetically than the unconstrained one (so the fix isn't an accident
+        # of alphabetical tie-breaking).
+        unconstrained = pd.DataFrame({
+            'NEW SCAC': ['AAAA'], 'Container Numbers': ['ZZZU1234567'],
+            'Lane': ['USTIWTIW1']})
+        constrained = pd.DataFrame({
+            'NEW SCAC': ['ZZZZ'], 'Container Numbers': ['ZZZU1234567'],
+            'Lane': ['USTIWTIW1']})
+        gvt = _gvt(['ZZZU1234567'], ['HJBT'],
+                   **{'Discharged Port': ['TIW'], 'Facility': ['TIW1']})
+        res = cf.run_carrier_flip_analysis(
+            tender_dfs=[unconstrained], constrained_dfs=[constrained], gvt_df=gvt)
+        assert res['gvt_merged'].iloc[0]['NEW SCAC'] == 'ZZZZ'
+
 
 # ---------------------------------------------------------------------------
 # build_flip_report_excel — must produce a readable workbook

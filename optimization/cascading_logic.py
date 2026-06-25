@@ -291,9 +291,69 @@ def _get_excluded_carriers_for_group(
                     break
         
         if matches:
-            excluded.add(carrier)
-    
+            # Normalize the carrier name the same way scope values are compared, so a
+            # lockout written as 'abcd' or ' ABCD ' still matches the data's 'ABCD'.
+            # The consumer (_cascade_allocate_volume) normalizes data carriers the same
+            # way before testing membership.
+            excluded.add(_norm_scope(carrier))
+
     return excluded
+
+
+def build_lockout_mask(
+    df: pd.DataFrame,
+    max_constrained_carriers: list,
+    carrier_column: str = "Dray SCAC(FL)",
+) -> pd.Series:
+    """Return a boolean Series flagging rows whose carrier is locked out in that
+    row's scope.
+
+    This is the row-level counterpart to ``_get_excluded_carriers_for_group``: it
+    applies the SAME scope-matching rules (carrier name + each dimension in
+    CONSTRAINT_SCOPE_DIMENSIONS, with category canonicalized and other values
+    normalized) but vectorized over an arbitrary dataframe rather than one
+    optimization group. Scenario strategies (Performance, Cheapest) use it to keep
+    a locked-out carrier from being SELECTED as a group's winner while still
+    counting its containers toward the group total — mirroring how the Optimized
+    cascade treats lockouts.
+
+    A True value means "this row's carrier must not be chosen for this row's scope".
+    Returns an all-False mask when there are no lockouts or no carrier column.
+    """
+    if df is None or df.empty or not max_constrained_carriers or carrier_column not in df.columns:
+        return pd.Series(False, index=df.index if df is not None else None)
+
+    carrier_norm = df[carrier_column].map(_norm_scope)
+    mask = pd.Series(False, index=df.index)
+
+    for mc in max_constrained_carriers:
+        carrier = mc.get("carrier")
+        if not carrier:
+            continue
+        # Start from "every row matches this carrier", then narrow by each scope dim.
+        entry_mask = carrier_norm == _norm_scope(carrier)
+        if not entry_mask.any():
+            continue
+        for constraint_key, group_col in CONSTRAINT_SCOPE_DIMENSIONS:
+            mc_val = mc.get(constraint_key)
+            if mc_val is None or group_col not in df.columns:
+                continue  # wildcard, or data lacks this dimension → don't narrow
+            if group_col == "Category":
+                want = canonical_category(mc_val)
+                entry_mask &= df[group_col].map(canonical_category) == want
+            else:
+                # Numeric-safe equality (e.g. week 9 vs 9.0), falling back to
+                # normalized string compare for lanes/ports/etc.
+                col_num = pd.to_numeric(df[group_col], errors="coerce")
+                try:
+                    mc_num = float(mc_val)
+                    dim_mask = col_num == mc_num
+                except (ValueError, TypeError):
+                    dim_mask = df[group_col].map(_norm_scope) == _norm_scope(mc_val)
+                entry_mask &= dim_mask
+        mask |= entry_mask
+
+    return mask
 
 
 def _cascading_allocate_single_group(
@@ -456,8 +516,15 @@ def _cascading_allocate_single_group(
         else:
             row['Volume_Change'] = "→ Stable"
 
-        # Check if growth was constrained
-        max_allowed_pct = hist_pct * (1 + max_growth_pct) if hist_pct > 0 else 100
+        # Check if growth was constrained. Mirror the allocator's own cap
+        # (_cascade_allocate_volume): a carrier WITH history is capped at
+        # hist*(1+growth); a NEW carrier (no history) is capped at growth% of the
+        # group, NOT 100% — using 100 here made a genuinely growth-capped new
+        # carrier (e.g. held to 30%) wrongly report "No".
+        if hist_pct > 0:
+            max_allowed_pct = hist_pct * (1 + max_growth_pct)
+        else:
+            max_allowed_pct = max_growth_pct * 100
         row['Growth_Constrained'] = "Yes" if new_pct >= max_allowed_pct - 0.1 else "No"
 
         # Recalculate total cost based on actual container count
@@ -626,17 +693,22 @@ def _cascade_allocate_volume(
     """
     # Sort carriers by rank (best first), filter out NaN values
     valid_carriers = [c for c in carriers if pd.notna(c)]
+    # excluded_carriers holds normalized names (see _get_excluded_carriers_for_group),
+    # so normalize each data carrier the same way before testing membership — otherwise
+    # a lockout written in a different case/spacing than the data would silently miss.
+    def _is_excluded(c):
+        return _norm_scope(c) in excluded_carriers
     # Separate excluded carriers — they keep containers in the pool but cannot receive allocation
-    allocatable_carriers = [c for c in valid_carriers if c not in excluded_carriers]
+    allocatable_carriers = [c for c in valid_carriers if not _is_excluded(c)]
     sorted_carriers = sorted(allocatable_carriers, key=lambda c: carrier_ranks.get(c, 999))
-    
+
     allocations = {carrier: 0 for carrier in carriers}
     notes = {}
     remaining = total_containers
-    
+
     # Mark excluded carriers in notes
     for carrier in valid_carriers:
-        if carrier in excluded_carriers:
+        if _is_excluded(carrier):
             notes[carrier] = f"Rank #{carrier_ranks.get(carrier, 999)} | ⛔ Max constraint active — excluded from allocation in this group"
     
     # First pass: allocate up to historical + max_growth

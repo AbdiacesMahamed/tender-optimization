@@ -165,3 +165,87 @@ class TestApplyPeelPileAsConstraints:
             )
         assert len(unconstrained) == len(peel_data)
         assert carriers == set()
+
+
+class TestPeelPileRespectsMaxCeilings:
+    """A peel pile assignment must NOT bust a max cap the user already set via a file
+    constraint. The dashboard pre-computes scoped_max_ceilings (with file-constrained
+    volume pre-credited) and passes them in; the peel pile clamps to the headroom and
+    leaves over-cap volume unconstrained."""
+
+    def _make_st_mock(self, session_data):
+        m = MagicMock()
+        m.session_state = session_data
+        return m
+
+    def _data(self):
+        # 6 rows × 5 containers = 30 on one peel pile group, all currently 'OLD'.
+        return pd.DataFrame({
+            'Vessel': ['SHIP_A'] * 6,
+            'Category': ['CD'] * 6,
+            'Week Number': [9.0] * 6,
+            'Discharged Port': ['LAX'] * 6,
+            'Terminal': ['T1'] * 6,
+            'Dray SCAC(FL)': ['OLD'] * 6,
+            'Container Count': [5] * 6,
+            'Container Numbers': [','.join(f"C{r*5+j:03d}" for j in range(5)) for r in range(6)],
+            'Base Rate': [100] * 6,
+            'Total Rate': [500] * 6,
+        })
+
+    def _ceilings(self, data, carrier, cap, **scope):
+        from components.constraints.processor import compute_scoped_max_ceilings
+        base = dict(zip(['Priority Score', 'Carrier', 'Maximum Container Count',
+                         'Minimum Container Count', 'Percent Allocation', 'Category',
+                         'Lane', 'Port', 'Week Number', 'Terminal', 'SSL', 'Vessel',
+                         'Excluded FC'],
+                        [10, carrier, cap, None, None, None, None, None, None, None,
+                         None, None, None]))
+        base.update(scope)
+        return compute_scoped_max_ceilings(pd.DataFrame([base]), data)
+
+    def test_clamps_assignment_to_cap(self):
+        data = self._data()
+        # Cap NEWC at 12 containers on SHIP_A; peel pile assigns the whole 30-container
+        # group to NEWC. Only 12 may be locked; the rest stay unconstrained.
+        ceilings = self._ceilings(data, 'NEWC', 12, Vessel='SHIP_A')
+        key = (('Vessel', 'SHIP_A'), ('Category', 'CD'), ('Week Number', '9.0'),
+               ('Discharged Port', 'LAX'), ('Terminal', 'T1'))
+        with patch.object(peel_pile_module, 'st',
+                          self._make_st_mock({'peel_pile_allocations': {key: ['NEWC']}})):
+            con, unc, summary, carriers = apply_peel_pile_as_constraints(
+                data, pd.DataFrame(), data.copy(), [], scoped_max_ceilings=ceilings)
+        newc = con[con['Dray SCAC(FL)'] == 'NEWC']['Container Count'].sum() if len(con) else 0
+        assert newc == 12, f"peel pile busted the cap: {newc}"
+        # Conservation: the other 18 containers stay unconstrained.
+        tot = (con['Container Count'].sum() if len(con) else 0) + \
+              (unc['Container Count'].sum() if len(unc) else 0)
+        assert tot == 30
+
+    def test_no_ceiling_assigns_all(self):
+        # Without a conflicting cap, the whole group is assigned (regression guard that
+        # the clamp path doesn't drop volume when no ceiling binds).
+        data = self._data()
+        key = (('Vessel', 'SHIP_A'), ('Category', 'CD'), ('Week Number', '9.0'),
+               ('Discharged Port', 'LAX'), ('Terminal', 'T1'))
+        with patch.object(peel_pile_module, 'st',
+                          self._make_st_mock({'peel_pile_allocations': {key: ['NEWC']}})):
+            con, unc, summary, carriers = apply_peel_pile_as_constraints(
+                data, pd.DataFrame(), data.copy(), [], scoped_max_ceilings=[])
+        assert con[con['Dray SCAC(FL)'] == 'NEWC']['Container Count'].sum() == 30
+
+    def test_cap_already_full_leaves_all_unconstrained(self):
+        # If the file pass already used the entire cap, peel pile gets zero headroom.
+        data = self._data()
+        ceilings = self._ceilings(data, 'NEWC', 12, Vessel='SHIP_A')
+        for c in ceilings:
+            c['allocated'] = 12  # cap fully consumed by the file pass
+        key = (('Vessel', 'SHIP_A'), ('Category', 'CD'), ('Week Number', '9.0'),
+               ('Discharged Port', 'LAX'), ('Terminal', 'T1'))
+        with patch.object(peel_pile_module, 'st',
+                          self._make_st_mock({'peel_pile_allocations': {key: ['NEWC']}})):
+            con, unc, summary, carriers = apply_peel_pile_as_constraints(
+                data, pd.DataFrame(), data.copy(), [], scoped_max_ceilings=ceilings)
+        newc = con[con['Dray SCAC(FL)'] == 'NEWC']['Container Count'].sum() if len(con) else 0
+        assert newc == 0
+        assert unc['Container Count'].sum() == 30

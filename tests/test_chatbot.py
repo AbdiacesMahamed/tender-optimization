@@ -996,6 +996,89 @@ def test_loop_multiple_tools_in_one_turn():
     assert len(tool_result_turns[0]["content"]) == 2
 
 
+# ==================== toolResult JSON sanitation (Converse boundary) ====================
+#
+# Bedrock's Converse API rejects a toolResult whose `json` field is not a clean
+# JSON object, and because that bad toolResult is persisted in the message
+# history it 400s every LATER turn too — wedging the whole conversation. Two
+# real shapes triggered this: a NON-FINITE float (NaN/Infinity, e.g. a percent
+# delta over a zero baseline) and an EMPTY-STRING object key (e.g. a carrier_mix
+# bucket for a container with no assigned SCAC). The boundary scrubs both so a
+# tool can never poison a session with a value it produced on one edge case.
+
+from components.chatbot.bedrock_client import _as_tool_result_json, _json_sanitize
+
+
+def test_tool_result_wraps_non_dict():
+    # A bare list/scalar/None must become an object — Converse requires one.
+    assert _as_tool_result_json([1, 2, 3]) == {"result": [1, 2, 3]}
+    assert _as_tool_result_json("hi") == {"result": "hi"}
+    assert _as_tool_result_json(None) == {"result": None}
+    # A dict passes through (contents still scrubbed).
+    assert _as_tool_result_json({"a": 1}) == {"a": 1}
+
+
+def test_tool_result_scrubs_non_finite_floats():
+    dirty = {"pct": float("nan"), "ratio": float("inf"), "neg": float("-inf"),
+             "ok": 3.5, "nested": [{"x": float("nan")}]}
+    clean = _as_tool_result_json(dirty)
+    assert clean["pct"] is None
+    assert clean["ratio"] is None
+    assert clean["neg"] is None
+    assert clean["ok"] == 3.5
+    assert clean["nested"][0]["x"] is None
+    # The scrubbed result must now serialize as STRICT JSON (no NaN/Infinity).
+    json.dumps(clean, allow_nan=False)
+
+
+def test_tool_result_renames_empty_string_keys():
+    # The exact shape that wedged a conversation: a blank-carrier bucket.
+    dirty = {"carrier_mix": {"": {"containers": 1}, "RKNE": {"containers": 5}},
+             "  ": {"whitespace_key": True}}
+    clean = _as_tool_result_json(dirty)
+    assert "" not in clean["carrier_mix"]
+    assert clean["carrier_mix"]["(unassigned)"] == {"containers": 1}
+    assert clean["carrier_mix"]["RKNE"] == {"containers": 5}
+    # Whitespace-only keys are treated the same way.
+    assert "  " not in clean
+    assert clean["(unassigned)"] == {"whitespace_key": True}
+
+
+def test_tool_result_coerces_numpy_scalars():
+    dirty = {"n": np.int64(7), "r": np.float64(1.5), "bad": np.float64("nan")}
+    clean = _as_tool_result_json(dirty)
+    assert clean["n"] == 7 and isinstance(clean["n"], int)
+    assert clean["r"] == 1.5
+    assert clean["bad"] is None
+    json.dumps(clean, allow_nan=False)
+
+
+def test_loop_result_with_empty_key_does_not_wedge_history():
+    # End-to-end through the real loop: a tool returns a poisoned result, and the
+    # toolResult written into history must be the SCRUBBED form, so the next
+    # Converse turn would not 400. (Mirrors the live preview_optimization bug.)
+    client = _FakeBedrock([
+        _tool_response("preview_optimization", {}),
+        _text_response("Here is the preview."),
+    ])
+
+    def executor(name, inp):
+        return {"carrier_mix": {"": {"containers": 1}}, "pct": float("nan")}, False
+
+    out = client.run_conversation([{"role": "user", "content": [{"text": "x"}]}],
+                                  "sys", [], executor)
+    # Find the toolResult block the loop persisted and assert it is clean.
+    tr_json = None
+    for m in out["messages"]:
+        for b in m.get("content", []):
+            if "toolResult" in b:
+                tr_json = b["toolResult"]["content"][0]["json"]
+    assert tr_json is not None
+    assert "" not in tr_json["carrier_mix"]
+    assert tr_json["pct"] is None
+    json.dumps(tr_json, allow_nan=False)  # strict-JSON clean -> Converse-safe
+
+
 # ==================== streaming loop: adversarial (fake stream) ====================
 #
 # The streaming loop (stream_conversation) must reproduce run_conversation's

@@ -115,6 +115,24 @@ class TestAllocateToHighestPerformance:
         total_after = result['Container Count'].sum()
         assert total_after == total_before
 
+    def test_excluded_mask_bars_winner_but_keeps_volume(self, multi_carrier_data):
+        """A locked-out carrier (highest performer EFGH) must not be selected; the
+        next-best allowed carrier wins and the full group volume is preserved."""
+        # Lock out EFGH (the 0.9 top performer). IJKL (0.85) should win.
+        mask = multi_carrier_data['Dray SCAC(FL)'] == 'EFGH'
+        result = allocate_to_highest_performance(multi_carrier_data, excluded_mask=mask)
+        assert len(result) == 1
+        assert result.iloc[0]['Dray SCAC(FL)'] == 'IJKL'
+        assert result['Container Count'].sum() == multi_carrier_data['Container Count'].sum()
+
+    def test_excluded_mask_all_locked_keeps_group(self, multi_carrier_data):
+        """If every carrier in a group is locked out, the group still produces a row
+        (best locked carrier) rather than vanishing — volume is never dropped."""
+        mask = pd.Series(True, index=multi_carrier_data.index)
+        result = allocate_to_highest_performance(multi_carrier_data, excluded_mask=mask)
+        assert len(result) == 1
+        assert result['Container Count'].sum() == multi_carrier_data['Container Count'].sum()
+
     def test_recalculates_total_rate(self, multi_carrier_data):
         result = allocate_to_highest_performance(multi_carrier_data)
         expected = result.iloc[0]['Base Rate'] * result.iloc[0]['Container Count']

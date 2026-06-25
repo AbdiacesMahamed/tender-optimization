@@ -18,6 +18,7 @@ from ..core.utils import (
     concat_and_dedupe_containers, filter_excluded_carrier_facility_rows
 )
 from optimization.performance_logic import allocate_to_highest_performance
+from optimization.cascading_logic import build_lockout_mask
 from ..reporting.container_tracer import add_detailed_carrier_flips_column, get_container_movement_summary
 
 # Re-export from new modules so existing imports keep working
@@ -192,10 +193,14 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
     avg_performance = data_with_rates['Performance_Score'].mean() if 'Performance_Score' in data_with_rates.columns else None
 
     # --- Performance scenario cost ---
-    performance_cost = _calc_performance_cost(scenario_data, carrier_facility_exclusions, rate_cols)
+    performance_cost = _calc_performance_cost(
+        scenario_data, carrier_facility_exclusions, rate_cols, max_constrained_carriers
+    )
 
     # --- Cheapest cost scenario ---
-    cheapest_cost = _calc_cheapest_cost(scenario_data, carrier_facility_exclusions, rate_cols)
+    cheapest_cost = _calc_cheapest_cost(
+        scenario_data, carrier_facility_exclusions, rate_cols, max_constrained_carriers
+    )
 
     # --- Optimized cost scenario ---
     optimized_cost = _calc_optimized_cost(
@@ -231,15 +236,22 @@ def calculate_enhanced_metrics(data, unconstrained_data=None, max_constrained_ca
 # calculate_enhanced_metrics helpers (private)
 # ---------------------------------------------------------------------------
 
-def _calc_performance_cost(scenario_data, carrier_facility_exclusions, rate_cols):
+def _calc_performance_cost(scenario_data, carrier_facility_exclusions, rate_cols,
+                           max_constrained_carriers=None):
     if 'Performance_Score' not in scenario_data.columns or len(scenario_data) == 0:
         return None
     try:
         carrier_col = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in scenario_data.columns else 'Carrier'
         filtered = filter_excluded_carrier_facility_rows(scenario_data.copy(), carrier_facility_exclusions, carrier_col)
+        # Lockout: bar locked-out carriers from winning the performance pick so the
+        # cost card matches the detailed table (volume stays, reassigned elsewhere).
+        lockout_mask = build_lockout_mask(
+            filtered, max_constrained_carriers, carrier_column=carrier_col
+        ) if max_constrained_carriers else None
         allocated = allocate_to_highest_performance(
             filtered, carrier_column=carrier_col, container_column='Container Count',
             performance_column='Performance_Score', container_numbers_column='Container Numbers',
+            excluded_mask=lockout_mask,
         )
         cost = allocated[rate_cols['total_rate']].sum() if rate_cols['total_rate'] in allocated.columns else None
         st.session_state['_cached_perf_allocated'] = allocated
@@ -248,7 +260,8 @@ def _calc_performance_cost(scenario_data, carrier_facility_exclusions, rate_cols
         return None
 
 
-def _calc_cheapest_cost(scenario_data, carrier_facility_exclusions, rate_cols):
+def _calc_cheapest_cost(scenario_data, carrier_facility_exclusions, rate_cols,
+                        max_constrained_carriers=None):
     if len(scenario_data) == 0:
         return None
     try:
@@ -261,7 +274,15 @@ def _calc_cheapest_cost(scenario_data, carrier_facility_exclusions, rate_cols):
         group_cols = [col for col in ['Category', 'Lane', 'Week Number'] if col in working.columns]
         if not group_cols:
             return None
-        working = working.sort_values(rate_cols['rate'], ascending=True)
+        # Lockout: locked-out carriers sort last so .first() never picks them, but
+        # their rows remain so the group container total still includes their volume.
+        if max_constrained_carriers:
+            working['_lockout_sort'] = build_lockout_mask(
+                working, max_constrained_carriers, carrier_column=carrier_col
+            ).astype(int)
+            working = working.sort_values(['_lockout_sort', rate_cols['rate']], ascending=[True, True])
+        else:
+            working = working.sort_values(rate_cols['rate'], ascending=True)
         cheapest_per_group = working.groupby(group_cols, as_index=False).first()
         if 'Container Numbers' in working.columns:
             cn_concat = (
@@ -400,6 +421,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
                 source, carrier_col, carrier_facility_exclusions,
                 has_constraints, constrained_data, metrics,
                 final_filtered_data, unconstrained_data,
+                max_constrained_carriers=max_constrained_carriers,
             )
             st.session_state[_cache_key] = {
                 'fingerprint': _data_fingerprint,
@@ -423,6 +445,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
             elif selected == 'Performance':
                 display_data, performance_reallocated, performance_groups_impacted = apply_performance_strategy(
                     display_data_with_rates, carrier_col, carrier_facility_exclusions,
+                    max_constrained_carriers=max_constrained_carriers,
                 )
 
             # Carrier Flips (common to non-cheapest strategies)

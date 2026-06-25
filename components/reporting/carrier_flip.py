@@ -844,16 +844,27 @@ def run_carrier_flip_analysis(tender_dfs=None, constrained_dfs=None,
             df_constrained['New Rate'] = df_constrained['New Rate'].apply(_parse_rate)
 
     # ---- Build container -> new carrier mapping ----
+    # A container can appear in BOTH the unconstrained allocation (where the
+    # optimizer is free to pick any carrier) and the constrained allocation (where
+    # a user constraint LOCKS it to a specific carrier). The constraint must win:
+    # tag each part with a source priority (constrained = 0, unconstrained = 1) and
+    # break the per-container dedup on that priority FIRST, so the carrier a
+    # constraint pinned the container to is the one the flip report reports.
     mapping_parts = []
-    if df_combined is not None:
-        mapping_parts.append(create_container_carrier_mapping(df_combined))
     if df_constrained is not None:
-        mapping_parts.append(create_container_carrier_mapping(df_constrained))
+        m = create_container_carrier_mapping(df_constrained)
+        m['_source_priority'] = 0  # constrained assignment — authoritative
+        mapping_parts.append(m)
+    if df_combined is not None:
+        m = create_container_carrier_mapping(df_combined)
+        m['_source_priority'] = 1  # unconstrained optimizer — yields to a constraint
+        mapping_parts.append(m)
     combined_mapping = pd.concat(mapping_parts, ignore_index=True) if mapping_parts else None
     if combined_mapping is not None and not combined_mapping.empty:
         combined_mapping = combined_mapping.sort_values(
-            'NEW SCAC', na_position='last'
+            ['_source_priority', 'NEW SCAC'], na_position='last'
         ).drop_duplicates(subset=['Container'], keep='first')
+        combined_mapping = combined_mapping.drop(columns=['_source_priority'])
 
     result['summary'] = df_final if not df_final.empty else None
     result['unconstrained'] = df_combined

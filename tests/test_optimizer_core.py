@@ -177,6 +177,21 @@ def test_constraint_impact_runs_and_reports_delta(blend_data, rate_data):
     assert out["current"]["total_cost"] == 4100.0
     assert "cost_delta" in out
     assert isinstance(out["constraint_summary"], list)
+    # Where the volume moves: EXPN is locked out, so it must shed volume (delta<0)
+    # and at least one other carrier must gain it. Total moved is reported.
+    movement = out["per_carrier_movement"]
+    assert isinstance(movement, list) and movement
+    by_carrier = {m["carrier"]: m for m in movement}
+    assert by_carrier["EXPN"]["new_containers"] == 0
+    assert by_carrier["EXPN"]["delta"] < 0          # EXPN sheds its volume
+    assert any(m["delta"] > 0 for m in movement)    # someone picks it up
+    # Each movement row carries current/new counts and a name.
+    assert all({"current_containers", "new_containers", "delta", "name"} <= set(m)
+               for m in movement)
+    assert out["containers_reallocated"] > 0
+    # JSON-serializable (goes back to Bedrock as a tool result).
+    import json
+    assert json.dumps(out["per_carrier_movement"])
 
 
 def test_constraint_impact_no_constraints(blend_data):

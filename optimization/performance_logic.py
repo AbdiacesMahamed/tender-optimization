@@ -42,6 +42,7 @@ def allocate_to_highest_performance(
     container_column: str = "Container Count",
     performance_column: str = "Performance_Score",
     container_numbers_column: str = "Container Numbers",
+    excluded_mask: "pd.Series | None" = None,
 ) -> pd.DataFrame:
     """Allocate all volume for each lane/week/category to the top-performing carrier.
 
@@ -94,9 +95,22 @@ def allocate_to_highest_performance(
     if container_numbers_column in working.columns:
         working[container_numbers_column] = working[container_numbers_column].fillna("")
 
+    # Lockout: a locked-out carrier must never be SELECTED as a group's winner, but
+    # its containers still count toward the group total (volume is conserved, it just
+    # flows to an allowed carrier). We make this the primary sort key so locked rows
+    # always sort last and lose the per-group head(1) pick — unless every carrier in
+    # the group is locked, in which case the group falls back to its best locked
+    # carrier rather than vanishing.
+    sort_columns: List[str] = []
+    ascending_flags: List[bool] = []
+    if excluded_mask is not None:
+        working["__lockout_sort"] = excluded_mask.reindex(working.index, fill_value=False).astype(int)
+        sort_columns.append("__lockout_sort")  # 0 (allowed) sorts before 1 (locked)
+        ascending_flags.append(True)
+
     # Sorting helpers for tie-breaking: higher performance first, then lower cost/rate if available.
-    sort_columns: List[str] = ["__perf_sort"]
-    ascending_flags: List[bool] = [False]
+    sort_columns.append("__perf_sort")
+    ascending_flags.append(False)
     working["__perf_sort"] = working[performance_column].fillna(float("-inf"))
 
     if "Total Rate" in working.columns:
@@ -197,6 +211,7 @@ def allocate_to_highest_performance(
 
     # Clean helper columns and preserve original ordering.
     helper_columns = {
+        "__lockout_sort",
         "__perf_sort",
         "__cost_sort",
         "__rate_sort",

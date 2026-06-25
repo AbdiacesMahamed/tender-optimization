@@ -170,8 +170,29 @@ def main():
     # Apply peel pile allocations as constraints (from session state)
     # This must happen after constraint file processing but before metrics calculation
     if st.session_state.get('peel_pile_allocations'):
+        # Build the scoped-max ceilings from any uploaded file constraints so the peel
+        # pile honors the SAME caps (e.g. a file rule "RKNE max 40 on VIENNA EXPRESS"
+        # must not be busted by peel-pile-assigning that vessel to RKNE). Ceilings are
+        # indexed against unconstrained_data (the rows peel pile can still move) and
+        # pre-credited with whatever the file pass already locked into constrained_data.
+        from components.constraints.processor import compute_scoped_max_ceilings, credit_ceilings
+        pp_ceilings = []
+        if constraints_df is not None and len(constraints_df) > 0:
+            pp_ceilings = compute_scoped_max_ceilings(constraints_df, unconstrained_data)
+            # Pre-credit caps with file-constrained volume already assigned to the carrier.
+            if len(constrained_data) > 0:
+                _cc = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in constrained_data.columns else 'Carrier'
+                for c in pp_ceilings:
+                    locked = constrained_data[
+                        constrained_data[_cc].astype(str).str.strip().str.upper()
+                        == str(c['carrier']).strip().upper()
+                    ]
+                    if len(locked):
+                        c['allocated'] += int(locked['Container Count'].sum())
+
         constrained_data, unconstrained_data, constraint_summary, peel_pile_carriers = apply_peel_pile_as_constraints(
-            final_filtered_data, constrained_data, unconstrained_data, constraint_summary
+            final_filtered_data, constrained_data, unconstrained_data, constraint_summary,
+            scoped_max_ceilings=pp_ceilings,
         )
         # Add peel pile carriers to the max_constrained list so optimization doesn't reassign them
         # Peel pile carriers are global (no scope filters)

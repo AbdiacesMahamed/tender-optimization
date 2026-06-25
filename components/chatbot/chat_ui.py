@@ -562,8 +562,49 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
 
 # ==================== rendering ====================
 
-def _render_staged_panel():
-    """Editable table of staged constraints + Apply / Download / Clear actions."""
+def _render_volume_movement(impact: dict):
+    """Render a preview_optimization result: cost delta + where the volume moves.
+
+    Shows the headline cost/performance change and a per-carrier table of how many
+    containers each carrier sheds (−) or gains (+) under the staged constraints, so
+    the user sees the simulation's effect on the carrier mix before applying.
+    """
+    if not isinstance(impact, dict) or impact.get("error"):
+        st.warning(impact.get("error", "Could not preview the impact.")
+                   if isinstance(impact, dict) else "Could not preview the impact.")
+        return
+    delta = impact.get("cost_delta")
+    pct = impact.get("cost_delta_pct")
+    realloc = impact.get("containers_reallocated", 0)
+    if delta is not None:
+        arrow = "↓ cheaper" if (impact.get("cheaper") and delta < 0) else (
+            "↑ costlier" if delta > 0 else "no cost change")
+        pct_txt = f" ({pct:+.1f}%)" if pct is not None else ""
+        st.markdown(f"**Cost impact:** ${delta:+,.0f}{pct_txt} — {arrow}")
+    st.caption(f"{realloc} container(s) shift between carriers under these constraints.")
+
+    movement = [m for m in (impact.get("per_carrier_movement") or []) if m.get("delta")]
+    if movement:
+        move_df = pd.DataFrame([
+            {"Carrier": m["carrier"], "Name": m.get("name", ""),
+             "Now": m["current_containers"], "After": m["new_containers"],
+             "Δ": m["delta"]}
+            for m in movement
+        ])
+        st.dataframe(move_df, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No carrier-level volume movement (constraints don't reroute volume).")
+
+
+def _render_staged_panel(df=None, rate_data=None, rate_type="Base Rate"):
+    """Editable table of staged constraints + Preview / Apply / Download / Clear.
+
+    ``df``/``rate_data`` (and the live optimizer weights from session state) power
+    the "Preview impact" button, which runs the staged set through the real
+    optimizer and shows where the volume would move — the same numbers the
+    preview_optimization tool produces — so the user can vet a proposal before
+    applying it.
+    """
     staged = st.session_state.get("chatbot_staged_constraints") or []
     if not staged:
         return
@@ -599,6 +640,7 @@ def _render_staged_panel():
                 st.error("No valid constraints to apply. Fix the issues above first.")
             else:
                 st.session_state.chatbot_applied_constraints = applicable
+                st.session_state.pop("chatbot_impact_preview", None)
                 st.success(f"Applied {len(applicable)} constraint(s). Recalculating…")
                 st.rerun()
     with col2:
@@ -614,8 +656,26 @@ def _render_staged_panel():
             key="chatbot_download",
         )
 
+    # Preview impact: simulate the staged set through the real optimizer and show
+    # where the volume moves BEFORE the user commits with Apply. Stash the result
+    # in session state so it survives the fragment rerun and renders below.
+    if st.button("🔍 Preview impact", use_container_width=True, key="chatbot_preview_impact"):
+        ss = st.session_state
+        cw = float(ss.get("opt_cost_weight", 70)) / 100.0
+        pw = float(ss.get("opt_performance_weight", 30)) / 100.0
+        mg = float(ss.get("opt_max_growth_pct", 30)) / 100.0
+        ss.chatbot_impact_preview = T.preview_optimization(
+            df, staged, rate_data, cw, pw, mg, historical_data=df,
+        )
+        st.rerun()
+
+    if st.session_state.get("chatbot_impact_preview") is not None:
+        st.markdown("**📊 Simulated impact — where the volume moves**")
+        _render_volume_movement(st.session_state.chatbot_impact_preview)
+
     if st.button("🗑️ Clear proposals", use_container_width=True, key="chatbot_clear_staged"):
         st.session_state.chatbot_staged_constraints = []
+        st.session_state.pop("chatbot_impact_preview", None)
         st.rerun()
 
     if st.session_state.get("chatbot_applied_constraints"):
@@ -730,18 +790,25 @@ def _typing_indicator_html(label: str = "Thinking") -> str:
 """
 
 
-def _render_tool_activity(name, tool_input, result, is_error, parent=None):
+def _render_tool_activity(name, tool_input, result, is_error, parent=None,
+                          duration_ms=None, reasoning=None):
     """Render one tool call (its inputs + result) as a collapsible expander.
 
     Used both live (as a ``tool_result`` event streams in, into the assistant's
     ``parent`` container) and on replay (from the persisted transcript), so the
     rendering stays identical. The expander is collapsed by default to keep the
-    narrow sidebar readable; the planner opens it to see the raw tool result.
+    narrow sidebar readable; the planner opens it to see the model's reasoning
+    for the call, the raw inputs, and the result. The header carries the tool's
+    run time so the planner can spot a slow step at a glance.
     """
     target = parent if parent is not None else st
     label = _TOOL_LABELS.get(name, name)
     icon = "⚠️" if is_error else "🔧"
-    with target.expander(f"{icon} {label}", expanded=False):
+    timing = f"  ·  {duration_ms/1000:.1f}s" if duration_ms is not None else ""
+    with target.expander(f"{icon} {label}{timing}", expanded=False):
+        if reasoning:
+            st.caption("Reasoning")
+            st.markdown(f"> {reasoning}")
         if tool_input:
             st.caption("Input")
             st.json(tool_input, expanded=False)
@@ -908,15 +975,21 @@ def _handle_user_message(user_text: str, df, rate_data=None, rate_type="Base Rat
                         "input": event.get("input") or {},
                         "result": event.get("result"),
                         "is_error": event.get("is_error", False),
+                        "duration_ms": event.get("duration_ms"),
+                        "reasoning": event.get("reasoning"),
                     }
                     tool_activity.append(activity)
                     exec_log.log_tool(
                         activity["name"], activity["input"],
                         activity["result"], activity["is_error"],
+                        duration_ms=activity["duration_ms"],
+                        reasoning=activity["reasoning"],
                     )
                     _render_tool_activity(
                         activity["name"], activity["input"], activity["result"],
                         activity["is_error"], parent=tools_area,
+                        duration_ms=activity["duration_ms"],
+                        reasoning=activity["reasoning"],
                     )
                     # Tool done — the model usually thinks again before the next
                     # text/tool, so keep the dots up to cover that gap.
@@ -1054,6 +1127,8 @@ def _chat_panel(comprehensive_data, rate_data, rate_type, constraints_file):
                 _render_tool_activity(
                     activity.get("name"), activity.get("input") or {},
                     activity.get("result"), activity.get("is_error", False),
+                    duration_ms=activity.get("duration_ms"),
+                    reasoning=activity.get("reasoning"),
                 )
             st.markdown(msg["text"])
             if i == last_assistant_idx and msg.get("followups"):
@@ -1063,8 +1138,8 @@ def _chat_panel(comprehensive_data, rate_data, rate_type, constraints_file):
     if not ss.chatbot_display:
         _render_followup_pills(_STARTER_PROMPTS, key_prefix="starter")
 
-    # Proposed-constraints review panel.
-    _render_staged_panel()
+    # Proposed-constraints review panel (Preview impact needs the data + rates).
+    _render_staged_panel(comprehensive_data, rate_data, rate_type)
 
     # Downloadable analysis report (Excel / Word), if one was generated.
     _render_report_downloads()
