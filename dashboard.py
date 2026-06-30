@@ -4,10 +4,30 @@ Main application file that orchestrates all components
 """
 
 # Import necessary libraries
+import logging
+import sys
+import traceback
+
 import pandas as pd
 import streamlit as st
 
-# Import diagnostic tool
+# ---------------------------------------------------------------------------
+# Logging / crash visibility
+# ---------------------------------------------------------------------------
+# A Streamlit script run that raises an uncaught exception dies silently from the
+# browser's point of view, and on hosted platforms the only outward sign is the
+# health checker losing its connection ("Get .../healthz: connection reset by
+# peer"). That message says NOTHING about the real cause. To make failures
+# diagnosable we (1) configure logging to stderr so the full traceback lands in
+# the platform's log panel (Streamlit Cloud "Manage app" -> logs), and (2) wrap
+# main() in a guard that logs the traceback AND renders it in the UI, so the next
+# time something breaks we see WHAT broke instead of a reset socket.
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("tender_dashboard")
 
 
 # Import all dashboard components
@@ -362,5 +382,33 @@ def main():
     # Footer
     show_footer()
 
+def _run_with_crash_guard():
+    """Run main(), but surface any uncaught exception instead of dying silently.
+
+    Without this, an exception inside main() (e.g. a pyarrow serialization error
+    while rendering a table) terminates the script run with no browser-visible
+    message — the only external symptom is the hosted health checker's
+    "/healthz: connection reset by peer". Here we log the full traceback to
+    stderr (-> platform log panel) and also render it in the app, so the actual
+    failure is diagnosable from either side.
+    """
+    try:
+        main()
+    except Exception:  # noqa: BLE001 — top-level guard, must catch everything
+        tb = traceback.format_exc()
+        logger.exception("Dashboard run failed with an uncaught exception")
+        try:
+            st.error(
+                "⚠️ The dashboard hit an unexpected error and stopped rendering. "
+                "The full traceback is below (and in the app logs). Share it to "
+                "get this fixed."
+            )
+            st.code(tb, language="text")
+        except Exception:
+            # If even Streamlit rendering is unavailable, the stderr log above is
+            # still the record of what happened.
+            pass
+
+
 if __name__ == "__main__":
-    main()
+    _run_with_crash_guard()
