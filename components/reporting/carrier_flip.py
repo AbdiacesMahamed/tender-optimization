@@ -1088,14 +1088,48 @@ def show_carrier_flip_report(in_app_gvt=None, in_app_rate=None):
         )
         return
 
-    with st.spinner("🔁 Building carrier flip report..."):
-        results = run_carrier_flip_analysis(
-            tender_dfs=tender_dfs,
-            constrained_dfs=constrained_dfs,
-            gvt_df=gvt_df,
-            rates_df=rates_df,
-            port_dup_df=port_dup_df,
+    # Stage breadcrumbs + isolation. This section does the heaviest per-container
+    # work in the app (explode to one row per container, then a row-wise rate-card
+    # lookup), so it is the most likely place to run out of memory on a large GVT.
+    # An OOM is a SIGKILL with no traceback, so we log a breadcrumb (with memory,
+    # if psutil is present) right before the heavy call — if the process dies, the
+    # logs show it died HERE and how big the input was. A Python-level failure is
+    # caught and shown inline so it degrades to a message instead of taking down
+    # the whole dashboard render.
+    def _mem():
+        try:
+            import psutil
+            return f"  (RSS {psutil.Process().memory_info().rss / (1024*1024):.0f} MB)"
+        except Exception:
+            return ""
+
+    gvt_rows = 0 if gvt_df is None else len(gvt_df)
+    logger.info("carrier flip: starting analysis (gvt_rows=%s, tender_frames=%s, "
+                "constrained_frames=%s)%s", gvt_rows, len(tender_dfs),
+                len(constrained_dfs), _mem())
+    try:
+        with st.spinner("🔁 Building carrier flip report..."):
+            results = run_carrier_flip_analysis(
+                tender_dfs=tender_dfs,
+                constrained_dfs=constrained_dfs,
+                gvt_df=gvt_df,
+                rates_df=rates_df,
+                port_dup_df=port_dup_df,
+            )
+        logger.info("carrier flip: analysis complete%s", _mem())
+    except MemoryError:
+        logger.exception("carrier flip: ran out of memory building the report "
+                         "(gvt_rows=%s)", gvt_rows)
+        st.error(
+            f"⚠️ The carrier flip report ran out of memory while processing "
+            f"{gvt_rows:,} GVT rows. Try narrowing the dashboard filters (a port, "
+            f"facility, or week) to shrink the data before this section runs."
         )
+        return
+    except Exception as e:  # noqa: BLE001 — isolate: a flip failure must not kill the page
+        logger.exception("carrier flip: analysis failed")
+        st.error(f"⚠️ The carrier flip report hit an error and was skipped: {e}")
+        return
 
     # ---- Summary metrics ----
     stats = results.get('stats', {})
