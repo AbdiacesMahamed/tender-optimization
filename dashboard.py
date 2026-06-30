@@ -8,10 +8,8 @@ import logging
 import pandas as pd
 import streamlit as st
 
-# Module logger. Used by the lead-time-lock skip path and the isolated
-# render guards around the bottom analysis panels. Defined here because
-# dashboard.py references `logger` but never imported logging before — on
-# historical data the lead-time skip branch would otherwise raise NameError.
+# Module logger. Used by the isolated render guards around the bottom analysis
+# panels (see show_historic_volume_analysis / show_carrier_flip_report below).
 logger = logging.getLogger(__name__)
 
 # Import diagnostic tool
@@ -240,34 +238,6 @@ def main():
             st.warning("⚠️ Constraints file could not be processed")
         else:
             st.info("ℹ️ No constraints file uploaded - all data is unconstrained")
-
-        # ==================== LEAD-TIME ALLOCATION LOCK ====================
-        # Standing rule: a container within 3 days of its Ocean ETA (vessel
-        # arrival) can no longer be re-tendered — there isn't time to flip it. So
-        # freeze it on its current carrier by moving it out of the scenario-
-        # eligible (unconstrained) pool into the frozen (constrained) pool, which
-        # no scenario reallocates. Runs whether or not a constraints file was
-        # uploaded; volume is conserved.
-        from components.constraints.lead_time_lock import apply_lead_time_lock, LEAD_TIME_DAYS
-        _pre_unconstrained = len(unconstrained_data)
-        _cand_constrained, _cand_unconstrained, _locked = apply_lead_time_lock(
-            constrained_data, unconstrained_data
-        )
-        # GUARD: on historical data (all Ocean ETAs in the past) the lead-time rule
-        # would lock EVERY container, emptying the scenario pool so the optimizer has
-        # nothing to reallocate — the app then looks "broken" though it's working as
-        # coded. Only apply the lock when it leaves SOME volume free to optimize;
-        # otherwise skip it (the data is historical, where the rule is meaningless).
-        if _locked > 0 and len(_cand_unconstrained) > 0:
-            constrained_data, unconstrained_data = _cand_constrained, _cand_unconstrained
-            st.info(
-                f"🔒 **Lead-time lock:** {_locked:,} container(s) are within {LEAD_TIME_DAYS} "
-                f"days of their Ocean ETA, so their carrier is locked (no flips). These ship on "
-                "their current carrier and are excluded from optimization scenarios."
-            )
-        elif _locked > 0:
-            logger.info("lead-time lock skipped: would freeze all %s rows (historical data)",
-                        _pre_unconstrained)
 
     # ==================== PEEL PILE CONSTRAINTS ====================
     # Apply peel pile allocations as constraints (from session state)
