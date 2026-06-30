@@ -120,8 +120,52 @@ from components.chatbot import show_chatbot_sidebar, get_applied_constraints_df
 # Import optimization module for historic volume analysis
 from optimization import show_historic_volume_analysis
 
+
+# ===========================================================================
+# FEATURE FLAGS — turn sections of the app on/off to isolate what crashes.
+# ===========================================================================
+# The app was dying on load with no traceback (an out-of-memory SIGKILL on the
+# hosted tier). To find the culprit empirically, every heavy/optional section is
+# behind a flag here. With all the heavy ones OFF, only the lightweight core runs
+# (load files -> merge -> filters -> selection summary), which should ALWAYS
+# load. Re-enable one flag at a time (flip to True, commit, redeploy) and watch
+# which one brings the crash back — that names the offender.
+#
+# Each flag can also be overridden at runtime via Streamlit secrets WITHOUT a code
+# change: add a [features] section in the app's Secrets, e.g.
+#     [features]
+#     metrics_and_table = true
+# so you can toggle from the Streamlit Cloud UI. Code defaults below win only when
+# a secret isn't set.
+_FEATURE_DEFAULTS = {
+    "performance_assignments": False,  # performance score assignments table
+    "chatbot_sidebar":         False,  # Bedrock AI assistant (network + analysis)
+    "constraints":             False,  # constraint file/AI/peel-pile processing
+    "metrics_and_table":       False,  # cost cards + Detailed Analysis Table (LP scenarios)
+    "historic_volume":         False,  # historic volume analysis section
+    "carrier_flip":            False,  # carrier flip report (heaviest: per-container explode)
+}
+
+
+def _features() -> dict:
+    """Resolve feature flags: code defaults, overridden by [features] in secrets."""
+    flags = dict(_FEATURE_DEFAULTS)
+    try:
+        secret_features = st.secrets.get("features", {})  # type: ignore[attr-defined]
+        for k, v in dict(secret_features).items():
+            if k in flags:
+                flags[k] = bool(v)
+    except Exception:
+        # No secrets configured / not running on a platform with secrets — fine.
+        pass
+    return flags
+
+
 def main():
     """Main dashboard application"""
+    FEATURES = _features()
+    logger.info("feature flags: %s",
+                ", ".join(f"{k}={'on' if v else 'off'}" for k, v in FEATURES.items()))
     
     # Configure page and apply styling
     configure_page()
@@ -185,8 +229,9 @@ def main():
         )
     
     # Show performance assignments table
-    show_performance_assignments_table()
-    
+    if FEATURES["performance_assignments"]:
+        show_performance_assignments_table()
+
     _stage(f"data merged ({len(merged_data):,} rows)")
 
     with st.spinner('📊 Creating comprehensive data view...'):
@@ -198,8 +243,10 @@ def main():
     # price moves to carriers not currently on a lane. Pass the uploaded constraint
     # file so the assistant edits the user's actual constraints. rate_type defaults
     # from the selector's session-state value (set on the previous run).
-    show_chatbot_sidebar(comprehensive_data, rate_data=Ratedata,
-                         constraints_file=constraints_file)
+    if FEATURES["chatbot_sidebar"]:
+        show_chatbot_sidebar(comprehensive_data, rate_data=Ratedata,
+                             constraints_file=constraints_file)
+    _stage("chatbot sidebar done")
 
     # Show rate type selector (Base Rate vs CPC)
     show_rate_type_selector(comprehensive_data)
@@ -213,17 +260,19 @@ def main():
     # Show selection summary
     show_selection_summary(display_ports, display_fcs, display_weeks, display_scacs, final_filtered_data)
     
-    # Process and apply constraints if file is uploaded
-    with st.spinner('🔒 Processing constraints...'):
-        constraints_df = None
-        constrained_data = pd.DataFrame()
-        unconstrained_data = final_filtered_data.copy()
-        constraint_summary = []
-        max_constrained_carriers = []  # Carriers with maximum constraints (scoped)
-        carrier_facility_exclusions = {}  # Carrier+facility exclusions
-        
-        explanation_logs = []  # For downloadable constraint explanations
+    # Safe defaults so the rest of main() works whether or not constraints run.
+    # (When the constraints feature is OFF, everything is "unconstrained".)
+    constraints_df = None
+    constrained_data = pd.DataFrame()
+    unconstrained_data = final_filtered_data.copy()
+    constraint_summary = []
+    max_constrained_carriers = []  # Carriers with maximum constraints (scoped)
+    carrier_facility_exclusions = {}  # Carrier+facility exclusions
+    explanation_logs = []  # For downloadable constraint explanations
 
+    # Process and apply constraints if file is uploaded
+    if FEATURES["constraints"]:
+      with st.spinner('🔒 Processing constraints...'):
         # The assistant seeds the uploaded constraint file into its working set, so
         # when the user clicks "Apply" in the chat panel the applied set ALREADY
         # contains the uploaded rows plus any edits/additions. In that case the
@@ -325,7 +374,7 @@ def main():
     # ==================== PEEL PILE CONSTRAINTS ====================
     # Apply peel pile allocations as constraints (from session state)
     # This must happen after constraint file processing but before metrics calculation
-    if st.session_state.get('peel_pile_allocations'):
+    if FEATURES["constraints"] and st.session_state.get('peel_pile_allocations'):
         # Build the scoped-max ceilings from any uploaded file constraints so the peel
         # pile honors the SAME caps (e.g. a file rule "RKNE max 40 on VIENNA EXPRESS"
         # must not be busted by peel-pile-assigning that vessel to RKNE). Ceilings are
@@ -379,55 +428,53 @@ def main():
         constrained_data = deduplicate_containers_per_lane_week(constrained_data)
     unconstrained_data = deduplicate_containers_per_lane_week(unconstrained_data)
     
-    # Calculate metrics on the FULL filtered data (before constraint split)
-    # Pass unconstrained_data so scenarios (Performance, Cheapest, Optimized) 
-    # only run on unconstrained containers when constraints are active
-    # Pass max_constrained_carriers so optimization knows which carriers have hard caps
-    # Pass carrier_facility_exclusions so scenarios respect facility-level exclusions
-    # Pass comprehensive_data as full_unfiltered_data so historical calculations are stable
-    _stage(f"constraints applied; computing metrics (filtered {len(final_filtered_data):,} rows, "
-           f"unconstrained {len(unconstrained_data):,})")
-    metrics = calculate_enhanced_metrics(final_filtered_data, unconstrained_data, max_constrained_carriers, carrier_facility_exclusions, comprehensive_data)
+    # ==================== METRICS + DETAILED ANALYSIS TABLE ====================
+    # The cost cards and the Detailed Analysis Table (which runs the optimization
+    # scenarios — the per-group allocation) are the main compute. Gated together.
+    if FEATURES["metrics_and_table"]:
+        # Calculate metrics on the FULL filtered data (before constraint split).
+        # Pass unconstrained_data so scenarios only run on unconstrained containers;
+        # max_constrained_carriers/exclusions so scenarios respect caps; and
+        # comprehensive_data as full history so growth calcs are stable.
+        _stage(f"computing metrics (filtered {len(final_filtered_data):,} rows, "
+               f"unconstrained {len(unconstrained_data):,})")
+        metrics = calculate_enhanced_metrics(final_filtered_data, unconstrained_data, max_constrained_carriers, carrier_facility_exclusions, comprehensive_data)
 
-    if metrics is None:
-        st.warning("⚠️ No data available after applying filters.")
-        return
-    _stage("metrics computed")
+        if metrics is None:
+            st.warning("⚠️ No data available after applying filters.")
+            return
+        _stage("metrics computed")
 
-    # Display cost analysis dashboard - pass constraint data for proper cost calculation
-    display_current_metrics(metrics, constrained_data, unconstrained_data)
-    
-    # Show detailed analysis table with constrained and unconstrained data
-    # Pass carrier_facility_exclusions so scenarios respect facility-level exclusions
-    # Pass comprehensive_data as full_unfiltered_data so historical calculations are stable
-    _stage("rendering detailed analysis table")
-    show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics, max_constrained_carriers, carrier_facility_exclusions, comprehensive_data)
-    _stage("detailed analysis table rendered")
-    
-    # 🔬 DIAGNOSTIC TOOL - Enable to debug container count discrepancies
+        # Display cost analysis dashboard - pass constraint data for proper cost calculation
+        display_current_metrics(metrics, constrained_data, unconstrained_data)
+
+        # Detailed analysis table with constrained and unconstrained data
+        _stage("rendering detailed analysis table")
+        show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics, max_constrained_carriers, carrier_facility_exclusions, comprehensive_data)
+        _stage("detailed analysis table rendered")
 
     # Advanced Analytics & Machine Learning and Interactive Visualizations are
     # hidden for now. Re-enable by uncommenting the two calls below.
     # show_advanced_analytics(final_filtered_data)
     # show_interactive_visualizations(final_filtered_data)
 
-    # Show historic volume analysis at the bottom (uses filtered data to match current view)
-    st.markdown("---")
-    show_historic_volume_analysis(final_filtered_data, n_weeks=5)
+    # ==================== HISTORIC VOLUME ANALYSIS ====================
+    if FEATURES["historic_volume"]:
+        st.markdown("---")
+        _stage("rendering historic volume analysis")
+        show_historic_volume_analysis(final_filtered_data, n_weeks=5)
+        _stage("historic volume analysis rendered")
 
-    # Carrier Flip Analysis — reuses the loaded per-container GVT and Rate data.
-    # The allocation it analyzes already reflects the active filters (it comes from the
-    # Detailed Analysis Table, which runs on final_filtered_data). The GVT, however, is
-    # the full per-container sheet, so filter it with the SAME active filters before
-    # handing it over — otherwise the flip report's GVT rows, match counts, and table
-    # would include containers outside the current view. GVT carries the exact columns
-    # the filters key on (Discharged Port, Facility, Week Number, Dray SCAC(FL)), so we
-    # reuse apply_filters_to_data to keep the filtering logic in one place.
-    st.markdown("---")
-    filtered_gvt, _, _, _, _ = apply_filters_to_data(GVTdata)
-    _stage(f"rendering carrier flip report ({len(filtered_gvt):,} GVT rows)")
-    show_carrier_flip_report(in_app_gvt=filtered_gvt, in_app_rate=Ratedata)
-    _stage("carrier flip report rendered")
+    # ==================== CARRIER FLIP ANALYSIS ====================
+    # Reuses the loaded per-container GVT + Rate data. The GVT is the full
+    # per-container sheet, so filter it with the SAME active filters before handing
+    # it over. This is the heaviest section (per-container explode + rate lookup).
+    if FEATURES["carrier_flip"]:
+        st.markdown("---")
+        filtered_gvt, _, _, _, _ = apply_filters_to_data(GVTdata)
+        _stage(f"rendering carrier flip report ({len(filtered_gvt):,} GVT rows)")
+        show_carrier_flip_report(in_app_gvt=filtered_gvt, in_app_rate=Ratedata)
+        _stage("carrier flip report rendered")
 
     # JBH Allocation Model — independent of the filters/flow above; takes its own
     # per-container Inbound Container Milestone upload and a port selection.
