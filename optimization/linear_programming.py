@@ -10,6 +10,8 @@ to carriers while minimizing a weighted objective function.
 """
 from __future__ import annotations
 
+import contextlib
+import os
 from typing import List, Tuple
 import pandas as pd
 import numpy as np
@@ -21,6 +23,38 @@ from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, value, PULP
 # which (a) floods the platform log panel so real errors/tracebacks are buried,
 # and (b) is pure noise. Build the silent solver once and reuse it for every solve.
 _CBC_SILENT = PULP_CBC_CMD(msg=False)
+
+
+@contextlib.contextmanager
+def _suppress_solver_output():
+    """Redirect the OS-level stdout/stderr file descriptors to /dev/null.
+
+    Belt-and-suspenders over ``msg=False``: CBC is an external binary that writes
+    its banner straight to file descriptors 1/2, which PuLP's ``msg`` flag does
+    not always intercept (it varies by PuLP/CBC build and platform — which is why
+    the banner can still flood a hosted log even with msg disabled). Redirecting
+    the fds themselves catches it regardless. Restores the originals afterward, so
+    our own logging is unaffected. Best-effort: if fd dup isn't available, the
+    solve still runs (just possibly noisier).
+    """
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+    except Exception:
+        yield
+        return
+    saved_out, saved_err = os.dup(1), os.dup(2)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        for fd in (devnull, saved_out, saved_err):
+            try:
+                os.close(fd)
+            except Exception:
+                pass
 
 
 # Default grouping columns for optimization
@@ -316,8 +350,11 @@ def _optimize_single_group(
     # Constraint: all containers must be allocated
     prob += lpSum([allocation_vars[carrier] for carrier in carriers]) == total_containers
     
-    # Solve the problem (silent CBC — no per-solve solver banner in the logs)
-    prob.solve(_CBC_SILENT)
+    # Solve the problem (silent CBC — no per-solve solver banner in the logs).
+    # msg=False suppresses it at the PuLP layer; the fd redirect catches anything
+    # the CBC binary writes straight to stdout/stderr regardless of platform.
+    with _suppress_solver_output():
+        prob.solve(_CBC_SILENT)
     
     # Check if solution is optimal
     if LpStatus[prob.status] != "Optimal":
