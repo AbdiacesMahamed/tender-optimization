@@ -1,10 +1,17 @@
-streamlit==1.44.0
-pandas==2.2.3
-numpy==1.26.4
-openpyxl==3.1.5
-python-docx==1.2.0
-pulp==2.9.0
-scikit-learn==1.5.2
-plotly==5.24.1
+# Streamlit Community Cloud installs these on Python 3.13 (its current default).
+# numpy 1.26.4 has NO cp313 wheel, so pip/uv tried to build it from source on
+# deploy and failed — which crashed the app at boot with "Oh no. Error running
+# app." at EVERY commit (the failure was the dependency install, not the code).
+# Use floors that ship prebuilt cp313 wheels and are mutually compatible
+# (pandas 2.2.3 + scikit-learn 1.5.x both support numpy 2.x). Verified the app
+# runs on numpy 2.x / pandas 2.x locally.
+streamlit>=1.44.0
+pandas>=2.2.3
+numpy>=2.1.0
+openpyxl>=3.1.5
+python-docx>=1.2.0
+pulp>=2.9.0
+scikit-learn>=1.5.2
+plotly>=5.24.1
 boto3>=1.34.0
 python-dotenv>=1.0.0
