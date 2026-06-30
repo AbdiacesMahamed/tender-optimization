@@ -50,3 +50,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Playwright deployment-check artifacts
+deployment_screenshot*.png

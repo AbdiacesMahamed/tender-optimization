@@ -395,6 +395,48 @@ def st_dataframe_safe(df, *args, **kwargs):
     return st.dataframe(arrow_safe(df), *args, **kwargs)
 
 
+_ARROW_GUARD_INSTALLED = False
+
+
+def install_arrow_safe_guard() -> None:
+    """Globally wrap ``st.dataframe``/``st.data_editor``/``st.table`` so EVERY
+    render is Arrow-safe — current call sites and any added later.
+
+    A single mixed-type ``object`` column (e.g. the GVT ``Carp Appointment`` field,
+    which holds some ints and some blank/text cells) makes pyarrow raise
+    ``ArrowTypeError`` inside Streamlit, which kills the whole script run and shows
+    "Oh no. Error running app." on Streamlit Cloud. :func:`arrow_safe` fixes such
+    frames, but it has to be applied at the render site — and missing even ONE site
+    crashes the app. Rather than hand-wrap ~40 ``st.dataframe`` calls (and risk new
+    ones regressing), patch the Streamlit functions once at startup so the first
+    positional/``data`` arg is always coerced first.
+
+    Idempotent: safe to call more than once (only patches on the first call).
+    """
+    global _ARROW_GUARD_INSTALLED
+    if _ARROW_GUARD_INSTALLED:
+        return
+
+    def _wrap(orig):
+        def _safe(data=None, *args, **kwargs):
+            try:
+                data = arrow_safe(data)
+            except Exception:
+                # arrow_safe is best-effort; never let the guard itself break a render.
+                pass
+            return orig(data, *args, **kwargs)
+        _safe.__name__ = getattr(orig, "__name__", "st_render")
+        _safe.__wrapped__ = orig
+        return _safe
+
+    for _name in ("dataframe", "data_editor", "table"):
+        _orig = getattr(st, _name, None)
+        if callable(_orig) and not hasattr(_orig, "__wrapped__"):
+            setattr(st, _name, _wrap(_orig))
+
+    _ARROW_GUARD_INSTALLED = True
+
+
 # ==================== VALUE FORMATTING UTILITIES ====================
 
 def safe_numeric(value: Any) -> float:

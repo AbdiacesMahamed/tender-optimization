@@ -69,7 +69,15 @@ from optimization import show_historic_volume_analysis
 
 def main():
     """Main dashboard application"""
-    
+
+    # Make EVERY st.dataframe/data_editor/table render Arrow-safe before anything
+    # else runs. A mixed-type object column (e.g. the GVT 'Carp Appointment' field)
+    # otherwise raises pyarrow.ArrowTypeError mid-render, which crashes the whole
+    # app with "Oh no. Error running app." on Streamlit Cloud. Installed here so it
+    # covers all render sites, including any added later. Idempotent.
+    from components.core.utils import install_arrow_safe_guard
+    install_arrow_safe_guard()
+
     # Configure page and apply styling
     configure_page()
     apply_custom_css()
