@@ -180,11 +180,19 @@ def _load_env() -> None:
     if bearer and not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
         os.environ["AWS_BEARER_TOKEN_BEDROCK"] = bearer.strip()
 
-    # SigV4 fallback: the .env uses non-standard capitalization.
-    if not os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_accessKeyId"):
-        os.environ["AWS_ACCESS_KEY_ID"] = os.environ["AWS_accessKeyId"].strip()
-    if not os.environ.get("AWS_SECRET_ACCESS_KEY") and os.environ.get("AWS_secretAccessKey"):
-        os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ["AWS_secretAccessKey"].strip()
+    # SigV4 fallback: the .env / secrets use non-standard capitalization. When
+    # our project keys are present they are the INTENDED identity, so they must
+    # WIN over any ambient AWS_ACCESS_KEY_ID the host injected (e.g. Streamlit
+    # Cloud) — otherwise the ambient creds shadow ours and the call 400s with
+    # "UnrecognizedClientException". A long-term AKIA key is also invalid with a
+    # session token, so clear any stale ambient AWS_SESSION_TOKEN alongside it.
+    proj_access = os.environ.get("AWS_accessKeyId")
+    proj_secret = os.environ.get("AWS_secretAccessKey")
+    if proj_access and proj_secret:
+        os.environ["AWS_ACCESS_KEY_ID"] = proj_access.strip()
+        os.environ["AWS_SECRET_ACCESS_KEY"] = proj_secret.strip()
+        if os.environ["AWS_ACCESS_KEY_ID"].startswith("AKIA"):
+            os.environ.pop("AWS_SESSION_TOKEN", None)
 
     _ENV_LOADED = True
 
@@ -274,10 +282,12 @@ class BedrockChatClient:
         Auth precedence:
         1. BEDROCK_ROLE_ARN set -> assume the role via STS and use the temporary
            credentials (SigV4). This is the preferred path: short-lived creds.
-        2. Bearer-token auth is automatic when AWS_BEARER_TOKEN_BEDROCK is set
-           (and we're not forcing SigV4).
-        3. force_sigv4 with static access keys -> explicit v4-signed client so
-           botocore does not fall back to the (broken) bearer scheme.
+        2. force_sigv4 OR static access keys present (and no bearer token) ->
+           explicit v4-signed client built from OUR keys, so botocore does not
+           silently pick up ambient/stale host credentials.
+        3. Bearer-token auth (automatic when AWS_BEARER_TOKEN_BEDROCK is set and
+           we're not forcing SigV4).
+        4. Otherwise the default boto3 credential chain.
         """
         import boto3
         from botocore.config import Config
@@ -291,13 +301,28 @@ class BedrockChatClient:
                 **assumed,
             )
 
-        if force_sigv4 and self.has_sigv4:
+        # Use our explicit access keys whenever we have them and there is no
+        # bearer token to try first. On hosted platforms (e.g. Streamlit Cloud)
+        # the environment can carry an ambient AWS_ACCESS_KEY_ID and especially a
+        # STALE AWS_SESSION_TOKEN; letting the default chain run would sign with
+        # those and 400 with "UnrecognizedClientException: security token is
+        # invalid". A long-term AKIA key must NOT carry a session token, so we
+        # only forward one if the secret access key it pairs with is also a
+        # temporary credential (i.e. the caller explicitly set all three).
+        use_explicit_keys = self.has_sigv4 and (force_sigv4 or not self.has_bearer_token)
+        if use_explicit_keys:
+            access_key = os.environ.get("AWS_ACCESS_KEY_ID", "")
+            session_token = os.environ.get("AWS_SESSION_TOKEN") or None
+            # Static IAM user keys start with "AKIA" and are invalid with a
+            # session token. Drop any ambient token so it can't poison the call.
+            if access_key.startswith("AKIA"):
+                session_token = None
             return boto3.client(
                 "bedrock-runtime",
                 region_name=self.region,
-                aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+                aws_access_key_id=access_key,
                 aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-                aws_session_token=os.environ.get("AWS_SESSION_TOKEN"),
+                aws_session_token=session_token,
                 config=Config(signature_version="v4"),
             )
         return boto3.client("bedrock-runtime", region_name=self.region)
