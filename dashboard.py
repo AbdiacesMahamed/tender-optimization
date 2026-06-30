@@ -242,15 +242,25 @@ def main():
         # no scenario reallocates. Runs whether or not a constraints file was
         # uploaded; volume is conserved.
         from components.constraints.lead_time_lock import apply_lead_time_lock, LEAD_TIME_DAYS
-        constrained_data, unconstrained_data, _locked = apply_lead_time_lock(
+        _pre_unconstrained = len(unconstrained_data)
+        _cand_constrained, _cand_unconstrained, _locked = apply_lead_time_lock(
             constrained_data, unconstrained_data
         )
-        if _locked > 0:
+        # GUARD: on historical data (all Ocean ETAs in the past) the lead-time rule
+        # would lock EVERY container, emptying the scenario pool so the optimizer has
+        # nothing to reallocate — the app then looks "broken" though it's working as
+        # coded. Only apply the lock when it leaves SOME volume free to optimize;
+        # otherwise skip it (the data is historical, where the rule is meaningless).
+        if _locked > 0 and len(_cand_unconstrained) > 0:
+            constrained_data, unconstrained_data = _cand_constrained, _cand_unconstrained
             st.info(
                 f"🔒 **Lead-time lock:** {_locked:,} container(s) are within {LEAD_TIME_DAYS} "
                 f"days of their Ocean ETA, so their carrier is locked (no flips). These ship on "
                 "their current carrier and are excluded from optimization scenarios."
             )
+        elif _locked > 0:
+            logger.info("lead-time lock skipped: would freeze all %s rows (historical data)",
+                        _pre_unconstrained)
 
     # ==================== PEEL PILE CONSTRAINTS ====================
     # Apply peel pile allocations as constraints (from session state)
