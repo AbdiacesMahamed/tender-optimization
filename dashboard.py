@@ -141,8 +141,24 @@ def main():
     # price moves to carriers not currently on a lane. Pass the uploaded constraint
     # file so the assistant edits the user's actual constraints. rate_type defaults
     # from the selector's session-state value (set on the previous run).
-    show_chatbot_sidebar(comprehensive_data, rate_data=Ratedata,
-                         constraints_file=constraints_file)
+    #
+    # Isolated in try/except: the assistant depends on Bedrock credentials from
+    # st.secrets (Streamlit Cloud) / .env (local) and on st.fragment. If anything
+    # in that path raises on the hosted environment, it must NOT take down the
+    # whole dashboard with "Oh no. Error running app." — the core optimization
+    # works without the AI panel. Surface a small notice and carry on.
+    try:
+        show_chatbot_sidebar(comprehensive_data, rate_data=Ratedata,
+                             constraints_file=constraints_file)
+    except Exception:
+        logger.exception("AI assistant sidebar failed to render; continuing without it")
+        try:
+            st.sidebar.warning(
+                "🤖 The AI assistant is unavailable in this environment "
+                "(it needs Bedrock credentials). The rest of the dashboard works normally."
+            )
+        except Exception:
+            pass
 
     # Show rate type selector (Base Rate vs CPC)
     show_rate_type_selector(comprehensive_data)
