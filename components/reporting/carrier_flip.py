@@ -1088,6 +1088,28 @@ def show_carrier_flip_report(in_app_gvt=None, in_app_rate=None):
         )
         return
 
+    # GATE the heavy work behind an explicit button. This section does the most
+    # memory-intensive work in the app (explode the GVT to one row per container,
+    # then a row-wise rate-card lookup). Running it automatically on every page
+    # render means that if it exhausts memory, the host SIGKILLs the process and
+    # the WHOLE app dies on load — with no chance to even apply a filter first.
+    # Gating it means the dashboard always loads; the user opts in to the flip
+    # report when ready (after narrowing filters if the GVT is large). The choice
+    # persists for the session so normal reruns don't lose it, but it resets if
+    # the underlying allocation changes.
+    gvt_rows_est = 0 if gvt_df is None else len(gvt_df)
+    st.caption(
+        f"This report explodes ~{gvt_rows_est:,} GVT rows to one row per container "
+        "and looks up rate-card rates for each — the heaviest step in the app. "
+        "On a large dataset, narrow the filters above first."
+    )
+    if not st.session_state.get("run_flip_report", False):
+        if st.button("🔁 Build carrier flip report", key="flip_report_run_btn"):
+            st.session_state["run_flip_report"] = True
+            st.rerun()
+        st.info("Click **Build carrier flip report** to run this analysis.")
+        return
+
     # Stage breadcrumbs + isolation. This section does the heaviest per-container
     # work in the app (explode to one row per container, then a row-wise rate-card
     # lookup), so it is the most likely place to run out of memory on a large GVT.
