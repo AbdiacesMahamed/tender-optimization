@@ -36,7 +36,7 @@ from components.constraints.processor import apply_constraints_to_data  # noqa: 
 from components.constraints.pnw_vessel_rules import (  # noqa: E402
     enforce_one_vessel_per_carrier_across, check_one_vessel_per_carrier,
     enforce_per_vessel_cap_across, check_per_vessel_cap,
-    PER_VESSEL_MAX, HUNT_SCAC, HUNT_PORT, HUNT_WEEKLY_EXACT, PNW_PORTS,
+    PER_VESSEL_MAX, HUNT_SCAC, HUNT_PORT, HUNT_WEEKLY_MAX, PNW_PORTS,
 )
 
 DL = Path("C:/Users/maabdiac/Downloads")
@@ -111,8 +111,8 @@ def audit_file(label, gvt_path, sheet):
         if n: failures.append(f"Rule 0: {n} containers for banned carriers at {port}")
         print(f"    {port}: banned {banned} -> {n} containers  [{status}]")
 
-    # ---- Rule 1: HJBT exactly 130/wk at TIW (constrained side holds the locked vol) ----
-    print(f"\n  [Rule 1] {HUNT_SCAC} @ {HUNT_PORT}: cap {HUNT_WEEKLY_EXACT}/week")
+    # ---- Rule 1: HJBT up to 130/wk at TIW, allocated first (no hard floor) ----
+    print(f"\n  [Rule 1] {HUNT_SCAC} @ {HUNT_PORT}: cap {HUNT_WEEKLY_MAX}/week (allocated first)")
     hjbt = constrained[(constrained[CARRIER].astype(str).str.strip() == HUNT_SCAC)
                        & (constrained["Discharged Port"].astype(str).str.upper() == HUNT_PORT)]
     by_wk = hjbt.groupby("Week Number")["Container Count"].sum().astype(int)
@@ -121,10 +121,10 @@ def audit_file(label, gvt_path, sheet):
     avail_wk = avail.groupby("Week Number")["Container Count"].sum().astype(int)
     for wk in sorted(set(by_wk.index) | set(avail_wk.index)):
         got = int(by_wk.get(wk, 0)); av = int(avail_wk.get(wk, 0))
-        over = got > HUNT_WEEKLY_EXACT
-        note = "OVER CAP" if over else ("exact 130" if got == HUNT_WEEKLY_EXACT
-                                        else f"shortfall (only {av} avail)")
-        if over: failures.append(f"Rule 1: HJBT week {wk} = {got} > {HUNT_WEEKLY_EXACT}")
+        over = got > HUNT_WEEKLY_MAX
+        note = "OVER CAP" if over else ("at cap 130" if got == HUNT_WEEKLY_MAX
+                                        else f"under cap (only {av} avail)")
+        if over: failures.append(f"Rule 1: HJBT week {wk} = {got} > {HUNT_WEEKLY_MAX}")
         print(f"    week {wk}: allocated={got:4d}  available={av:4d}  [{note}]")
 
     # ---- Rule 2: no SCAC > 60 per vessel (PNW), across both tables ----

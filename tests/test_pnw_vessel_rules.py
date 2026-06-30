@@ -13,7 +13,7 @@ from components.constraints.pnw_vessel_rules import (
     check_one_vessel_per_carrier, enforce_one_vessel_per_carrier,
     enforce_one_vessel_per_carrier_across,
     check_per_vessel_cap, enforce_per_vessel_cap_across,
-    HUNT_SCAC, HUNT_PORT, HUNT_WEEKLY_EXACT, PER_VESSEL_MAX,
+    HUNT_SCAC, HUNT_PORT, HUNT_WEEKLY_MAX, PER_VESSEL_MAX,
 )
 from components.constraints.processor import (
     apply_constraints_to_data, expected_constraint_columns,
@@ -48,22 +48,22 @@ def _ids(prefix, n):
 # Rule 1 — Hunt exactly 130/week at Tacoma
 # ---------------------------------------------------------------------------
 
-def test_hunt_rows_one_min_one_max_per_tiw_week():
+def test_hunt_rows_one_max_per_tiw_week():
     data = pd.DataFrame([
         _alloc_row("HJBT", "VES A", "TIW", "2026-06-22", _ids("A", 5), week=26),
         _alloc_row("FRQT", "VES A", "TIW", "2026-06-29", _ids("B", 5), week=27),
         _alloc_row("HJBT", "VES C", "SEA", "2026-06-22", _ids("C", 5), week=26),  # SEA, ignored
     ])
     rows = build_hunt_weekly_rows(data)
-    # Weeks present at TIW: 26 and 27 -> 2 rows each (a min and a max).
-    assert len(rows) == 4
+    # Weeks present at TIW: 26 and 27 -> ONE Max-130 row each (no Min floor now:
+    # HJBT is capped at up to 130 and allocated first, not forced to exactly 130).
+    assert len(rows) == 2
     assert set(rows["Week Number"]) == {26, 27}
     assert (rows["Carrier"] == HUNT_SCAC).all()
     assert (rows["Port"] == HUNT_PORT).all()
-    maxes = rows[rows["Maximum Container Count"].notna()]
-    mins = rows[rows["Minimum Container Count"].notna()]
-    assert len(maxes) == 2 and (maxes["Maximum Container Count"] == HUNT_WEEKLY_EXACT).all()
-    assert len(mins) == 2 and (mins["Minimum Container Count"] == HUNT_WEEKLY_EXACT).all()
+    assert (rows["Maximum Container Count"] == HUNT_WEEKLY_MAX).all()
+    # No Minimum floor is emitted anymore.
+    assert rows["Minimum Container Count"].isna().all()
 
 
 def test_hunt_rows_empty_without_tiw_data():

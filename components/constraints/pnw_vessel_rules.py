@@ -9,11 +9,13 @@ express, so they are enforced as a deterministic POST-ALLOCATION pass.
 
 Rules implemented here
 ----------------------
-* **Rule 1** — JB Hunt (``HJBT``) must receive *exactly* 130 containers per week
-  at Tacoma (``TIW``): a per-week Min-130 AND Max-130. Realised by generating one
-  Min row and one Max row per ``Week Number`` present in the TIW data
-  (:func:`build_hunt_weekly_rows`). The existing constraint engine then enforces
-  each as a scoped floor/ceiling.
+* **Rule 1** — JB Hunt (``HJBT``) is capped at **up to 130 containers per week**
+  at Tacoma (``TIW``) and is allocated FIRST so it gets as close to 130 as the
+  available TIW volume allows. Realised by generating one Max-130 row per
+  ``Week Number`` present in the TIW data (:func:`build_hunt_weekly_rows`), tagged
+  at the always-on prebuilt priority so it claims volume ahead of user rules and
+  the scenario optimizer. There is NO Min floor: if a week has fewer than 130 TIW
+  containers, HJBT simply takes what's there (no shortfall is forced).
 * **Rule 2** — No SCAC may take more than 60 containers from any single vessel,
   at PNW ports. "Every carrier" is not expressible as a single constraint row
   (Max rows name one target carrier), so we generate one Max-60 row per
@@ -45,10 +47,12 @@ from .processor import expected_constraint_columns, resolve_port_filter
 #: Discharged-Port codes treated as PNW waterfront for the vessel rules.
 PNW_PORTS = ("SEA", "TIW")
 
-#: Rule 1 — JB Hunt SCAC, its port, and the exact weekly volume.
+#: Rule 1 — JB Hunt SCAC, its port, and the weekly CEILING. HJBT is allocated
+#: first (always-on prebuilt priority) and takes up to this many TIW containers
+#: per week — as close to 130 as the available volume allows, with no hard floor.
 HUNT_SCAC = "HJBT"
 HUNT_PORT = "TIW"
-HUNT_WEEKLY_EXACT = 130
+HUNT_WEEKLY_MAX = 130
 
 #: Rule 2 — per-vessel ceiling applied to every carrier at PNW ports.
 PER_VESSEL_MAX = 60
@@ -119,13 +123,18 @@ def _row_count(row) -> int:
 # ---------------------------------------------------------------------------
 
 def build_hunt_weekly_rows(data: pd.DataFrame) -> pd.DataFrame:
-    """Generate per-week Min-130 + Max-130 HJBT/TIW rows from the data's weeks.
+    """Generate one per-week Max-130 HJBT/TIW row from the data's weeks.
 
-    One Min row and one Max row per distinct ``Week Number`` that appears in the
-    Tacoma (``TIW``) slice of ``data``. Returns an empty (correctly-columned)
-    frame when there is no TIW data or no week column. The exact-130 semantic is
-    the Min and Max together: the Max caps the week at 130 and the Min reports a
-    shortfall when fewer than 130 are available (which the engine surfaces).
+    One Max row per distinct ``Week Number`` that appears in the Tacoma (``TIW``)
+    slice of ``data``. Returns an empty (correctly-columned) frame when there is
+    no TIW data or no week column.
+
+    Semantics: HJBT is **capped at up to 130/week** and, because the row carries
+    the always-on prebuilt priority (``GENERATED_PRIORITY``), it is allocated
+    FIRST — so it draws as close to 130 as the week's available TIW volume allows.
+    There is intentionally NO Min-130 floor: a week with fewer than 130 TIW
+    containers gives HJBT whatever is present rather than forcing/flagging a
+    shortfall. (Previously this emitted Min-130 + Max-130 = "exactly 130".)
     """
     cols = expected_constraint_columns()
     if data is None or len(data) == 0 or "Discharged Port" not in data.columns:
@@ -144,10 +153,8 @@ def build_hunt_weekly_rows(data: pd.DataFrame) -> pd.DataFrame:
         base = _blank_constraint_row()
         base.update({"Carrier": HUNT_SCAC, "Port": HUNT_PORT, "Week Number": wk,
                      "Priority Score": GENERATED_PRIORITY})
-        max_row = dict(base); max_row["Maximum Container Count"] = HUNT_WEEKLY_EXACT
-        min_row = dict(base); min_row["Minimum Container Count"] = HUNT_WEEKLY_EXACT
+        max_row = dict(base); max_row["Maximum Container Count"] = HUNT_WEEKLY_MAX
         rows.append(max_row)
-        rows.append(min_row)
     return pd.DataFrame(rows, columns=cols)
 
 

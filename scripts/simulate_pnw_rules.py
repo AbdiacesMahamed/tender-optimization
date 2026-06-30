@@ -41,7 +41,7 @@ from components.constraints.prebuilt import (  # noqa: E402
 from components.constraints.processor import apply_constraints_to_data  # noqa: E402
 from components.constraints.pnw_vessel_rules import (  # noqa: E402
     enforce_one_vessel_per_carrier_across, enforce_per_vessel_cap_across,
-    PER_VESSEL_MAX, HUNT_SCAC, HUNT_PORT, HUNT_WEEKLY_EXACT, PNW_PORTS,
+    PER_VESSEL_MAX, HUNT_SCAC, HUNT_PORT, HUNT_WEEKLY_MAX, PNW_PORTS,
     PORT_LOCKED_OUT_CARRIERS,
 )
 from config.carrier_mapping import get_carrier_name  # noqa: E402
@@ -160,7 +160,7 @@ def simulate(label, gvt_path, sheet):
             print(f"        {scac} @ {port}: {b} -> {final.get((port, scac), 0)}")
 
     # Rule 1 — Hunt 130/wk at TIW: show the weekly cap outcome (constrained side).
-    print(f"    Rule 1 (Hunt {HUNT_WEEKLY_EXACT}/wk @ {HUNT_PORT}):")
+    print(f"    Rule 1 (Hunt {HUNT_WEEKLY_MAX}/wk @ {HUNT_PORT}):")
     hjbt = constrained[(constrained[CARRIER].astype(str).str.strip() == HUNT_SCAC)
                        & (constrained["Discharged Port"].astype(str).str.upper() == HUNT_PORT)]
     avail = pnw0[(pnw0[CARRIER].astype(str).str.strip() == HUNT_SCAC)
@@ -169,7 +169,7 @@ def simulate(label, gvt_path, sheet):
     g_wk = hjbt.groupby("Week Number")[COUNT].sum().astype(int)
     for wk in sorted(set(a_wk.index) | set(g_wk.index)):
         got, av = int(g_wk.get(wk, 0)), int(a_wk.get(wk, 0))
-        note = ("locked at cap 130" if got == HUNT_WEEKLY_EXACT
+        note = ("locked at cap 130" if got == HUNT_WEEKLY_MAX
                 else f"short of 130 (only {av} available)")
         print(f"        week {int(wk):>2}: locked {got:4d} / available {av:4d}  ({note})")
 

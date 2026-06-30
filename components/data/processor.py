@@ -5,7 +5,7 @@ import pandas as pd
 import logging
 import streamlit as st
 from ..core.config_styling import section_header
-from ..core.utils import normalize_facility_series, excel_weekday_series
+from ..core.utils import normalize_facility_series, excel_weekday_series, parse_ocean_eta
 
 # Set up module logger — debug output goes to console only when DEBUG level is enabled
 logger = logging.getLogger(__name__)
@@ -41,8 +41,13 @@ def validate_and_process_gvt_data(GVTdata):
     if missing_columns:
         raise ValueError(f"Missing required columns in GVT data: {missing_columns}. Available columns: {list(GVTdata.columns)}")
 
-    # Calculate week number from Ocean ETA date - use inplace operations
-    GVTdata['Ocean ETA'] = pd.to_datetime(GVTdata['Ocean ETA'], errors='coerce')
+    # Parse Ocean ETA robustly. A plain pd.to_datetime(errors='coerce') reads a
+    # bare number as nanoseconds-since-1970, so Excel date serials (e.g. 45658)
+    # and 0/blank sentinels both collapse to ~1/1/1970 instead of the real date
+    # (or NaT). parse_ocean_eta handles real dates normally, converts Excel
+    # serials with the 1899-12-30 origin, and maps 0/tiny sentinels to NaT (so
+    # they're dropped below, not dated to 1970). See components/core/utils.py.
+    GVTdata['Ocean ETA'] = parse_ocean_eta(GVTdata['Ocean ETA'])
     
     # Exclude Canada market
     if 'Market' in GVTdata.columns:

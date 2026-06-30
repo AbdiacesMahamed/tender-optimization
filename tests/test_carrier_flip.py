@@ -536,5 +536,89 @@ class TestGvtPivot:
         assert 'GVT Pivot (Port x New SCAC)' in xl.sheet_names
 
 
+class TestNewRateResolves:
+    """Regression: the flip sheet's New Rate column came back blank while Old Rate
+    still resolved. Cause: when the GVT frame AND the tender mapping both carry a
+    'Lane' column, the merge renames them Lane_x/Lane_y (no plain 'Lane'). Old Rate
+    had a Port+Facility lane fallback; New Rate did not — so it got lane=None,
+    dropped to an ambiguous FC-only match, and found nothing on a realistic
+    multi-lane rate card. Note the existing pipeline tests pass a GVT frame WITHOUT
+    a Lane column, so they never hit the collision — hence this dedicated case."""
+
+    def _run(self, rates):
+        tender = pd.DataFrame({
+            'Container Numbers': ['C1', 'C2'], 'NEW SCAC': ['HJBT', 'FRQT'],
+            'Lane': ['USTIWOLM1', 'USTIWOLM1'], 'Discharged Port': ['TIW', 'TIW'],
+            'Week Number': [27, 27], 'Container Count': [1, 1],
+        })
+        gvt = pd.DataFrame({  # GVT ALSO has a Lane column -> triggers Lane_x/Lane_y
+            'Container Numbers': ['C1', 'C2'], 'Dray SCAC(FL)': ['ZZZZ', 'ZZZZ'],
+            'Lane': ['USTIWOLM1', 'USTIWOLM1'], 'Discharged Port': ['TIW', 'TIW'],
+            'Week Number': [27, 27], 'Facility': ['OLM1', 'OLM1'],
+        })
+        return cf.run_carrier_flip_analysis(
+            tender_dfs=[tender], constrained_dfs=[], gvt_df=gvt, rates_df=rates)
+
+    def test_new_rate_populates_with_multi_lane_card(self):
+        # HJBT/FRQT appear on MULTIPLE lanes -> the old FC-only fallback is
+        # ambiguous; only exact-lane resolution works.
+        rates = pd.DataFrame({
+            'Lookup': ['ZZZZUSTIWOLM1', 'HJBTUSTIWOLM1', 'HJBTUSSEAOLM1',
+                       'HJBTUSLAXOLM1', 'FRQTUSTIWOLM1', 'FRQTUSSEAOLM1'],
+            'Base Rate': [500, 420, 415, 600, 480, 470],
+        })
+        res = self._run(rates)
+        gm = res['gvt_merged']
+        assert 'New Rate' in gm.columns
+        assert gm['New Rate'].notna().all(), "New Rate should resolve for every flipped row"
+        assert res['stats']['new_rate_found'] == 2
+        # Exact-lane rates (420/480), not the wrong-lane SEA/LAX values.
+        assert set(gm['New Rate'].tolist()) == {420, 480}
+        assert res['stats']['total_savings'] == 100.0  # (500-420)+(500-480)
+
+    def test_lane_fc_resolver_handles_suffixed_and_missing(self):
+        # Lane_y present -> use it.
+        lane, fc = cf._resolve_lane_fc(
+            {'Lane_x': 'USTIWXXX', 'Lane_y': 'USTIWOLM1', 'FC': 'OLM1'})
+        assert lane == 'USTIWOLM1' and fc == 'OLM1'
+        # No lane column at all -> rebuild from Port + Facility (suffix stripped).
+        lane2, fc2 = cf._resolve_lane_fc(
+            {'Discharged Port': 'TIW', 'Facility': 'OLM1-S'})
+        assert lane2 == 'USTIWOLM1' and fc2 == 'OLM1'
+
+
+class TestPortAliasRateLookup:
+    """Strategy 1b: the GVT lane and the rate card can use different codes for the
+    same physical port (GVT 'EWR' vs rate card 'NYC', or 'LGB' vs 'LAX'). The exact
+    rate lookup must retry under the aliased port so a real rate isn't shown blank —
+    while NOT cross-matching genuinely different (non-aliased) ports."""
+
+    def test_ewr_lane_resolves_nyc_rate(self):
+        rate_map = {'ATMIUSNYCACY2': 430.0}  # rate card filed under NYC
+        rate, method = cf._lookup_rate_from_map('ATMI', 'USEWRACY2', 'ACY2', rate_map)
+        assert rate == 430.0
+        assert method in ('port-alias', 'fc')  # alias hit (or unambiguous FC)
+
+    def test_lgb_lane_resolves_lax_rate(self):
+        rate_map = {'FRQTUSLAXLGB8': 555.0}
+        rate, method = cf._lookup_rate_from_map('FRQT', 'USLGBLGB8', 'LGB8', rate_map)
+        assert rate == 555.0
+
+    def test_non_aliased_port_not_cross_matched(self):
+        # VIP and BAL are NOT aliases. A VIP lane must NOT borrow a BAL rate via the
+        # alias path. Here only a BAL key exists; with no VIP/alias entry and the FC
+        # appearing once, FC-fallback may still resolve — so assert it does NOT use
+        # 'port-alias' (the alias map must not treat VIP<->BAL as equivalent).
+        rate_map = {'ATMIUSBALBWI4': 560.0, 'ATMIUSBWIBWI4': 560.0}
+        rate, method = cf._lookup_rate_from_map('ATMI', 'USVIPBWI4', 'BWI4', rate_map)
+        assert method != 'port-alias', "VIP must not be aliased to BAL/BWI"
+
+    def test_exact_still_wins_over_alias(self):
+        # When the exact key exists, it should be used directly (method 'exact').
+        rate_map = {'ATMIUSEWRACY2': 430.0, 'ATMIUSNYCACY2': 999.0}
+        rate, method = cf._lookup_rate_from_map('ATMI', 'USEWRACY2', 'ACY2', rate_map)
+        assert rate == 430.0 and method == 'exact'
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

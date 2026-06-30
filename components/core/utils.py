@@ -203,6 +203,80 @@ def excel_weekday(date_value: Any) -> Optional[int]:
     return (ts.weekday() + 1) % 7 + 1
 
 
+#: Excel's day-serial epoch. Excel counts days from 1899-12-30 (the off-by-one
+#: vs 1900-01-01 is Excel's intentional 1900-leap-year bug). A cell formatted as a
+#: date but delivered as a NUMBER (common from .xlsx) arrives as a serial like
+#: 45658 == 2025-01-01.
+_EXCEL_EPOCH = "1899-12-30"
+#: Serials below this are treated as missing, not dates. 59 == 1900-02-28 (just
+#: before Excel's phantom 1900-02-29). In practice any real shipping ETA serial is
+#: ~40000+, so this only catches 0 / tiny sentinel values that would otherwise
+#: misparse to ~1/1/1970. Guards against the "0 -> 1970-01-01" epoch trap.
+_MIN_EXCEL_SERIAL = 59
+
+
+def parse_ocean_eta(series: pd.Series) -> pd.Series:
+    """Robustly parse an Ocean ETA column to datetime64, NaT for missing.
+
+    Fixes the "1/1/1970" bug: ``pd.to_datetime(x, errors='coerce')`` on a bare
+    NUMBER reads it as nanoseconds-since-epoch, so any small number (a 0/blank
+    sentinel, or an Excel date serial) collapses to ~1970-01-01 instead of either
+    parsing correctly or becoming NaT. We split the column:
+
+    * **Real dates** (date strings, datetimes, already-datetime64 columns) parse
+      via the normal date path — untouched, so the majority of good rows are safe.
+    * **Bare numbers** are interpreted as **Excel day serials** (origin
+      1899-12-30): 45658 -> 2025-01-01, the value Excel actually meant. Numbers
+      below ``_MIN_EXCEL_SERIAL`` (i.e. 0 and tiny sentinels) become NaT, so a
+      placeholder 0 is dropped downstream rather than dated to 1970.
+
+    Returns a datetime64 Series aligned to ``series.index``.
+    """
+    if series is None or len(series) == 0:
+        return pd.to_datetime(pd.Series([], dtype="object"), errors="coerce")
+
+    # If pandas already gave us a real datetime column, trust it as-is. Running
+    # to_numeric on a datetime64 column would turn dates into nanosecond ints and
+    # NaT into a huge negative — exactly the corruption we're preventing.
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series
+
+    # Split the column into numeric cells vs the rest. This is the crux of the
+    # fix: we must NEVER let a bare number reach the plain date parser, because
+    # pd.to_datetime reads a number as nanoseconds-since-1970 (so 0 -> 1/1/1970,
+    # and an Excel serial -> a millisecond past 1970). to_numeric(coerce) returns
+    # a number ONLY for true numerics — real date strings and datetimes come back
+    # NaN here — so this cleanly separates the two cases with no overlap.
+    nums = pd.to_numeric(series, errors="coerce")
+    is_num = nums.notna()
+
+    result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+
+    # Non-numeric cells (date strings, datetimes): normal date parse. Numerics are
+    # masked out to NaN first so they can't be misread as nanoseconds. We let
+    # pandas infer the string format per-column (handles ISO and M/D/Y alike).
+    non_num_vals = series.where(~is_num)
+    if (~is_num).any():
+        # format="mixed" parses each cell independently, so a column that mixes
+        # ISO (2025-01-01) and US (3/4/2025) strings doesn't lose every row that
+        # differs from the first one's inferred format. Pure single-format columns
+        # parse identically.
+        result = result.fillna(
+            pd.to_datetime(non_num_vals, format="mixed", errors="coerce")
+        )
+
+    # Numeric cells: interpret as Excel day serials (origin 1899-12-30). Values
+    # below _MIN_EXCEL_SERIAL (0 and tiny sentinels) stay NaT rather than dating
+    # to ~1970, so a placeholder 0 is dropped downstream.
+    valid_serial = nums >= _MIN_EXCEL_SERIAL
+    if valid_serial.any():
+        result = result.fillna(pd.to_datetime(
+            nums.where(valid_serial), unit="D", origin=_EXCEL_EPOCH, errors="coerce"
+        ))
+
+    return result
+
+
 def excel_weekday_series(series: pd.Series) -> pd.Series:
     """Vectorized excel_weekday for a Series of dates (NaT-safe, nullable Int)."""
     ts = pd.to_datetime(series, errors='coerce')
