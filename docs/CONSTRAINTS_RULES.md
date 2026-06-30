@@ -180,16 +180,38 @@ earliest day first. **Fri/Sat/Sun collapse into one `Fri-Sun` bucket**, leaving
 
 ---
 
+## 9.5 Lead-time lock — freeze the carrier within 3 days of arrival
+
+A container within **3 days of its Ocean ETA** (vessel arrival) can no longer be
+re-tendered — there isn't time to flip it that close to arrival — so its carrier is
+**locked to whatever it currently holds**. "Day minus 3": the allocation deadline is
+`Ocean ETA − 3 days`; once today has passed that deadline (`Ocean ETA − 3 < today`,
+i.e. fewer than 3 full days of lead time remain) the row locks. Containers arriving
+today, or already past, are always locked; a container exactly 3 days out (`ETA −
+3 == today`) is still free.
+
+This is **not** an exclusion — volume stays in the analysis. Locked rows are moved
+from the unconstrained pool into the constrained pool, so no scenario can flip them
+(same mechanism as a Max constraint, but keyed on arrival date rather than a carrier
+target). Applies to **all ports**, with or without an uploaded constraints file.
+Rows with no parseable Ocean ETA are left eligible. Implemented in
+[`components/constraints/lead_time_lock.py`](../components/constraints/lead_time_lock.py)
+(`LEAD_TIME_DAYS = 3`); conservation holds (`Original = Constrained + Unconstrained`).
+
+---
+
 ## 10. Pipeline order (end to end)
 
 1. **Prebuilt / always-on rules** merged to the front (PNW, etc.).
 2. **User/chatbot constraints**, processed highest Priority first; each claims from
    the remaining pool. → produces the constrained vs. unconstrained split.
-3. **Peel pile** allocations applied **after** all constraint rows — they can only
+3. **Lead-time lock** (§9.5): rows within 3 days of Ocean ETA move from the
+   unconstrained pool into the constrained pool so their carrier can't be flipped.
+4. **Peel pile** allocations applied **after** all constraint rows — they can only
    claim still-unclaimed containers and they honor the scoped-max ceilings (§6).
    See [`CONSTRAINTS_GUIDE.md`](CONSTRAINTS_GUIDE.md) (Peel Pile) and
    [`PNW_RULES.md`](PNW_RULES.md) (Rule 5 thresholds).
-4. **Scenario optimization** runs on the **unconstrained** table only, skipping any
+5. **Scenario optimization** runs on the **unconstrained** table only, skipping any
    carrier/scope in the exclusion set and respecting the ceilings.
 
 ---
@@ -225,5 +247,6 @@ root cause before "fixing."
 | Caps are hard everywhere | Scoped max binds across all dims + both tables + peel pile + optimizer. |
 | No double-dip | Broader rule credits nested earlier volume; disjoint scopes don't cannibalize. |
 | Even spread | Allocations round-robin across Mon/Tue/Wed/Thu/Fri-Sun. |
+| Lead-time lock | Within 3 days of Ocean ETA (`ETA − 3 < today`) the carrier is frozen — no flips. |
 | Excluded FC | Hard facility ban; triggers reallocation or fails. |
 | Conservation | `Original = Constrained + Unconstrained`, always. |

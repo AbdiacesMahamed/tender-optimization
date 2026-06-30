@@ -15,7 +15,8 @@ from ..core.config_styling import section_header
 from ..core.utils import (
     get_rate_columns, safe_numeric, format_currency, format_percentage,
     get_grouping_columns, count_containers, parse_container_ids,
-    concat_and_dedupe_containers, filter_excluded_carrier_facility_rows
+    concat_and_dedupe_containers, filter_excluded_carrier_facility_rows,
+    arrow_safe,
 )
 from optimization.performance_logic import allocate_to_highest_performance
 from optimization.cascading_logic import build_lockout_mask
@@ -486,7 +487,7 @@ def show_detailed_analysis_table(final_filtered_data, unconstrained_data, constr
     # ---- Render table ----
     st.info(desc)
     display_formatted = _format_display(display_data, rate_cols)
-    st.dataframe(display_formatted, use_container_width=True, hide_index=True)
+    st.dataframe(arrow_safe(display_formatted), use_container_width=True, hide_index=True)
 
     # Metrics row
     _render_table_metrics(display_data, has_constraints, rate_cols)
@@ -596,7 +597,7 @@ def _render_constrained_section(constrained_data, unconstrained_data,
     if 'Total Cost' in constrained_display.columns:
         constrained_display['Total Cost'] = constrained_display['Total Cost'].apply(format_currency)
 
-    st.dataframe(constrained_display, use_container_width=True, hide_index=True)
+    st.dataframe(arrow_safe(constrained_display), use_container_width=True, hide_index=True)
 
     col1, col2, col3 = st.columns(3)
     col1.metric("📊 Constrained Records", len(constrained_data))

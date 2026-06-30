@@ -1117,7 +1117,11 @@ def show_carrier_flip_report(in_app_gvt=None, in_app_rate=None):
     # ---- Result tables ----
     if results.get('gvt_merged') is not None:
         st.markdown("**GVT with New SCAC**")
-        st.dataframe(results['gvt_merged'], use_container_width=True, hide_index=True)
+        # Raw GVT-merged frame carries arbitrary passthrough columns (e.g.
+        # 'Carp Appointment') that can mix int/str in one object column and crash
+        # the Arrow serialization st.dataframe relies on — coerce them first.
+        from ..core.utils import arrow_safe
+        st.dataframe(arrow_safe(results['gvt_merged']), use_container_width=True, hide_index=True)
         pivot = build_gvt_pivot(results['gvt_merged'])
         if pivot is not None:
             st.markdown("**GVT Pivot — Container Counts by Port × New SCAC**")
