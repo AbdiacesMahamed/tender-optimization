@@ -22,12 +22,21 @@ import streamlit as st
 # the platform's log panel (Streamlit Cloud "Manage app" -> logs), and (2) wrap
 # main() in a guard that logs the traceback AND renders it in the UI, so the next
 # time something breaks we see WHAT broke instead of a reset socket.
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stderr,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# NOTE: Streamlit configures the root logger at import time, so a plain
+# logging.basicConfig() here is a NO-OP (it does nothing when the root logger
+# already has handlers) — which is why none of the stage/crash breadcrumbs ever
+# appeared in the hosted logs. Attach our OWN handler directly to this logger and
+# stop propagation so the lines actually emit to stderr (which the platform
+# captures), independent of whatever Streamlit did to the root logger.
 logger = logging.getLogger("tender_dashboard")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+if not logger.handlers:
+    _h = logging.StreamHandler(sys.stderr)
+    _h.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] TENDER %(message)s"))
+    logger.addHandler(_h)
+logger.info("=== dashboard module imported; logging is live ===")
 
 
 def _stage(label: str):
@@ -50,6 +59,13 @@ def _stage(label: str):
     except Exception:
         pass
     logger.info("stage: %s%s", label, mem)
+    # Flush NOW: an OOM is a SIGKILL that discards buffered output, so without an
+    # explicit flush the very breadcrumb that names the fatal step is the one lost.
+    for h in logger.handlers:
+        try:
+            h.flush()
+        except Exception:
+            pass
 
 
 # Import all dashboard components
@@ -117,11 +133,17 @@ def main():
     # File upload and data loading
     gvt_file, rate_file, performance_file, constraints_file = show_file_upload_section()
     
+    _stage(f"files received (gvt={gvt_file is not None}, rate={rate_file is not None}, "
+           f"perf={performance_file is not None})")
+
     with st.spinner('⚙️ Loading and processing data...'):
         GVTdata, Ratedata, Performancedata, has_performance = load_data_files(gvt_file, rate_file, performance_file)
-        
+        _stage(f"files read (GVT={0 if GVTdata is None else len(GVTdata):,} rows, "
+               f"Rate={0 if Ratedata is None else len(Ratedata):,} rows)")
+
         # Process performance data
         performance_clean, has_performance = process_performance_data(Performancedata, has_performance)
+        _stage("performance processed; validating GVT")
         
         # Validate and process data. A ValueError here means the file in a given
         # upload slot is missing the columns that identify it (e.g. a Rate sheet
@@ -147,6 +169,7 @@ def main():
             )
             st.stop()
 
+        _stage("GVT + Rate validated; merging")
         # Merge all data (this already calls apply_volume_weighted_performance internally)
         merged_data = merge_all_data(GVTdata, Ratedata, performance_clean, has_performance)
 
