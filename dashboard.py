@@ -151,6 +151,24 @@ def main():
             st.markdown("---")
             constraints_df = process_constraints_file(constraints_file)
 
+        # Merge the always-on prebuilt per-port constraints to the FRONT of the
+        # frame so they are applied before (and cannot be overwritten by) any
+        # uploaded/chatbot rule's Priority Score. Toggled in code only
+        # (components/constraints/prebuilt.py) — never surfaced in the UI.
+        from components.constraints.prebuilt import (
+            merge_prebuilt_first, load_prebuilt_constraints, load_pnw_generated_constraints,
+        )
+        _prebuilt_count = len(load_prebuilt_constraints())
+        _pnw_count = len(load_pnw_generated_constraints(final_filtered_data))
+        # Pass the filtered data so the data-derived PNW vessel rules (Hunt 130/week,
+        # 60-per-vessel cap) are generated and merged into the always-on front block.
+        constraints_df = merge_prebuilt_first(constraints_df, final_filtered_data)
+        if _prebuilt_count > 0 or _pnw_count > 0:
+            st.markdown("---")
+            st.success(f"🔒 Applied {_prebuilt_count + _pnw_count} standing port constraint(s) "
+                       f"({_prebuilt_count} port lockout(s), {_pnw_count} PNW vessel rule(s)) "
+                       "— these take precedence and are always enforced.")
+
         if constraints_df is not None and len(constraints_df) > 0:
             # Apply constraints to filtered data
             # Pass Ratedata so we can find capable carriers for lanes when reallocation is needed
@@ -161,6 +179,35 @@ def main():
             # Show constraint summary
             if len(constraint_summary) > 0:
                 show_constraints_summary(constraint_summary, explanation_logs)
+
+            # PNW post-allocation safety nets, applied across the COMBINED constrained +
+            # unconstrained tables (the rules bind on a carrier's TOTAL PNW volume, not
+            # within either table alone):
+            #   * Rule 2 — no SCAC over 60 containers on a vessel. The generated Max-60
+            #     rows bind during allocation, but the scenario optimizer can move a
+            #     carrier ONTO a vessel afterward; this trims any such over-cap excess.
+            #   * Rules 3 & 4 — one vessel per carrier among same-day arrivals.
+            # Both clear the displaced/over-cap carrier so the optimizer re-homes them.
+            from components.constraints.pnw_vessel_rules import (
+                enforce_per_vessel_cap_across, enforce_one_vessel_per_carrier_across,
+            )
+            constrained_data, unconstrained_data, _cap_chg = enforce_per_vessel_cap_across(
+                constrained_data, unconstrained_data)
+            constrained_data, unconstrained_data, _ov_chg = enforce_one_vessel_per_carrier_across(
+                constrained_data, unconstrained_data)
+            if _cap_chg:
+                _capped = sum(c['containers'] for c in _cap_chg)
+                st.info(
+                    f"🚢 PNW per-vessel cap released {_capped} container(s) over the "
+                    f"{60}-per-vessel limit across {len(_cap_chg)} (vessel, carrier) group(s)."
+                )
+            if _ov_chg:
+                _moved = sum(c['containers'] for c in _ov_chg)
+                st.info(
+                    f"🚢 PNW one-vessel-per-carrier rule released {_moved} container(s) "
+                    f"across {len(_ov_chg)} carrier/vessel split(s) so each carrier "
+                    "draws from a single vessel among same-day arrivals."
+                )
         elif constraints_file is not None:
             st.warning("⚠️ Constraints file could not be processed")
         else:
