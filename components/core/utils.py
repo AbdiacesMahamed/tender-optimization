@@ -363,24 +363,56 @@ def arrow_safe(df: "pd.DataFrame") -> "pd.DataFrame":
     """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return df
+
+    def _stringify(series):
+        return series.map(
+            lambda v: "" if pd.isna(v)
+            else (str(int(v)) if isinstance(v, float) and float(v).is_integer() else str(v))
+        )
+
     out = df
     copied = False
+
+    # Duplicate column labels make pyarrow raise before it even looks at dtypes;
+    # uniquify them first so the rest of the pass (and the render) can proceed.
+    if df.columns.duplicated().any():
+        out = df.copy()
+        copied = True
+        seen, new_cols = {}, []
+        for label in out.columns:
+            if label in seen:
+                seen[label] += 1
+                new_cols.append(f"{label}.{seen[label]}")
+            else:
+                seen[label] = 0
+                new_cols.append(label)
+        out.columns = new_cols
+        df = out
+
     for col in df.columns:
         if df[col].dtype != object:
             continue
         non_null = df[col].dropna()
         if non_null.empty:
             continue
-        # More than one distinct python type (e.g. int + str) breaks Arrow.
-        if non_null.map(type).nunique() > 1:
+        # Coerce when the column either mixes python scalar types (int + str — the
+        # classic 'Carp Appointment' crash) OR fails a direct pyarrow probe. The
+        # probe matters because Streamlit Cloud's pyarrow is stricter than many
+        # local builds, so a column that serializes here can still crash on deploy;
+        # we stringify anything Arrow can't take cleanly. (str/None-only object
+        # columns serialize fine and are left untouched so sorting/formatting hold.)
+        needs_fix = non_null.map(type).nunique() > 1
+        if not needs_fix:
+            try:
+                import pyarrow as _pa
+                _pa.array(df[col], from_pandas=True)
+            except Exception:
+                needs_fix = True
+        if needs_fix:
             if not copied:
                 out = df.copy()
                 copied = True
-            # Render ints without a trailing ".0"; everything else via str().
-            out[col] = df[col].map(
-                lambda v: "" if pd.isna(v)
-                else (str(int(v)) if isinstance(v, float) and v.is_integer() else str(v))
-            )
+            out[col] = _stringify(df[col])
     return out
 
 
@@ -417,6 +449,16 @@ def install_arrow_safe_guard() -> None:
     if _ARROW_GUARD_INSTALLED:
         return
 
+    def _force_stringify(data):
+        """Last-resort: stringify EVERY object column so Arrow can't reject it."""
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            return data
+        out = data.copy()
+        for col in out.columns:
+            if out[col].dtype == object:
+                out[col] = out[col].map(lambda v: "" if pd.isna(v) else str(v))
+        return out
+
     def _wrap(orig):
         def _safe(data=None, *args, **kwargs):
             try:
@@ -424,7 +466,17 @@ def install_arrow_safe_guard() -> None:
             except Exception:
                 # arrow_safe is best-effort; never let the guard itself break a render.
                 pass
-            return orig(data, *args, **kwargs)
+            try:
+                return orig(data, *args, **kwargs)
+            except Exception:
+                # Final safety net: if the render STILL fails serializing to Arrow
+                # (e.g. Cloud's stricter pyarrow on a shape we didn't catch), retry
+                # once with every object column forced to string. Better a
+                # string-rendered table than "Oh no. Error running app."
+                try:
+                    return orig(_force_stringify(data), *args, **kwargs)
+                except Exception:
+                    raise
         _safe.__name__ = getattr(orig, "__name__", "st_render")
         _safe.__wrapped__ = orig
         return _safe
