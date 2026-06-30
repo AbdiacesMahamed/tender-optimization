@@ -159,6 +159,11 @@ class Scenario:
     intent: str
     steps: List[Step]
     seed_upload: bool = False  # start from the hypothetical constraint upload
+    # Pre-set the dashboard's Data Filters before the conversation starts, so the
+    # assistant's data view is scoped exactly as if the user had filtered the
+    # dashboard. Keys mirror the filter UI: filter_ports / filter_fcs /
+    # filter_weeks / filter_scacs. Empty/absent = no filter (the default).
+    seed_filters: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -193,8 +198,47 @@ class ScenarioResult:
 # FRQT rated-only; weeks 32, 33, 34; lanes USBALHGR6, USNYCEWR9, USNYCABE8.
 # ATMI = Cargomatic, FRQT = Forrest, HJBT = JB Hunt (see SCAC mapping memory).
 
+def _answer_count_is(turn: Turn, n: int) -> bool:
+    """True if the answer states the integer ``n`` as a standalone number.
+
+    Tolerates thousands separators but not substring matches (so 9 doesn't match
+    "90" or "229"). Used to assert the assistant reported the FILTERED total.
+    """
+    import re
+    text = (turn.answer or "").replace(",", "")
+    return bool(re.search(rf"(?<!\d){n}(?!\d)", text))
+
+
 def all_scenarios() -> List[Scenario]:
     return [
+        # -------------------------------------------------------------------
+        # 0. FILTER AWARENESS. The dashboard is filtered to week 32. "How many
+        #    containers / which carriers" must answer about that SLICE (9 conts,
+        #    RKNE+HJBT) — NOT the whole 22-container file, and NOT ABCD (which has
+        #    no week-32 volume). Then a flip "all of it" must inherit week 32.
+        # -------------------------------------------------------------------
+        Scenario(
+            id="filter_awareness_week32",
+            intent=("With the dashboard filtered to week 32, the assistant's data view "
+                    "is that slice: totals/carriers must reflect 9 containers across "
+                    "RKNE+HJBT, never the full 22-row file or the absent ABCD."),
+            seed_filters={"filter_weeks": [32]},
+            steps=[
+                Step("How many containers are loaded right now, and which carriers?",
+                     [no_error(), used_any(["analyze_data", "describe_selection"]),
+                      ("answer reports the filtered total (9), not the full 22",
+                       lambda t: _answer_count_is(t, 9) and not _answer_count_is(t, 22)),
+                      answer_has_any(["RKNE", "HJBT"]),
+                      answer_lacks(["ABCD"]),
+                      answer_has_any(["week 32", "wk 32", "wk32", "filter"])],
+                     note="must answer about the week-32 slice and acknowledge the filter"),
+                Step("Which of those carriers is cheaper on average?",
+                     [no_error(),
+                      answer_has_any(["RKNE", "HJBT"]),
+                      answer_lacks(["ABCD"])],
+                     note="comparison stays within the filtered carriers, not ABCD"),
+            ],
+        ),
         # -------------------------------------------------------------------
         # 1. The canonical "wk27 then follow-ups" pattern: state the week once,
         #    then refer back to it elliptically. Scope must carry, not reset.
@@ -563,6 +607,12 @@ def run_scenario(scenario: Scenario, client: BedrockChatClient,
     if scenario.seed_upload:
         from .conversation import hypothetical_upload_df
         convo.seed_uploaded_constraints(hypothetical_upload_df())
+    # Pre-apply the dashboard's Data Filters, so the assistant's data view is
+    # scoped exactly as it would be if the user had filtered the dashboard. The
+    # executor reads these keys (via chat_ui._filtered_view) on every turn.
+    if scenario.seed_filters:
+        for k, v in scenario.seed_filters.items():
+            convo.session_state[k] = v
 
     steps: List[StepResult] = []
     if verbose:

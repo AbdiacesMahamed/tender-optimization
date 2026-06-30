@@ -303,6 +303,57 @@ def _valid_carriers(df) -> set:
     return {str(c).strip() for c in df[col].dropna().unique()}
 
 
+def _active_filter_state() -> dict:
+    """The dashboard's active data filters, read from the keys the filter UI owns.
+
+    The main-panel filter interface (``components/ui/filters.py``) writes the
+    user's selections into these session-state keys; we READ them so the assistant
+    can scope its view to exactly the slice the user is looking at. Empty lists
+    (the default, and what the eval harnesses start with) mean "no filter".
+    """
+    ss = st.session_state
+    return {
+        "ports": list(ss.get("filter_ports") or []),
+        "facilities": list(ss.get("filter_fcs") or []),
+        "weeks": list(ss.get("filter_weeks") or []),
+        "carriers": list(ss.get("filter_scacs") or []),
+    }
+
+
+def _filtered_view(df):
+    """Scope ``df`` to the dashboard's active filters — the slice the user sees.
+
+    Mirrors ``apply_filters_to_data`` (same session-state keys, same masking,
+    same facility normalization) so the assistant analyzes the SAME rows the
+    dashboard's tables/metrics are built from. The downstream pipeline applies
+    constraints and computes metrics on this filtered view, so the assistant's
+    "how many containers / which carriers" must match it — otherwise a user
+    filtered to week 32 / NYC would get answers about the entire dataset.
+
+    With no filters active (the test/eval default, and a fresh session) this
+    returns ``df`` unchanged, so behavior is identical to before when nothing is
+    filtered. Full, unfiltered ``df`` is still passed separately wherever a tool
+    needs the multi-week HISTORY (growth caps, historical volume share) so a
+    week filter never starves those baselines.
+    """
+    if df is None or len(df) == 0:
+        return df
+    f = _active_filter_state()
+    if not any(f.values()):
+        return df
+    from ..core.utils import normalize_facility_series
+    mask = pd.Series(True, index=df.index)
+    if f["ports"] and "Discharged Port" in df.columns:
+        mask &= df["Discharged Port"].isin(f["ports"])
+    if f["facilities"] and "Facility" in df.columns:
+        mask &= normalize_facility_series(df["Facility"]).isin(f["facilities"])
+    if f["weeks"] and "Week Number" in df.columns:
+        mask &= df["Week Number"].isin(f["weeks"])
+    if f["carriers"] and "Dray SCAC(FL)" in df.columns:
+        mask &= df["Dray SCAC(FL)"].isin(f["carriers"])
+    return df[mask].copy()
+
+
 def _collect_session_context(rate_type="Base Rate") -> dict:
     """Gather the live app state a chat turn ran under, for the execution log.
 
@@ -355,6 +406,13 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
 
     def executor(name: str, tool_input: dict):
         carriers = _valid_carriers(df)
+        # Scope the assistant's working view to the dashboard's active filters — the
+        # exact slice the user is looking at — so "how many containers / which
+        # carriers / cheapest" answer about the filtered table, not the whole file.
+        # With no filters active this is `df` unchanged. The FULL df is still passed
+        # as historical_data wherever a tool needs the multi-week baseline (growth
+        # caps, historical volume share), so a week filter never starves history.
+        view = _filtered_view(df)
         # Live optimizer weights from the dashboard (0-100 ints -> 0-1 floats). The
         # closure may read session state; the pure handlers receive plain floats.
         ss = st.session_state
@@ -364,7 +422,7 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
         try:
             if name == "analyze_data":
                 return T.analyze_data(
-                    df,
+                    view,
                     query_type=tool_input.get("query_type", "overview"),
                     top_n=int(tool_input.get("top_n", 10) or 10),
                 ), False
@@ -372,29 +430,29 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
             # ---- flip cost simulation (read-only) ----
             if name == "describe_selection":
                 return T.describe_selection(
-                    df, tool_input.get("scope"), rate_data, rate_type
+                    view, tool_input.get("scope"), rate_data, rate_type
                 ), False
 
             if name == "simulate_flip":
                 return T.simulate_flip(
-                    df, tool_input.get("scope"), tool_input.get("target_carrier"),
+                    view, tool_input.get("scope"), tool_input.get("target_carrier"),
                     rate_data, rate_type,
                 ), False
 
             if name == "compare_carriers":
                 return T.compare_carriers(
-                    df, tool_input.get("scope"), tool_input.get("candidates"),
+                    view, tool_input.get("scope"), tool_input.get("candidates"),
                     rate_data, rate_type,
                 ), False
 
             if name == "lane_rate_options":
                 return T.lane_rate_options(
-                    df, tool_input.get("scope"), rate_data, rate_type
+                    view, tool_input.get("scope"), rate_data, rate_type
                 ), False
 
             if name == "flip_report":
                 return T.flip_report(
-                    df, tool_input.get("scope"), tool_input.get("target_carrier"),
+                    view, tool_input.get("scope"), tool_input.get("target_carrier"),
                     rate_data, rate_type, tool_input.get("max_rows", 200),
                 ), False
 
@@ -404,22 +462,22 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
 
             if name == "recommend_carrier":
                 return T.recommend_carrier(
-                    df, tool_input.get("scope"), cw, pw, mg,
+                    view, tool_input.get("scope"), cw, pw, mg,
                     top_n=tool_input.get("top_n", 5),
                 ), False
 
             if name == "preview_optimization":
                 return T.preview_optimization(
-                    df, ss.get("chatbot_staged_constraints"), rate_data,
+                    view, ss.get("chatbot_staged_constraints"), rate_data,
                     cw, pw, mg, historical_data=df,
                 ), False
 
             if name == "optimization_summary":
-                return T.optimization_summary(df, cw, pw, mg), False
+                return T.optimization_summary(view, cw, pw, mg), False
 
             if name == "run_optimization":
                 return T.run_optimization(
-                    df, tool_input.get("scenario"), tool_input.get("scope"),
+                    view, tool_input.get("scenario"), tool_input.get("scope"),
                     cost_weight=cw, performance_weight=pw, max_growth_pct=mg,
                     historical_data=df, top_n=tool_input.get("top_n", 25),
                 ), False
@@ -427,12 +485,13 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
             if name == "run_analysis":
                 # Analysis memory (multi-turn): load the requested prior results,
                 # run, and persist a new one if save_as was set. The store lives in
-                # session_state; tools.run_analysis stays pure.
+                # session_state; tools.run_analysis stays pure. Runs against the
+                # filtered view so custom pivots match the on-screen table.
                 mem_store = ss.get("chatbot_analysis_memory") or {}
                 recall = tool_input.get("recall") or []
                 loaded = {k: mem_store[k] for k in recall if k in mem_store}
                 result = T.run_analysis(
-                    df, tool_input.get("code"), tool_input.get("max_rows", 200),
+                    view, tool_input.get("code"), tool_input.get("max_rows", 200),
                     save_as=tool_input.get("save_as"), memory=loaded,
                 )
                 save = result.pop("_save", None)
@@ -446,6 +505,8 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
 
             # ---- data diagnostics (read-only) ----
             if name == "historic_volume_share":
+                # Historical share is a multi-week baseline — always over the FULL
+                # data, never the filtered view, or a week filter would zero it out.
                 return T.historic_volume_share(
                     df, tool_input.get("scope"),
                     n_weeks=tool_input.get("n_weeks", 5),
@@ -453,9 +514,11 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
                 ), False
 
             if name == "missing_rate_audit":
-                return T.missing_rate_audit(df, top_n=tool_input.get("top_n", 25)), False
+                return T.missing_rate_audit(view, top_n=tool_input.get("top_n", 25)), False
 
             if name == "trace_containers":
+                # Tracing is by container ID — search the FULL data so a filtered
+                # view never hides a container the user pasted in.
                 return T.trace_containers(
                     df, tool_input.get("container_ids"),
                     max_rows=tool_input.get("max_rows", 100),
@@ -474,13 +537,13 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
 
             if name == "diagnose_constraints":
                 return T.diagnose_constraints(
-                    ss.get("chatbot_staged_constraints"), df,
+                    ss.get("chatbot_staged_constraints"), view,
                     constraint_summary=ss.get("chatbot_constraint_summary"),
                 ), False
 
             if name == "repair_constraints":
                 result = T.repair_constraints(
-                    ss.get("chatbot_staged_constraints"), df,
+                    ss.get("chatbot_staged_constraints"), view,
                     constraint_summary=ss.get("chatbot_constraint_summary"),
                     valid_carriers=carriers or None,
                 )
@@ -491,18 +554,18 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
 
             if name == "generate_analysis_report":
                 return _build_and_stash_report(
-                    df, ss, tool_input, valid_carriers=carriers or None
+                    view, ss, tool_input, valid_carriers=carriers or None
                 ), False
 
             if name == "preview_constraint_scope":
-                return T.preview_constraint_scope(df, tool_input), False
+                return T.preview_constraint_scope(view, tool_input), False
 
             if name == "generate_constraints":
                 result = T.generate_constraints(
                     tool_input.get("proposals", []),
                     existing=st.session_state.get("chatbot_staged_constraints"),
                     valid_carriers=carriers or None,
-                    df=df,  # composite: fold scope-match counts into the result
+                    df=view,  # composite: fold scope-match counts into the result
                 )
                 # Stage all returned rows (valid + invalid) for the review panel.
                 if "constraints" in result:
@@ -514,7 +577,7 @@ def _make_tool_executor(df, rate_data=None, rate_type="Base Rate"):
                     st.session_state.get("chatbot_staged_constraints") or [],
                     tool_input.get("edits", []),
                     valid_carriers=carriers or None,
-                    df=df,  # composite: fold scope-match counts into the result
+                    df=view,  # composite: fold scope-match counts into the result
                 )
                 if "constraints" in result:
                     st.session_state.chatbot_staged_constraints = result["constraints"]
@@ -664,8 +727,10 @@ def _render_staged_panel(df=None, rate_data=None, rate_type="Base Rate"):
         cw = float(ss.get("opt_cost_weight", 70)) / 100.0
         pw = float(ss.get("opt_performance_weight", 30)) / 100.0
         mg = float(ss.get("opt_max_growth_pct", 30)) / 100.0
+        # Preview on the filtered view (what the user sees) with full data as
+        # history — same split the executor's preview_optimization uses.
         ss.chatbot_impact_preview = T.preview_optimization(
-            df, staged, rate_data, cw, pw, mg, historical_data=df,
+            _filtered_view(df), staged, rate_data, cw, pw, mg, historical_data=df,
         )
         st.rerun()
 
@@ -906,11 +971,19 @@ def _handle_user_message(user_text: str, df, rate_data=None, rate_type="Base Rat
     # Compose a per-turn system prompt whose leading "Session status" line states
     # the GROUND TRUTH of what's loaded right now — so the model can't claim the
     # constraint working set is empty (or that nothing was uploaded) when it isn't.
+    # The active Data Filters are folded in too, so the model knows its data view
+    # is scoped to the slice the user sees (matching _filtered_view in the executor).
+    active_filters = _active_filter_state()
+    filtered_rows = (None if df is None
+                     else len(_filtered_view(df)) if any(active_filters.values())
+                     else None)
     system_prompt = build_system_prompt(
         data_rows=(0 if df is None else len(df)),
         constraint_rows=len(ss.get("chatbot_staged_constraints") or []),
         constraint_source=ss.get("chatbot_constraint_source_sig"),
         applied_rows=len(ss.get("chatbot_applied_constraints") or []),
+        active_filters=active_filters,
+        filtered_rows=filtered_rows,
     )
 
     # Execution log: one JSON file per turn under execution logs/. Captures the
