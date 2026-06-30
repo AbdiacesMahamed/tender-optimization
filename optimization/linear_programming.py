@@ -13,7 +13,14 @@ from __future__ import annotations
 from typing import List, Tuple
 import pandas as pd
 import numpy as np
-from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, value
+from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, value, PULP_CBC_CMD
+
+# Silence the CBC solver. By default PuLP runs CBC with msg=1, so EVERY per-group
+# solve prints a full "Welcome to the CBC MILP Solver ... Optimal objective ..."
+# block to stdout. On a real dataset that is hundreds of solves per page render,
+# which (a) floods the platform log panel so real errors/tracebacks are buried,
+# and (b) is pure noise. Build the silent solver once and reuse it for every solve.
+_CBC_SILENT = PULP_CBC_CMD(msg=False)
 
 
 # Default grouping columns for optimization
@@ -309,8 +316,8 @@ def _optimize_single_group(
     # Constraint: all containers must be allocated
     prob += lpSum([allocation_vars[carrier] for carrier in carriers]) == total_containers
     
-    # Solve the problem
-    prob.solve()
+    # Solve the problem (silent CBC — no per-solve solver banner in the logs)
+    prob.solve(_CBC_SILENT)
     
     # Check if solution is optimal
     if LpStatus[prob.status] != "Optimal":

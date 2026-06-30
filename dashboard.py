@@ -30,6 +30,28 @@ logging.basicConfig(
 logger = logging.getLogger("tender_dashboard")
 
 
+def _stage(label: str):
+    """Log a pipeline milestone (+ resident memory, if psutil is available).
+
+    The crash guard around main() catches Python exceptions, but it canNOT catch
+    an out-of-memory kill: the platform sends SIGKILL, the process vanishes with
+    no traceback, and the only outward sign is the health checker's
+    "/healthz: connection reset by peer". These breadcrumbs make that case
+    diagnosable — the logs show the LAST stage reached (and the memory trend up to
+    it), so an OOM during, say, "rendering analysis table" is obvious instead of
+    invisible. Best-effort: psutil may be absent on the host, so we degrade to a
+    plain stage line rather than failing.
+    """
+    mem = ""
+    try:
+        import psutil  # optional; not guaranteed on the hosting platform
+        rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+        mem = f"  (RSS {rss_mb:.0f} MB)"
+    except Exception:
+        pass
+    logger.info("stage: %s%s", label, mem)
+
+
 # Import all dashboard components
 from components import (
     # Configuration
@@ -90,6 +112,8 @@ def main():
     apply_custom_css()
     show_header()
     
+    _stage("main() start")
+
     # File upload and data loading
     gvt_file, rate_file, performance_file, constraints_file = show_file_upload_section()
     
@@ -140,8 +164,11 @@ def main():
     # Show performance assignments table
     show_performance_assignments_table()
     
+    _stage(f"data merged ({len(merged_data):,} rows)")
+
     with st.spinner('📊 Creating comprehensive data view...'):
         comprehensive_data = create_comprehensive_data(merged_data)
+    _stage(f"comprehensive view built ({len(comprehensive_data):,} rows)")
 
     # AI assistant sidebar — analyzes the loaded data, prices carrier flips, and
     # proposes/applies constraints. Pass the rate sheet so flip-cost simulation can
@@ -335,19 +362,24 @@ def main():
     # Pass max_constrained_carriers so optimization knows which carriers have hard caps
     # Pass carrier_facility_exclusions so scenarios respect facility-level exclusions
     # Pass comprehensive_data as full_unfiltered_data so historical calculations are stable
+    _stage(f"constraints applied; computing metrics (filtered {len(final_filtered_data):,} rows, "
+           f"unconstrained {len(unconstrained_data):,})")
     metrics = calculate_enhanced_metrics(final_filtered_data, unconstrained_data, max_constrained_carriers, carrier_facility_exclusions, comprehensive_data)
-    
+
     if metrics is None:
         st.warning("⚠️ No data available after applying filters.")
         return
-    
+    _stage("metrics computed")
+
     # Display cost analysis dashboard - pass constraint data for proper cost calculation
     display_current_metrics(metrics, constrained_data, unconstrained_data)
     
     # Show detailed analysis table with constrained and unconstrained data
     # Pass carrier_facility_exclusions so scenarios respect facility-level exclusions
     # Pass comprehensive_data as full_unfiltered_data so historical calculations are stable
+    _stage("rendering detailed analysis table")
     show_detailed_analysis_table(final_filtered_data, unconstrained_data, constrained_data, metrics, max_constrained_carriers, carrier_facility_exclusions, comprehensive_data)
+    _stage("detailed analysis table rendered")
     
     # 🔬 DIAGNOSTIC TOOL - Enable to debug container count discrepancies
 
@@ -370,7 +402,9 @@ def main():
     # reuse apply_filters_to_data to keep the filtering logic in one place.
     st.markdown("---")
     filtered_gvt, _, _, _, _ = apply_filters_to_data(GVTdata)
+    _stage(f"rendering carrier flip report ({len(filtered_gvt):,} GVT rows)")
     show_carrier_flip_report(in_app_gvt=filtered_gvt, in_app_rate=Ratedata)
+    _stage("carrier flip report rendered")
 
     # JBH Allocation Model — independent of the filters/flow above; takes its own
     # per-container Inbound Container Milestone upload and a port selection.
@@ -381,6 +415,7 @@ def main():
 
     # Footer
     show_footer()
+    _stage("main() complete — full render succeeded")
 
 def _run_with_crash_guard():
     """Run main(), but surface any uncaught exception instead of dying silently.
