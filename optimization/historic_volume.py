@@ -309,7 +309,17 @@ def calculate_carrier_weekly_trends(
     historical_data[container_column] = pd.to_numeric(
         historical_data[container_column], errors="coerce"
     ).fillna(0)
-    
+
+    # Normalize week numbers to int BEFORE pivoting. Source data often carries
+    # Week Number as float (e.g. 23.0); a float-typed pivot column would then
+    # fail the isinstance(col, int) rename below, stay named 23.0, and later make
+    # the display layer's col.startswith('Week_') raise AttributeError on a float.
+    historical_data[week_column] = pd.to_numeric(
+        historical_data[week_column], errors="coerce"
+    )
+    historical_data = historical_data[historical_data[week_column].notna()]
+    historical_data[week_column] = historical_data[week_column].round().astype(int)
+
     # Pivot to show weeks as columns
     trends = historical_data.pivot_table(
         index=[carrier_column, lane_column],
@@ -382,7 +392,19 @@ def get_carrier_lane_participation(
     
     if historical_data.empty:
         return pd.DataFrame()
-    
+
+    # Normalize week numbers to int BEFORE grouping/pivoting (see note in
+    # calculate_carrier_weekly_trends): float week labels like 23.0 would slip
+    # past the isinstance(col, int) rename and crash the display's startswith.
+    historical_data[week_column] = pd.to_numeric(
+        historical_data[week_column], errors="coerce"
+    )
+    historical_data = historical_data[historical_data[week_column].notna()]
+    historical_data[week_column] = historical_data[week_column].round().astype(int)
+
+    if historical_data.empty:
+        return pd.DataFrame()
+
     # Create participation matrix (1 if carrier was active, 0 otherwise)
     participation = historical_data.groupby([carrier_column, lane_column, week_column]).size().reset_index(name='Active')
     participation['Active'] = 1

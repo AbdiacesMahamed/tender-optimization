@@ -19,6 +19,8 @@ from optimization.historic_volume import (
     filter_historical_weeks,
     get_last_n_weeks,
     calculate_carrier_volume_share,
+    calculate_carrier_weekly_trends,
+    get_carrier_lane_participation,
 )
 
 
@@ -282,3 +284,64 @@ class TestCalculateCarrierVolumeShare:
         result = calculate_carrier_volume_share(historic_data)
         if 'Category' in historic_data.columns:
             assert 'Category' in result.columns
+
+
+# ==================== calculate_carrier_weekly_trends ====================
+
+class TestCalculateCarrierWeeklyTrends:
+    def test_week_columns_are_named_strings(self, historic_data):
+        """Pivoted week columns must be renamed to 'Week_<n>' strings."""
+        trends = calculate_carrier_weekly_trends(historic_data)
+        week_cols = [c for c in trends.columns if str(c).startswith('Week_')]
+        assert week_cols, "expected at least one Week_<n> column"
+        # Every produced week column must be a real string (not a leftover float/int label)
+        for c in week_cols:
+            assert isinstance(c, str)
+
+    def test_float_week_numbers_do_not_crash(self, historic_data):
+        """Regression: float-typed Week Number (e.g. 23.0) used to leave pivot
+        columns named 23.0, which then crashed the display's col.startswith().
+        The function must coerce them to int and name columns 'Week_23'."""
+        data = historic_data.copy()
+        data['Week Number'] = data['Week Number'].astype(float)  # 5.0, 6.0, ...
+        trends = calculate_carrier_weekly_trends(data)
+        week_cols = [c for c in trends.columns if str(c).startswith('Week_')]
+        assert week_cols
+        # No column should carry a fractional ".0" name like 'Week_5.0'
+        for c in week_cols:
+            assert isinstance(c, str)
+            assert '.' not in c.replace('Week_', '')
+        # The display-layer filter must run without AttributeError on any column
+        for c in trends.columns:
+            assert isinstance(str(c).startswith('Week_'), bool)
+
+    def test_empty_data(self):
+        assert calculate_carrier_weekly_trends(pd.DataFrame()).empty
+
+    def test_none_data(self):
+        assert calculate_carrier_weekly_trends(None).empty
+
+
+# ==================== get_carrier_lane_participation ====================
+
+class TestGetCarrierLaneParticipation:
+    def test_float_week_numbers_do_not_crash(self, historic_data):
+        """Regression: same float-week issue in the participation pivot."""
+        data = historic_data.copy()
+        data['Week Number'] = data['Week Number'].astype(float)
+        part = get_carrier_lane_participation(data)
+        active_cols = [c for c in part.columns if str(c).startswith('Week_')]
+        assert active_cols
+        for c in active_cols:
+            assert isinstance(c, str)
+            assert c.endswith('_Active')
+
+    def test_participation_rate_present(self, historic_data):
+        part = get_carrier_lane_participation(historic_data)
+        assert 'Participation_Rate_Pct' in part.columns
+
+    def test_empty_data(self):
+        assert get_carrier_lane_participation(pd.DataFrame()).empty
+
+    def test_none_data(self):
+        assert get_carrier_lane_participation(None).empty

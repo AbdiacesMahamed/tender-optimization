@@ -262,8 +262,12 @@ def show_weekly_trends_analysis(weekly_trends: pd.DataFrame, n_weeks: int):
         st.warning("No weekly trend data available.")
         return
     
-    # Get week columns
-    week_columns = [col for col in weekly_trends.columns if col.startswith('Week_') and not col.endswith('Active')]
+    # Get week columns. Cast to str defensively: a non-string column label (e.g. a
+    # float week number that escaped renaming) must never crash the whole dashboard.
+    week_columns = [
+        col for col in weekly_trends.columns
+        if str(col).startswith('Week_') and not str(col).endswith('Active')
+    ]
     
     if not week_columns:
         st.warning("No weekly data columns found.")

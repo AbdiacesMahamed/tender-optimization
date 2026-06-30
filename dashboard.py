@@ -4,8 +4,15 @@ Main application file that orchestrates all components
 """
 
 # Import necessary libraries
+import logging
 import pandas as pd
 import streamlit as st
+
+# Module logger. Used by the lead-time-lock skip path and the isolated
+# render guards around the bottom analysis panels. Defined here because
+# dashboard.py references `logger` but never imported logging before — on
+# historical data the lead-time skip branch would otherwise raise NameError.
+logger = logging.getLogger(__name__)
 
 # Import diagnostic tool
 
@@ -347,8 +354,13 @@ def main():
     # show_interactive_visualizations(final_filtered_data)
 
     # Show historic volume analysis at the bottom (uses filtered data to match current view)
+    # Isolated: a failure in this panel must not take down the carrier flip report below.
     st.markdown("---")
-    show_historic_volume_analysis(final_filtered_data, n_weeks=5)
+    try:
+        show_historic_volume_analysis(final_filtered_data, n_weeks=5)
+    except Exception as e:
+        logger.exception("Historic volume analysis failed")
+        st.error(f"❌ Historic Volume Analysis could not be displayed: {e}")
 
     # Carrier Flip Analysis — reuses the loaded per-container GVT and Rate data.
     # The allocation it analyzes already reflects the active filters (it comes from the
@@ -358,9 +370,14 @@ def main():
     # would include containers outside the current view. GVT carries the exact columns
     # the filters key on (Discharged Port, Facility, Week Number, Dray SCAC(FL)), so we
     # reuse apply_filters_to_data to keep the filtering logic in one place.
+    # Isolated for the same reason — render the flip report even if a sibling panel errors.
     st.markdown("---")
-    filtered_gvt, _, _, _, _ = apply_filters_to_data(GVTdata)
-    show_carrier_flip_report(in_app_gvt=filtered_gvt, in_app_rate=Ratedata)
+    try:
+        filtered_gvt, _, _, _, _ = apply_filters_to_data(GVTdata)
+        show_carrier_flip_report(in_app_gvt=filtered_gvt, in_app_rate=Ratedata)
+    except Exception as e:
+        logger.exception("Carrier flip report failed")
+        st.error(f"❌ Carrier Flip Analysis could not be displayed: {e}")
 
     # JBH Allocation Model — independent of the filters/flow above; takes its own
     # per-container Inbound Container Milestone upload and a port selection.
