@@ -53,3 +53,4 @@ Thumbs.db
 
 # Playwright deployment-check artifacts
 deployment_screenshot*.png
+deployment_after_fix.png

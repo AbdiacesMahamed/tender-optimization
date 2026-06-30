@@ -1,0 +1,12 @@
+# Streamlit Cloud configuration.
+#
+# showErrorDetails = "full" forces the full traceback to render IN THE APP
+# instead of the generic "Oh no. Error running app." page, so a deploy-time crash
+# is diagnosable from the browser (Streamlit Cloud hides server logs from viewers
+# of a private app). Kept verbose deliberately while stabilizing the deploy.
+[client]
+showErrorDetails = "full"
+
+[server]
+# Headless on the hosted runtime; no usage-stats gathering needed.
+headless = true
