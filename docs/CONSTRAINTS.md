@@ -2,25 +2,35 @@
 
 The Tender Optimization system supports operational constraints that control how containers are allocated to carriers.
 
+> For the **behavioral rules** behind this system (precedence, scope-filter
+> matching, ceiling semantics, cross-priority crediting, pipeline order), see
+> [Constraint Rules & Mechanics](CONSTRAINTS_RULES.md).
+
 ## Constraint File Format
 
 Upload an Excel file with the following columns:
 
-| Column                    | Required    | Description                                   |
-| ------------------------- | ----------- | --------------------------------------------- |
-| `Priority Score`          | ✅ Yes      | Higher scores are processed first             |
-| `Carrier`                 | Conditional | Target carrier for allocation                 |
-| `Category`                | No          | Filter by category (FBA FCL, Retail CD, etc.) |
-| `Lane`                    | No          | Filter by lane                                |
-| `Port`                    | No          | Filter by port                                |
-| `Week Number`             | No          | Filter by week                                |
-| `Terminal`                | No          | Filter by terminal                            |
-| `SSL`                     | No          | Filter by steamship line code                 |
-| `Vessel`                  | No          | Filter by vessel name                         |
-| `Maximum Container Count` | No          | Hard cap on containers for carrier            |
-| `Minimum Container Count` | No          | Minimum containers for carrier                |
-| `Percent Allocation`      | No          | Target percentage allocation                  |
-| `Excluded FC`             | No          | Facility where carrier cannot receive volume  |
+| Column                    | Required    | Description                                                          |
+| ------------------------- | ----------- | ------------------------------------------------------------------- |
+| `Priority Score`          | ✅ Yes      | Higher scores are processed first                                   |
+| `Carrier`                 | Conditional | Target carrier for allocation (the assignment TARGET, not a filter) |
+| `Category`                | No          | Filter by category (FBA FCL, Retail CD, etc.)                       |
+| `Lane`                    | No          | Filter by lane (4-char facility code matches the lane suffix)       |
+| `Port`                    | No          | Filter by Discharged Port (`NYC`/`LAX` shorthand expands to aliases)|
+| `Week Number`             | No          | Filter by week                                                      |
+| `Day of Week`             | No          | Filter by Ocean ETA weekday — Excel WEEKDAY (Sun=1 … Sat=7) or a name (`monday`) |
+| `Terminal`                | No          | Filter by terminal                                                  |
+| `SSL`                     | No          | Filter by steamship line code                                       |
+| `Vessel`                  | No          | Filter by vessel name                                               |
+| `Maximum Container Count` | No          | Hard cap on containers for carrier (`0` = lockout)                  |
+| `Minimum Container Count` | No          | Minimum containers for carrier                                      |
+| `Percent Allocation`      | No          | Target percentage allocation (`0` = lockout)                        |
+| `Excluded FC`             | No          | Facility where carrier cannot receive volume                        |
+
+**Scope filters stack with AND.** All filter columns (`Category`, `Lane`, `Port`,
+`Week Number`, `Day of Week`, `Terminal`, `SSL`, `Vessel`) combine — a row applies
+only where *every* populated filter matches; a blank filter means "all". `Carrier`
+is **not** a filter: it names the carrier the matched containers are assigned *to*.
 
 ## Constraint Types
 
@@ -86,6 +96,27 @@ Priority Score: 8
 ```
 
 Result: HDDR receives 30% of containers on the USBAL-HGR6 lane.
+
+The percent **denominator is the original scope pool** (a snapshot taken before
+any constraint ran), so "30%" always means 30% of the original eligible volume —
+not 30% of whatever a higher-priority rule left behind. If the original-pool target
+no longer fits in what's still available, the engine degrades gracefully to "30% of
+the remainder" and flags the shortfall in the summary.
+
+### Combining amounts, lockouts, and cap enforcement
+
+A single row can combine `Minimum`, `Maximum`, and `Percent` (e.g. `Minimum 20` +
+`Maximum 40` is a 20–40 band; `Percent 30` + `Maximum 40` is 30% of the pool, never
+above 40). A `Maximum` or `Percent` of **`0` is a lockout** — the carrier gets
+nothing in that scope *and* the optimizer is barred from sending it any. A scoped
+cap binds the carrier's **total** volume across **both** tables and **exactly per
+scope dimension**, so disjoint caps (e.g. a per-vessel cap and a per-terminal cap)
+don't cannibalize each other. Allocated volume is also **spread round-robin across
+the week** by Ocean ETA weekday (Fri/Sat/Sun = one bucket).
+
+> These behaviors — combination order, lockouts, both-table/per-dimension cap
+> enforcement, cross-priority crediting, and the even-weekly spread — are documented
+> in full in [Constraint Rules & Mechanics](CONSTRAINTS_RULES.md).
 
 ## Data Flow
 

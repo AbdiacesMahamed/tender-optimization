@@ -49,6 +49,8 @@ Tender Optimization/
     ├── ARCHITECTURE.md         # System architecture overview
     ├── CONSTRAINTS.md          # Constraint system documentation
     ├── CONSTRAINTS_GUIDE.md    # User-facing constraint file guide
+    ├── CONSTRAINTS_RULES.md    # Constraint engine rules & mechanics (precedence, scoping, ceilings)
+    ├── PNW_RULES.md            # Standing Pacific-Northwest port rules
     ├── OPTIMIZATION.md         # Optimization strategies documentation
     └── dev/                    # Developer reference docs
 ```
@@ -102,7 +104,9 @@ Required columns:
 
 ### Constraints File (Optional)
 
-See [Constraints Documentation](docs/CONSTRAINTS.md)
+See [Constraints Documentation](docs/CONSTRAINTS.md). For the engine's behavioral
+rules (precedence, scoping, ceiling semantics) see
+[Constraint Rules & Mechanics](docs/CONSTRAINTS_RULES.md).
 
 ## Optimization Scenarios
 

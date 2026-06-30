@@ -52,6 +52,21 @@ def canonical_category_key(value):
     return canonical_category(value)
 
 
+def expected_constraint_columns():
+    """The canonical 14-column constraint schema, in order.
+
+    Single source of truth shared by the Excel upload path
+    (``process_constraints_file``) and the prebuilt per-port CSVs
+    (``components.constraints.prebuilt``) so both stay in lockstep.
+    """
+    return [
+        'Category', 'Carrier', 'Lane', 'Port', 'Week Number', 'Day of Week',
+        'Terminal', 'SSL', 'Vessel',
+        'Maximum Container Count', 'Minimum Container Count',
+        'Percent Allocation', 'Excluded FC', 'Priority Score'
+    ]
+
+
 def resolve_port_filter(value):
     """Return the list of Discharged Port values a constraint Port should match."""
     if value is None:
@@ -277,6 +292,118 @@ def credit_ceilings(ceilings, row_index, carrier, n):
             c['allocated'] += n
 
 
+def compute_scoped_lockouts(constraints_df, data):
+    """Pre-scan every lockout rule (Max 0 or Percent 0) into a per-(carrier, scope) ban.
+
+    Returns a list of ``{carrier, mask}`` where ``mask`` selects the rows the lockout
+    binds (built from the SAME build_scope_filters the allocation loop uses, so it
+    covers every scope dimension — Port, Vessel, Terminal, etc.). This is the
+    counterpart to :func:`compute_scoped_max_ceilings`, which deliberately keeps only
+    caps with ``cap > 0``; here we keep only the zeros. Used so the over-cap re-home
+    pass never reassigns volume to a carrier that is locked out of that row's scope
+    (e.g. moving capped TIW volume onto AOYV, which is banned from TIW).
+    """
+    lockouts = []
+    if constraints_df is None or len(constraints_df) == 0:
+        return lockouts
+    if 'Carrier' not in constraints_df.columns:
+        return lockouts
+    has_max = 'Maximum Container Count' in constraints_df.columns
+    has_pct = 'Percent Allocation' in constraints_df.columns
+    for _, mc in constraints_df.iterrows():
+        carrier = mc.get('Carrier')
+        if not is_valid_value(carrier):
+            continue
+        is_zero_max = has_max and pd.notna(mc.get('Maximum Container Count')) \
+            and mc.get('Maximum Container Count') == 0
+        is_zero_pct = has_pct and pd.notna(mc.get('Percent Allocation')) \
+            and mc.get('Percent Allocation') == 0
+        if not (is_zero_max or is_zero_pct):
+            continue
+        specs = build_scope_filters(mc, data)
+        mask = pd.Series(True, index=data.index)
+        for s in specs:
+            mask &= s['mask'].reindex(data.index, fill_value=False)
+        lockouts.append({'carrier': str(carrier).strip(), 'mask': mask})
+    return lockouts
+
+
+def carrier_locked_out(lockouts, row_index, carrier):
+    """True if ``carrier`` is locked out of ``row_index``'s scope by any lockout rule."""
+    if not carrier:
+        return False
+    carrier_key = norm_text(carrier)
+    for lk in lockouts:
+        if norm_text(lk['carrier']) != carrier_key:
+            continue
+        m = lk['mask']
+        if row_index in m.index and bool(m.loc[row_index]):
+            return True
+    return False
+
+
+# ==================== EVEN WEEKLY (DAY-OF-WEEK) DISTRIBUTION ====================
+# When a constraint allocates N containers, we spread them across the days of the
+# week instead of greedily draining the earliest rows. The day is taken from each
+# row's Ocean ETA (already materialized as the Excel WEEKDAY 'Day of Week' column,
+# Sun=1 … Sat=7). Per the business rule, Friday, Saturday and Sunday collapse into a
+# SINGLE bucket — the weekend counts as one "day" — leaving five buckets:
+#   Mon, Tue, Wed, Thu, Fri-Sun.
+# The split is round-robin and need not be perfectly even; it just keeps volume from
+# piling onto one weekday when the eligible rows span several.
+_DOW_BUCKET = {2: 'Mon', 3: 'Tue', 4: 'Wed', 5: 'Thu', 6: 'Fri-Sun', 7: 'Fri-Sun', 1: 'Fri-Sun'}
+_DOW_BUCKET_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri-Sun']
+# Rows with no / unparseable Day of Week land here so they still allocate (just not
+# as part of the even spread). Sorted last so dated rows are balanced first.
+_NO_DOW_BUCKET = '__nodow__'
+
+
+def day_bucket(dow_value):
+    """Map an Excel WEEKDAY number (Sun=1 … Sat=7) to a weekly-distribution bucket.
+
+    Mon–Thu are their own buckets; Fri(6)/Sat(7)/Sun(1) collapse to one 'Fri-Sun'
+    bucket. Missing or unparseable values map to ``_NO_DOW_BUCKET``.
+    """
+    try:
+        n = int(dow_value)
+    except (TypeError, ValueError):
+        return _NO_DOW_BUCKET
+    return _DOW_BUCKET.get(n, _NO_DOW_BUCKET)
+
+
+def bucket_iter_order(bucket_caps):
+    """Day buckets present in ``bucket_caps``, in Mon→Fri-Sun order, no-DOW last."""
+    order = [b for b in _DOW_BUCKET_ORDER if b in bucket_caps]
+    order += [b for b in bucket_caps if b not in _DOW_BUCKET_ORDER]
+    return order
+
+
+def round_robin_quota(target, bucket_caps):
+    """Split ``target`` containers across day buckets round-robin (one at a time).
+
+    Walks the buckets in day order, handing out a single container per turn and
+    skipping any bucket that has reached its available-container cap, so a thin
+    bucket never gets a quota it can't fill — the overflow cycles to buckets that
+    still have room. Returns ``{bucket: count}`` summing to
+    ``min(target, total available)``. Five buckets max, so the per-container loop is
+    cheap even for large targets.
+    """
+    order = bucket_iter_order(bucket_caps)
+    alloc = {b: 0 for b in order}
+    remaining = min(int(target), int(sum(bucket_caps.values())))
+    progressed = True
+    while remaining > 0 and progressed:
+        progressed = False
+        for b in order:
+            if remaining <= 0:
+                break
+            if alloc[b] < bucket_caps[b]:
+                alloc[b] += 1
+                remaining -= 1
+                progressed = True
+    return alloc
+
+
 def allocate_specific_containers(row, num_containers, allocated_tracker, target_carrier, week_num, priority=None):
     """
     Allocate specific container IDs from a row, tracking which containers are allocated
@@ -402,12 +529,7 @@ def process_constraints_file(constraints_file):
         constraints_df = constraints_df.rename(columns=column_mapping)
         
         # Define expected columns
-        expected_cols = [
-            'Category', 'Carrier', 'Lane', 'Port', 'Week Number', 'Day of Week',
-            'Terminal', 'SSL', 'Vessel',
-            'Maximum Container Count', 'Minimum Container Count',
-            'Percent Allocation', 'Excluded FC', 'Priority Score'
-        ]
+        expected_cols = expected_constraint_columns()
         
         # Check if Priority Score exists (required)
         if 'Priority Score' not in constraints_df.columns:
@@ -627,40 +749,41 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     # Key: container_id, Value: dict with {carrier, week, row_idx}
     allocated_containers_tracker = {}
 
-    # Track cumulative containers already allocated to each carrier within a (port, category)
-    # scope. Used to enforce the "broader rule is the carrier's total ceiling" semantic:
-    # if PGLT received 7 containers from a P10 ABE8 lane rule, a later P8 "NYC CD 30%" rule
-    # for PGLT subtracts those 7 from the 30% target so PGLT doesn't double-dip across
-    # priorities. Key: (carrier, port_or_'__any__', category_or_'__any__'). Lane is NOT
-    # part of the key because a lane-level allocation should still count against a
-    # port-level ceiling for the same carrier.
-    carrier_scope_allocated = {}
-
+    # Enforce the "broader rule is the carrier's total ceiling" semantic — e.g. if PGLT
+    # received 7 containers from a P10 ABE8 lane rule, a later P8 "NYC CD 30%" rule for
+    # PGLT subtracts those 7 from the 30% target so PGLT doesn't double-dip across
+    # priorities. The tally is derived on demand from allocated_containers_tracker by
+    # exact scope containment (see _lookup_carrier_scope_total) rather than a precomputed
+    # (port, category) key, so it credits nested earlier rules WITHOUT letting disjoint
+    # scopes (different terminal/vessel/week) cannibalize each other.
     def _lookup_carrier_scope_total(carrier, constraint_row):
         """How many containers has `carrier` already received from earlier constraints
-        in the scope this constraint covers? Resolves the constraint's Port through
-        the alias map and its Category to the canonical bucket — the SAME key the
-        write side buckets by — so a broad 'CD' rule reads back the cumulative tally
-        regardless of which category spelling each earlier row carried.
+        whose source rows fall INSIDE this constraint's scope?
+
+        Counts by EXACT scope containment: we rebuild this constraint's full scope mask
+        over the original snapshot (via build_scope_filters — every dimension: Port,
+        Category, Lane, Week, Day, Terminal, SSL, Vessel) and tally tracked containers
+        assigned to ``carrier`` whose row index is inside that mask. A narrower earlier
+        rule nested in this scope (e.g. a lane within a port) still credits this rule, so
+        a broader rule remains the carrier's total ceiling — but a DISJOINT earlier rule
+        (e.g. a cap on a different Terminal or Vessel) contributes nothing, so disjoint
+        caps no longer cannibalize each other's targets. (The old (port, category) key
+        ignored Terminal/Vessel/SSL/Week and let a VES_A allocation zero out a T30 rule.)
         """
         if not carrier:
             return 0
-        port_val = constraint_row.get('Port')
-        cat_val = constraint_row.get('Category')
-
-        if pd.notna(port_val) and str(port_val).strip():
-            ports = resolve_port_filter(port_val)
-        else:
-            ports = ['__any__']
-        if pd.notna(cat_val) and str(cat_val).strip():
-            cats = [canonical_category_key(cat_val)]
-        else:
-            cats = ['__any__']
-
+        specs = build_scope_filters(constraint_row, original_data)
+        mask = pd.Series(True, index=original_data.index)
+        for s in specs:
+            mask &= s['mask'].reindex(original_data.index, fill_value=False)
+        in_scope_rows = set(original_data.index[mask])
+        if not in_scope_rows:
+            return 0
+        carrier_key = norm_text(carrier)
         total = 0
-        for p in ports:
-            for c in cats:
-                total += carrier_scope_allocated.get((carrier, p, c), 0)
+        for meta in allocated_containers_tracker.values():
+            if meta.get('row_idx') in in_scope_rows and norm_text(meta.get('carrier')) == carrier_key:
+                total += 1
         return total
     
     # Track carriers with MAXIMUM constraints (hard caps)
@@ -681,6 +804,9 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     # Single source of truth (also consumed by the peel pile) — see
     # compute_scoped_max_ceilings / ceiling_headroom / credit_ceilings at module scope.
     scoped_max_ceilings = compute_scoped_max_ceilings(constraints_df, original_data)
+    # Parallel structure for lockout rules (Max 0 / Percent 0): the over-cap re-home
+    # pass must never reassign volume to a carrier banned from that row's scope.
+    scoped_lockouts = compute_scoped_lockouts(constraints_df, original_data)
 
     def _ceiling_headroom(row_index, carrier):
         return ceiling_headroom(scoped_max_ceilings, row_index, carrier)
@@ -1294,25 +1420,19 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
         # Allocate containers at the CONTAINER ID level (not just counts)
         allocated_containers_count = 0
 
-        # While allocating, count how many containers landed in each (port, category) bucket
-        # for the target carrier. This is what later, broader rules use to clip themselves —
-        # we track based on the row's *actual* port/category, not the constraint's filters,
-        # so a lane-only P10 rule still credits the carrier's port+category ceiling at P8.
-        per_row_scope_counts = {}  # {(port_or_any, category_or_any): count}
-
         # Only process allocation if we have containers to allocate
         if target_containers > 0 and len(eligible_data) > 0:
-            # Sort by week for consistency
+            # Sort by week for consistency; this is also the order rows are visited
+            # WITHIN each day bucket below.
             allocation_data = eligible_data.sort_values('Week Number')
 
-            for row_idx, row in allocation_data.iterrows():
-                if allocated_containers_count >= target_containers:
-                    # We've allocated enough - stop processing
-                    break
-
-                # How many MORE containers do we need?
-                containers_needed = target_containers - allocated_containers_count
-
+            def _allocate_from_row(row_idx, row, want):
+                """Allocate up to ``want`` containers from a single row to the target
+                carrier, honoring the scoped-max ceiling. Builds the constrained record,
+                credits ceilings/scope tallies, and decrements remaining_data. Returns the
+                number of containers actually taken (0 if none/headroom exhausted)."""
+                if want <= 0:
+                    return 0
                 # Hard scoped-max ceiling: never let THIS row push the target carrier past
                 # a max rule binding this row (e.g. a vessel cap), even when the current
                 # constraint is a different (broader) rule like min-130. If a ceiling is
@@ -1321,85 +1441,107 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                 headroom = _ceiling_headroom(row_idx, target_carrier) if target_carrier else None
                 if headroom is not None:
                     if headroom <= 0:
-                        continue
-                    containers_needed = min(containers_needed, headroom)
+                        return 0
+                    want = min(want, headroom)
 
-                # Allocate specific container IDs from this row
-                week_num = row.get('Week Number', None)
+                week_num_local = row.get('Week Number', None)
                 allocated_ids, remaining_ids = allocate_specific_containers(
-                    row, containers_needed, allocated_containers_tracker, target_carrier, week_num,
+                    row, want, allocated_containers_tracker, target_carrier, week_num_local,
                     priority=constraint['Priority Score']
                 )
+                if len(allocated_ids) == 0:
+                    return 0
 
-                if len(allocated_ids) > 0:
-                    # Create constrained record with ONLY the allocated container IDs
-                    constrained_record = row.copy()
-                    constrained_record['Container Numbers'] = join_container_ids(allocated_ids)
-                    constrained_record['Container Count'] = len(allocated_ids)
+                # Create constrained record with ONLY the allocated container IDs
+                constrained_record = row.copy()
+                constrained_record['Container Numbers'] = join_container_ids(allocated_ids)
+                constrained_record['Container Count'] = len(allocated_ids)
 
-                    # ASSIGN to target carrier (override existing carrier)
-                    if target_carrier:
-                        # Check which carrier columns exist
-                        has_carrier = 'Carrier' in constrained_record.index
-                        has_dray_scac = 'Dray SCAC(FL)' in constrained_record.index
+                # ASSIGN to target carrier (override existing carrier)
+                if target_carrier:
+                    if 'Dray SCAC(FL)' in constrained_record.index:
+                        constrained_record['Dray SCAC(FL)'] = target_carrier
+                    if 'Carrier' in constrained_record.index:
+                        constrained_record['Carrier'] = target_carrier
 
-                        # Set BOTH carrier columns if they exist
-                        if has_dray_scac:
-                            constrained_record['Dray SCAC(FL)'] = target_carrier
-                        if has_carrier:
-                            constrained_record['Carrier'] = target_carrier
+                constrained_record['Constraint_Priority'] = constraint['Priority Score']
+                constrained_record['Constraint_Method'] = allocation_method
+                constrained_record['Constraint_Description'] = constraint_desc
 
-                    constrained_record['Constraint_Priority'] = constraint['Priority Score']
-                    constrained_record['Constraint_Method'] = allocation_method
-                    constrained_record['Constraint_Description'] = constraint_desc
+                constrained_records.append(constrained_record)
 
-                    constrained_records.append(constrained_record)
-                    allocated_containers_count += len(allocated_ids)
+                # Credit these containers against every scoped max ceiling that binds
+                # this row+carrier, so subsequent rows (and later constraints) see the
+                # reduced headroom and the cap holds across the whole run.
+                _credit_ceilings(row_idx, target_carrier, len(allocated_ids))
 
-                    # Credit these containers against every scoped max ceiling that binds
-                    # this row+carrier, so subsequent rows (and later constraints) see the
-                    # reduced headroom and the cap holds across the whole run.
-                    _credit_ceilings(row_idx, target_carrier, len(allocated_ids))
+                # Update remaining_data: Remove allocated containers from this row
+                if len(remaining_ids) > 0:
+                    remaining_data.loc[row_idx, 'Container Numbers'] = join_container_ids(remaining_ids)
+                    remaining_data.loc[row_idx, 'Container Count'] = len(remaining_ids)
+                else:
+                    remaining_data.loc[row_idx, 'Container Count'] = 0
+                    remaining_data.loc[row_idx, 'Container Numbers'] = ''
 
-                    # Bucket this row's count by (data port, data category) so later rules
-                    # can credit the carrier's allocation regardless of how this constraint
-                    # was scoped.
-                    if target_carrier:
-                        row_port = row.get('Discharged Port')
-                        # Bucket by the canonical category so the read side
-                        # (_lookup_carrier_scope_total) keys by the same value.
-                        row_cat = canonical_category_key(row.get('Category'))
-                        bucket_key = (
-                            row_port if pd.notna(row_port) and str(row_port).strip() else '__any__',
-                            row_cat if row_cat else '__any__',
+                return len(allocated_ids)
+
+            # ---- Even weekly distribution (round-robin across day-of-week buckets) ----
+            # Group the eligible rows into day buckets by their Ocean ETA weekday
+            # (Mon, Tue, Wed, Thu, Fri-Sun — weekend collapsed). Give each bucket a
+            # round-robin quota of the target, then fill bucket by bucket. This keeps a
+            # constraint's volume from piling onto one weekday when the eligible rows
+            # span several days. Rows with no parseable day still allocate, via the
+            # spill pass below, so the target is never sacrificed to the spread.
+            bucket_rows = {}      # bucket -> list of (row_idx, row)
+            bucket_caps = {}      # bucket -> available containers in that bucket
+            dow_present = 'Day of Week' in allocation_data.columns
+            for row_idx, row in allocation_data.iterrows():
+                avail = int(row.get('_available_containers', 0) or 0)
+                if avail <= 0:
+                    continue
+                bucket = day_bucket(row.get('Day of Week')) if dow_present else _NO_DOW_BUCKET
+                bucket_rows.setdefault(bucket, []).append((row_idx, row))
+                bucket_caps[bucket] = bucket_caps.get(bucket, 0) + avail
+
+            # Quota only across DATED buckets — undated rows are not part of the even
+            # spread; they backfill any shortfall in the spill pass.
+            dated_caps = {b: c for b, c in bucket_caps.items() if b != _NO_DOW_BUCKET}
+            quota = round_robin_quota(target_containers, dated_caps) if dated_caps else {}
+
+            # Pass 1 — fill each dated bucket up to its round-robin quota.
+            for bucket in bucket_iter_order(dated_caps):
+                want_bucket = quota.get(bucket, 0)
+                for row_idx, row in bucket_rows.get(bucket, []):
+                    if want_bucket <= 0 or allocated_containers_count >= target_containers:
+                        break
+                    took = _allocate_from_row(row_idx, row, want_bucket)
+                    want_bucket -= took
+                    allocated_containers_count += took
+
+            # Pass 2 — spill. The quota pass can fall short when a bucket's ceiling
+            # headroom blocked it, or when undated rows hold the only volume. Sweep all
+            # rows (dated buckets first, in day order, then undated) to top up to target.
+            if allocated_containers_count < target_containers:
+                spill_order = bucket_iter_order(dated_caps) + (
+                    [_NO_DOW_BUCKET] if _NO_DOW_BUCKET in bucket_rows else []
+                )
+                for bucket in spill_order:
+                    for row_idx, row in bucket_rows.get(bucket, []):
+                        if allocated_containers_count >= target_containers:
+                            break
+                        # Re-fetch the live row so we see containers already taken in pass 1.
+                        live_row = remaining_data.loc[row_idx]
+                        took = _allocate_from_row(
+                            row_idx, live_row,
+                            target_containers - allocated_containers_count,
                         )
-                        per_row_scope_counts[bucket_key] = (
-                            per_row_scope_counts.get(bucket_key, 0) + len(allocated_ids)
-                        )
+                        allocated_containers_count += took
+                    if allocated_containers_count >= target_containers:
+                        break
 
-                    # Update remaining_data: Remove allocated containers from this row
-                    if len(remaining_ids) > 0:
-                        # Partial allocation - update with remaining containers
-                        remaining_data.loc[row_idx, 'Container Numbers'] = join_container_ids(remaining_ids)
-                        remaining_data.loc[row_idx, 'Container Count'] = len(remaining_ids)
-                    else:
-                        # Full allocation - mark row for removal (set container count to 0)
-                        remaining_data.loc[row_idx, 'Container Count'] = 0
-                        remaining_data.loc[row_idx, 'Container Numbers'] = ''
-
-        # Roll the per-row buckets into carrier_scope_allocated so later, broader constraints
-        # see the credit. Each bucket is also propagated to its '__any__' rollups so a NYC/CD
-        # allocation counts against later (NYC, '__any__'), ('__any__', CD), and global rules
-        # for the same carrier.
-        if target_carrier and per_row_scope_counts:
-            for (row_port, row_cat), n in per_row_scope_counts.items():
-                for sk in {
-                    (target_carrier, row_port, row_cat),
-                    (target_carrier, row_port, '__any__'),
-                    (target_carrier, '__any__', row_cat),
-                    (target_carrier, '__any__', '__any__'),
-                }:
-                    carrier_scope_allocated[sk] = carrier_scope_allocated.get(sk, 0) + n
+        # (Cumulative cross-priority credit is now derived on demand from
+        # allocated_containers_tracker by exact scope containment — see
+        # _lookup_carrier_scope_total — so no per-row rollup is needed here.)
 
         # For maximum constraints, we DON'T remove containers from unconstrained table
         # Instead, we rely on the max_constrained_carriers exclusion list in optimization
@@ -1565,7 +1707,7 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
     # holds end-to-end: reassign to an eligible alternate carrier on the lane if one
     # exists, otherwise clear the carrier (the scenario optimizer then places it, and
     # the lockout list keeps it off the capped carrier).
-    if scoped_max_ceilings and len(remaining_data) > 0:
+    if (scoped_max_ceilings or scoped_lockouts) and len(remaining_data) > 0:
         carrier_col_rd = 'Dray SCAC(FL)' if 'Dray SCAC(FL)' in remaining_data.columns else 'Carrier'
         lane_carriers_rd = {}
         if 'Lane' in remaining_data.columns:
@@ -1596,7 +1738,13 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
         stripped = 0
         for idx in remaining_data.index:
             cur = remaining_data.at[idx, carrier_col_rd] if carrier_col_rd in remaining_data.columns else None
-            if not _overcap_carrier_for_row(idx, cur):
+            # Strip a carrier off this unconstrained row if it is EITHER over its
+            # in-scope cap OR locked out of this row's scope. A lockout (Max 0) only
+            # blocks NEW assignment during allocation; volume sitting on its ORIGINAL
+            # carrier (e.g. RKNE containers already at SEA, where RKNE is banned) would
+            # otherwise survive in the unconstrained table and breach Rule 0.
+            if not (_overcap_carrier_for_row(idx, cur)
+                    or carrier_locked_out(scoped_lockouts, idx, cur)):
                 continue
             # Find an alternate carrier on this lane that is NOT itself over-cap here and
             # is not a lockout carrier for this row.
@@ -1608,6 +1756,11 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     continue
                 if _overcap_carrier_for_row(idx, c):
                     continue
+                # Never re-home onto a carrier locked out of this row's scope
+                # (e.g. AOYV is Max-0 at TIW): that would trade a cap breach for a
+                # lockout breach. Skip such candidates so the row clears instead.
+                if carrier_locked_out(scoped_lockouts, idx, c):
+                    continue
                 alt = c
                 break
             remaining_data.at[idx, carrier_col_rd] = alt if alt else ''
@@ -1616,9 +1769,9 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
             stripped += 1
         if stripped:
             log_explanation(
-                f"Scoped-max enforcement: moved {stripped} unconstrained row(s) off carriers "
-                "that had exhausted their max ceiling in-scope, so the cap holds across the "
-                "unconstrained allocation too.",
+                f"Scoped-max / lockout enforcement: moved {stripped} unconstrained row(s) off "
+                "carriers that had exhausted their max ceiling in-scope or were locked out of "
+                "the row's scope, so caps and lockouts hold across the unconstrained allocation too.",
                 'info'
             )
 

@@ -1,0 +1,4 @@
+Priority Score,Carrier,Category,Lane,Port,Week Number,Day of Week,Terminal,SSL,Vessel,Maximum Container Count,Minimum Container Count,Percent Allocation,Excluded FC
+100,ATMI,CD,,LAX,,,,,,50,,,
+99,FRQT,,,LAX,,,,,,,,30,
+98,RKNE,,,LAX,,,,,VIENNA EXPRESS,40,,,

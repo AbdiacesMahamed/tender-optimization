@@ -355,11 +355,15 @@ body(doc, "The total cost in the cost cards always includes both constrained and
 
 h2(doc, "1.6 Peel Pile Allocations")
 body(doc, "A peel pile is a group of containers from the same Vessel + Week + Discharged "
-          "Port + Terminal that has 30 or more containers — large enough to justify a "
-          "dedicated carrier assignment. The dashboard finds these automatically.")
+          "Port + Terminal that is large enough to justify a dedicated carrier assignment. "
+          "The qualifying size depends on the port and terminal: the Pacific-Northwest "
+          "ports (Tacoma/TIW and Seattle/SEA) use per-terminal limits (Washington United 40, "
+          "Husky 45, Terminal 18 and Terminal 5 30, and an 80-container default for any other "
+          "PNW terminal), while Oakland (OAK) uses 30. Other ports do not surface peel piles. "
+          "The dashboard finds these automatically.")
 h3(doc, "Workflow")
 numbered(doc, "Scroll to the Peel Pile Analysis section under the analysis table.")
-numbered(doc, "Review the qualifying vessel groups (30+ containers).")
+numbered(doc, "Review the qualifying vessel groups (size threshold depends on the port/terminal).")
 numbered(doc, "Select a group from the dropdown.")
 numbered(doc, "Pick one or more carriers in the multiselect.")
 numbered(doc, "Click Add to Queue (fast — queues without recalculating). Repeat for more groups.")
