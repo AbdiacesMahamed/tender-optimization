@@ -444,5 +444,91 @@ def filter_excluded_carrier_facility_rows(
             carrier_match = df[carrier_col] == carrier
             facility_match = normalize_facility_series(df['Facility']) == excluded_fc.upper()[:4]
             keep_mask &= ~(carrier_match & facility_match)
-    
+
     return df[keep_mask].copy()
+
+
+# ==================== ARROW-SAFE DISPLAY ====================
+
+def arrow_safe(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Return a copy of ``df`` whose columns serialize cleanly to Arrow.
+
+    Streamlit renders every ``st.dataframe`` / ``st.data_editor`` by converting
+    the frame to an Arrow table via ``pyarrow``. A single ``object`` column that
+    mixes types — e.g. some cells ``int`` and others ``str`` — makes pyarrow raise
+    ``ArrowTypeError: Expected bytes, got a 'int' object``, which propagates out of
+    Streamlit, kills the script run, and (on hosted platforms) trips the health
+    check with a "connection reset by peer" on ``/healthz``. Passthrough GVT
+    columns (e.g. ``Carp Appointment``) are the usual culprit: a numeric-looking
+    column with a few blank/text cells lands as ``object`` with mixed python types.
+
+    This coerces any ``object`` column that holds more than one python scalar type
+    (ignoring nulls) to string, leaving clean single-type columns untouched so
+    numeric sorting/formatting elsewhere is unaffected. Best-effort and cheap; it
+    only rewrites the offending columns. Returns the input unchanged if it is not a
+    non-empty DataFrame.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+
+    def _stringify(series):
+        return series.map(
+            lambda v: "" if pd.isna(v)
+            else (str(int(v)) if isinstance(v, float) and float(v).is_integer() else str(v))
+        )
+
+    out = df
+    copied = False
+
+    # Duplicate column labels make pyarrow raise before it even looks at dtypes;
+    # uniquify them first so the rest of the pass (and the render) can proceed.
+    if df.columns.duplicated().any():
+        out = df.copy()
+        copied = True
+        seen, new_cols = {}, []
+        for label in out.columns:
+            if label in seen:
+                seen[label] += 1
+                new_cols.append(f"{label}.{seen[label]}")
+            else:
+                seen[label] = 0
+                new_cols.append(label)
+        out.columns = new_cols
+        df = out
+
+    for col in df.columns:
+        if df[col].dtype != object:
+            continue
+        non_null = df[col].dropna()
+        if non_null.empty:
+            continue
+        # Coerce when the column either mixes python scalar types (int + str — the
+        # classic 'Carp Appointment' crash) OR fails a direct pyarrow probe. The
+        # probe matters because Streamlit Cloud's pyarrow is stricter than many
+        # local builds, so a column that serializes here can still crash on deploy;
+        # we stringify anything Arrow can't take cleanly. (str/None-only object
+        # columns serialize fine and are left untouched so sorting/formatting hold.)
+        needs_fix = non_null.map(type).nunique() > 1
+        if not needs_fix:
+            try:
+                import pyarrow as _pa
+                _pa.array(df[col], from_pandas=True)
+            except Exception:
+                needs_fix = True
+        if needs_fix:
+            if not copied:
+                out = df.copy()
+                copied = True
+            out[col] = _stringify(df[col])
+    return out
+
+
+def st_dataframe_safe(df, *args, **kwargs):
+    """``st.dataframe`` wrapper that first makes the frame Arrow-serializable.
+
+    Drop-in replacement for ``st.dataframe`` at call sites that render
+    GVT-derived frames carrying arbitrary passthrough columns. See
+    :func:`arrow_safe` for why mixed-type ``object`` columns would otherwise crash
+    the whole app run.
+    """
+    return st.dataframe(arrow_safe(df), *args, **kwargs)

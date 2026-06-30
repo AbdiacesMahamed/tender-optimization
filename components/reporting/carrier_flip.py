@@ -33,6 +33,23 @@ KNOWN_CARRIERS = {
     'RDXY', 'SONW', 'XPDR', 'PGLT', 'AOYV', 'FRQT', 'ARVY', 'AZGM'
 }
 
+#: Discharged-Port code aliases — the SAME physical port pair under two codes.
+#: The GVT data and the rate card sometimes use different codes for one facility
+#: (e.g. GVT says EWR, the rate card files the same FC under NYC), which makes the
+#: exact SCAC+Port+FC rate lookup miss even though a rate exists. Mirrors
+#: ``components.constraints.processor.PORT_ALIASES`` (kept as a local literal to
+#: avoid importing the constraints package into the reporting layer). Used to
+#: retry the exact lookup under each aliased port — NOT a blanket cross-port
+#: match, because some FCs carry genuinely different rates under non-aliased
+#: ports (e.g. ATMI BWI4 differs between BAL/BWI and VIP).
+#: Keyed by 3-letter port code → list of equivalent 3-letter codes (incl. itself).
+PORT_CODE_ALIASES = {
+    'NYC': ['NYC', 'EWR'],
+    'EWR': ['NYC', 'EWR'],
+    'LAX': ['LAX', 'LGB'],
+    'LGB': ['LAX', 'LGB'],
+}
+
 # SCAC codes are 2-4 uppercase letters; we accept any 2-4 letter token as a
 # potential carrier so that new carriers aren't silently dropped.
 _SCAC_RE = re.compile(r'[A-Z]{2,4}')
@@ -335,6 +352,25 @@ def _lookup_rate_from_map(scac, lane, fc, rate_map):
         if key in rate_map:
             return rate_map[key], 'exact'
 
+    # Strategy 1b: aliased-port exact match. The GVT lane and the rate card can
+    # use different codes for the same physical port (e.g. GVT 'USEWRACY2' vs rate
+    # card 'USNYCACY2'); the FC is identical, only the port code differs. Retry the
+    # EXACT lookup with the lane's port swapped for each alias. This stays precise
+    # (same SCAC + same FC, just the equivalent port) so it can't pull a wrong
+    # cross-port rate the way the looser FC-only strategy can. Lane layout is
+    # 'US' + 3-letter port + FC, so the port code is chars [2:5].
+    if lane and len(str(lane).strip()) >= 5:
+        lane_str = str(lane).strip().upper()
+        port_code = lane_str[2:5]              # e.g. 'EWR' from 'USEWRACY2'
+        fc_part = lane_str[5:]                  # e.g. 'ACY2'
+        aliases = PORT_CODE_ALIASES.get(port_code, [])
+        for alt in aliases:
+            if alt == port_code:
+                continue
+            alt_key = scac + 'US' + alt + fc_part
+            if alt_key in rate_map:
+                return rate_map[alt_key], 'port-alias'
+
     # Strategy 2: SCAC + port prefix (without FC suffix)
     # Only use if exactly ONE rate_map entry matches to avoid ambiguity
     if lane and len(str(lane).strip()) >= 5:
@@ -375,6 +411,42 @@ def _strip_facility_suffix(fac):
     if not isinstance(fac, str) or not fac.strip():
         return ''
     return re.sub(r'-[A-Z0-9]+$', '', fac.strip().upper())
+
+
+def _resolve_lane_fc(row):
+    """Resolve (lane, fc) for a rate lookup from a merged GVT+tender row.
+
+    Robust to two real-world shapes that previously broke the **New Rate** lookup
+    (Old Rate already did this; New Rate did not, so it silently came back blank):
+
+    * **Suffixed Lane columns.** When the GVT frame and the tender mapping BOTH
+      carry a 'Lane' column, the merge renames them 'Lane_x'/'Lane_y' and there is
+      no plain 'Lane'. We try 'Lane', then 'Lane_y' (tender side), then 'Lane_x'
+      (GVT side), so a real lane is found instead of None.
+    * **Missing Lane.** If no lane column has a value, reconstruct it from GVT's
+      own Discharged Port + Facility ('US' + Port + stripped_Facility), the same
+      fallback ``lookup_old_carrier_rate`` uses. FC is filled from the stripped
+      facility when absent.
+
+    Returns ``(lane_or_None, fc_or_None)``.
+    """
+    lane = None
+    for col in ('Lane', 'Lane_y', 'Lane_x'):
+        val = row.get(col)
+        if pd.notna(val) and str(val).strip():
+            lane = str(val).strip()
+            break
+    fc = row.get('FC') if pd.notna(row.get('FC')) else None
+
+    if not lane:
+        port = row.get('Discharged Port')
+        fac = row.get('Facility')
+        if pd.notna(port) and str(port).strip():
+            fc_str = _strip_facility_suffix(fac) if pd.notna(fac) else ''
+            lane = 'US' + str(port).strip().upper() + fc_str
+            if not fc and fc_str:
+                fc = fc_str
+    return lane, fc
 
 
 def lookup_old_carrier_rate(gvt_merged, rate_map, dray_scac_col='Dray SCAC(FL)'):
@@ -673,11 +745,16 @@ def merge_gvt_with_carrier_flips(gvt_df, container_mapping, rate_map=None):
 
         def _get_new_rate(row):
             scac = row.get('NEW SCAC')
-            lane = row.get('Lane') if pd.notna(row.get('Lane')) else None
-            fc = row.get('FC') if pd.notna(row.get('FC')) else None
             if pd.isna(scac) or not str(scac).strip():
                 new_methods.append(None)
                 return None
+            # Resolve lane/FC robustly: handles the Lane_x/Lane_y merge collision
+            # and reconstructs the lane from Port+Facility when absent — the same
+            # fallback Old Rate uses. Without this the New Rate lookup got lane=None
+            # and silently fell back to an ambiguous FC-only match (no match on a
+            # real multi-lane card), so New Rate came back blank while Old Rate
+            # still resolved. See _resolve_lane_fc.
+            lane, fc = _resolve_lane_fc(row)
             rate, method = _lookup_rate_from_map(str(scac).strip(), lane, fc, rate_map)
             new_methods.append(method)
             return rate
@@ -895,6 +972,72 @@ def run_carrier_flip_analysis(tender_dfs=None, constrained_dfs=None,
 
 
 # ============================================================================
+# Pivot table (GVT by port x new SCAC)
+# ============================================================================
+
+def _find_gvt_port_col(df):
+    """Find the discharged-port column in a GVT dataframe.
+
+    Prefers an exact 'Discharged Port' match, then any column containing
+    'discharged' + 'port', then any column containing 'port'.
+    Returns the actual column name, or None.
+    """
+    for col in df.columns:
+        if col.strip().lower() == 'discharged port':
+            return col
+    for col in df.columns:
+        low = col.lower()
+        if 'discharged' in low and 'port' in low:
+            return col
+    for col in df.columns:
+        if 'port' in col.lower():
+            return col
+    return None
+
+
+def build_gvt_pivot(gvt_merged):
+    """Build a pivot table of container counts by Port (rows) x NEW SCAC (cols).
+
+    Each cell is the count of containers at that Discharged Port assigned to
+    that NEW SCAC by the tender allocation. Only rows with a NEW SCAC are
+    counted (unassigned GVT rows are excluded). A 'Total' row and column are
+    appended. Returns a DataFrame with the port as the first column, or None
+    if the required columns are missing or there are no assigned containers.
+    """
+    if gvt_merged is None or 'NEW SCAC' not in gvt_merged.columns:
+        return None
+
+    port_col = _find_gvt_port_col(gvt_merged)
+    container_col = _find_gvt_container_col(gvt_merged)
+    if port_col is None:
+        return None
+
+    df = gvt_merged[gvt_merged['NEW SCAC'].notna()].copy()
+    if df.empty:
+        return None
+
+    df['NEW SCAC'] = df['NEW SCAC'].astype(str).str.strip()
+    df[port_col] = df[port_col].fillna('(blank)').astype(str).str.strip()
+
+    # Count containers; one GVT row = one container, so size() is the count.
+    pivot = pd.pivot_table(
+        df,
+        index=port_col,
+        columns='NEW SCAC',
+        values=container_col if container_col else 'NEW SCAC',
+        aggfunc='count',
+        fill_value=0,
+    )
+
+    # Ensure integer counts, then append Total row/column.
+    pivot = pivot.astype(int)
+    pivot['Total'] = pivot.sum(axis=1)
+    pivot.loc['Total'] = pivot.sum(axis=0)
+
+    return pivot.reset_index()
+
+
+# ============================================================================
 # Excel export
 # ============================================================================
 
@@ -927,6 +1070,9 @@ def build_flip_report_excel(results):
         sheets.append(('Constrained Allocations', results['constrained']))
     if results.get('gvt_merged') is not None:
         sheets.append(('GVT with New SCAC', results['gvt_merged']))
+        pivot = build_gvt_pivot(results['gvt_merged'])
+        if pivot is not None:
+            sheets.append(('GVT Pivot (Port x New SCAC)', pivot))
 
     if not sheets:
         return None
@@ -1048,7 +1194,15 @@ def show_carrier_flip_report(in_app_gvt=None, in_app_rate=None):
     # ---- Result tables ----
     if results.get('gvt_merged') is not None:
         st.markdown("**GVT with New SCAC**")
-        st.dataframe(results['gvt_merged'], use_container_width=True, hide_index=True)
+        # Raw GVT-merged frame carries arbitrary passthrough columns (e.g.
+        # 'Carp Appointment') that can mix int/str in one object column and crash
+        # the Arrow serialization st.dataframe relies on — coerce them first.
+        from ..core.utils import arrow_safe
+        st.dataframe(arrow_safe(results['gvt_merged']), use_container_width=True, hide_index=True)
+        pivot = build_gvt_pivot(results['gvt_merged'])
+        if pivot is not None:
+            st.markdown("**GVT Pivot — Container Counts by Port × New SCAC**")
+            st.dataframe(pivot, use_container_width=True, hide_index=True)
     elif results.get('summary') is not None:
         st.markdown("**Carrier Flips Summary**")
         st.dataframe(results['summary'], use_container_width=True, hide_index=True)
