@@ -10,51 +10,18 @@ to carriers while minimizing a weighted objective function.
 """
 from __future__ import annotations
 
-import contextlib
-import os
 from typing import List, Tuple
 import pandas as pd
 import numpy as np
-from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, value, PULP_CBC_CMD
 
-# Silence the CBC solver. By default PuLP runs CBC with msg=1, so EVERY per-group
-# solve prints a full "Welcome to the CBC MILP Solver ... Optimal objective ..."
-# block to stdout. On a real dataset that is hundreds of solves per page render,
-# which (a) floods the platform log panel so real errors/tracebacks are buried,
-# and (b) is pure noise. Build the silent solver once and reuse it for every solve.
-_CBC_SILENT = PULP_CBC_CMD(msg=False)
-
-
-@contextlib.contextmanager
-def _suppress_solver_output():
-    """Redirect the OS-level stdout/stderr file descriptors to /dev/null.
-
-    Belt-and-suspenders over ``msg=False``: CBC is an external binary that writes
-    its banner straight to file descriptors 1/2, which PuLP's ``msg`` flag does
-    not always intercept (it varies by PuLP/CBC build and platform — which is why
-    the banner can still flood a hosted log even with msg disabled). Redirecting
-    the fds themselves catches it regardless. Restores the originals afterward, so
-    our own logging is unaffected. Best-effort: if fd dup isn't available, the
-    solve still runs (just possibly noisier).
-    """
-    try:
-        devnull = os.open(os.devnull, os.O_WRONLY)
-    except Exception:
-        yield
-        return
-    saved_out, saved_err = os.dup(1), os.dup(2)
-    try:
-        os.dup2(devnull, 1)
-        os.dup2(devnull, 2)
-        yield
-    finally:
-        os.dup2(saved_out, 1)
-        os.dup2(saved_err, 2)
-        for fd in (devnull, saved_out, saved_err):
-            try:
-                os.close(fd)
-            except Exception:
-                pass
+# NOTE: This module previously solved a tiny LP per [Lane, Week] group with PuLP's
+# CBC backend, spawning one CBC subprocess per group — hundreds per render. That
+# (a) flooded the logs with solver banners and (b) piled up subprocess memory on
+# the hosted 1 GB tier, the likely cause of the out-of-memory crashes. The per-
+# group problem has a linear objective, one sum-equality constraint, and box
+# bounds, so its optimum is closed-form (all volume to the lowest-coefficient
+# carrier). We compute that directly now — no solver, no subprocess, no banner —
+# so PuLP is no longer imported here.
 
 
 # Default grouping columns for optimization
@@ -330,77 +297,28 @@ def _optimize_single_group(
     else:
         normalized_perf_costs = pd.Series(0, index=carriers)
     
-    # Create LP problem
-    prob = LpProblem(f"Carrier_Optimization_Group", LpMinimize)
-    
-    # Decision variables: containers allocated to each carrier (Continuous for exact splits, rounded after)
-    allocation_vars = {
-        carrier: LpVariable(f"alloc_{carrier}", lowBound=0, upBound=total_containers, cat="Continuous")
-        for carrier in carriers
+    # CLOSED-FORM OPTIMUM (no LP solver subprocess).
+    #
+    # This is a linear program: minimize  Σ coeff[c] · alloc[c]  subject to
+    # Σ alloc[c] == total_containers and 0 ≤ alloc[c] ≤ total_containers, where
+    # coeff[c] = cost_weight·normalized_cost[c] + performance_weight·(1-perf)[c].
+    # With a linear objective, a single sum-equality constraint, and box bounds,
+    # the optimum is ALWAYS to put every container on the carrier with the
+    # smallest coefficient (ties → cheaper rate). CBC returns exactly this, so we
+    # compute it directly. This matters operationally: the previous code spawned a
+    # separate CBC binary per [Lane, Week] group — hundreds of subprocesses per
+    # render — which both flooded the logs with solver banners AND piled up memory
+    # on the hosted 1 GB tier (the likely cause of the out-of-memory crashes).
+    # The closed form spawns zero processes and allocates no solver memory.
+    coeff = {
+        c: cost_weight * float(normalized_costs[c])
+        + performance_weight * float(normalized_perf_costs[c])
+        for c in carriers
     }
-    
-    # Objective: minimize weighted combination of normalized cost and (1-performance)
-    objective = lpSum([
-        (cost_weight * normalized_costs[carrier] + performance_weight * normalized_perf_costs[carrier]) 
-        * allocation_vars[carrier]
-        for carrier in carriers
-    ])
-    prob += objective
-    
-    # Constraint: all containers must be allocated
-    prob += lpSum([allocation_vars[carrier] for carrier in carriers]) == total_containers
-    
-    # Solve the problem (silent CBC — no per-solve solver banner in the logs).
-    # msg=False suppresses it at the PuLP layer; the fd redirect catches anything
-    # the CBC binary writes straight to stdout/stderr regardless of platform.
-    with _suppress_solver_output():
-        prob.solve(_CBC_SILENT)
-    
-    # Check if solution is optimal
-    if LpStatus[prob.status] != "Optimal":
-        # If optimization fails, fall back to cheapest carrier
-        cheapest_carrier = min(carriers, key=lambda c: carrier_data[c]['rate'])
-        result = group_data[group_data[carrier_column] == cheapest_carrier].copy()
-        result[container_column] = total_containers
-        
-        if container_numbers_column in result.columns:
-            all_containers = ", ".join(
-                str(v) for v in group_data[container_numbers_column] if str(v).strip()
-            )
-            result[container_numbers_column] = all_containers
-        
-        result["Total Rate"] = carrier_data[cheapest_carrier]['rate'] * total_containers
-        return result.head(1)
-    
-    # Extract solution
-    allocations = {carrier: value(allocation_vars[carrier]) for carrier in carriers}
-    
-    # Filter out carriers with negligible allocation (< 0.5 containers)
-    significant_allocations = {
-        carrier: alloc for carrier, alloc in allocations.items() if alloc >= 0.5
-    }
-    
-    if not significant_allocations:
-        # No significant allocation, assign to cheapest
-        cheapest_carrier = min(carriers, key=lambda c: carrier_data[c]['rate'])
-        significant_allocations = {cheapest_carrier: total_containers}
-    
-    # Round allocations while preserving total container count
-    # Use largest-remainder method to ensure sum == total_containers
-    floored = {c: int(v) for c, v in significant_allocations.items()}
-    remainders = {c: significant_allocations[c] - floored[c] for c in floored}
-    shortfall = total_containers - sum(floored.values())
-    # Give the shortfall to carriers with the largest fractional remainders
-    for c in sorted(remainders, key=remainders.get, reverse=True):
-        if shortfall <= 0:
-            break
-        floored[c] += 1
-        shortfall -= 1
-    significant_allocations = {c: v for c, v in floored.items() if v > 0}
-    
-    if not significant_allocations:
-        cheapest_carrier = min(carriers, key=lambda c: carrier_data[c]['rate'])
-        significant_allocations = {cheapest_carrier: total_containers}
+    # argmin by (coefficient, then rate) so ties break toward the cheaper carrier,
+    # matching the old cheapest-carrier fallback behavior.
+    best_carrier = min(carriers, key=lambda c: (coeff[c], carrier_data[c]['rate']))
+    significant_allocations = {best_carrier: total_containers}
     
     # Build result DataFrame
     result_rows = []
