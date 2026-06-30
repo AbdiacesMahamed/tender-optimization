@@ -895,6 +895,72 @@ def run_carrier_flip_analysis(tender_dfs=None, constrained_dfs=None,
 
 
 # ============================================================================
+# Pivot table (GVT by port x new SCAC)
+# ============================================================================
+
+def _find_gvt_port_col(df):
+    """Find the discharged-port column in a GVT dataframe.
+
+    Prefers an exact 'Discharged Port' match, then any column containing
+    'discharged' + 'port', then any column containing 'port'.
+    Returns the actual column name, or None.
+    """
+    for col in df.columns:
+        if col.strip().lower() == 'discharged port':
+            return col
+    for col in df.columns:
+        low = col.lower()
+        if 'discharged' in low and 'port' in low:
+            return col
+    for col in df.columns:
+        if 'port' in col.lower():
+            return col
+    return None
+
+
+def build_gvt_pivot(gvt_merged):
+    """Build a pivot table of container counts by Port (rows) x NEW SCAC (cols).
+
+    Each cell is the count of containers at that Discharged Port assigned to
+    that NEW SCAC by the tender allocation. Only rows with a NEW SCAC are
+    counted (unassigned GVT rows are excluded). A 'Total' row and column are
+    appended. Returns a DataFrame with the port as the first column, or None
+    if the required columns are missing or there are no assigned containers.
+    """
+    if gvt_merged is None or 'NEW SCAC' not in gvt_merged.columns:
+        return None
+
+    port_col = _find_gvt_port_col(gvt_merged)
+    container_col = _find_gvt_container_col(gvt_merged)
+    if port_col is None:
+        return None
+
+    df = gvt_merged[gvt_merged['NEW SCAC'].notna()].copy()
+    if df.empty:
+        return None
+
+    df['NEW SCAC'] = df['NEW SCAC'].astype(str).str.strip()
+    df[port_col] = df[port_col].fillna('(blank)').astype(str).str.strip()
+
+    # Count containers; one GVT row = one container, so size() is the count.
+    pivot = pd.pivot_table(
+        df,
+        index=port_col,
+        columns='NEW SCAC',
+        values=container_col if container_col else 'NEW SCAC',
+        aggfunc='count',
+        fill_value=0,
+    )
+
+    # Ensure integer counts, then append Total row/column.
+    pivot = pivot.astype(int)
+    pivot['Total'] = pivot.sum(axis=1)
+    pivot.loc['Total'] = pivot.sum(axis=0)
+
+    return pivot.reset_index()
+
+
+# ============================================================================
 # Excel export
 # ============================================================================
 
@@ -927,6 +993,9 @@ def build_flip_report_excel(results):
         sheets.append(('Constrained Allocations', results['constrained']))
     if results.get('gvt_merged') is not None:
         sheets.append(('GVT with New SCAC', results['gvt_merged']))
+        pivot = build_gvt_pivot(results['gvt_merged'])
+        if pivot is not None:
+            sheets.append(('GVT Pivot (Port x New SCAC)', pivot))
 
     if not sheets:
         return None
@@ -1049,6 +1118,10 @@ def show_carrier_flip_report(in_app_gvt=None, in_app_rate=None):
     if results.get('gvt_merged') is not None:
         st.markdown("**GVT with New SCAC**")
         st.dataframe(results['gvt_merged'], use_container_width=True, hide_index=True)
+        pivot = build_gvt_pivot(results['gvt_merged'])
+        if pivot is not None:
+            st.markdown("**GVT Pivot — Container Counts by Port × New SCAC**")
+            st.dataframe(pivot, use_container_width=True, hide_index=True)
     elif results.get('summary') is not None:
         st.markdown("**Carrier Flips Summary**")
         st.dataframe(results['summary'], use_container_width=True, hide_index=True)

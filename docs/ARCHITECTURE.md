@@ -315,6 +315,7 @@ Detailed per-module documentation is in `docs/dev/`:
 - [Filters](dev/components-filters.md) — Filter UI and application
 - [Metrics](dev/components-metrics.md) — Cost calculations, analysis table, peel pile
 - [Constraints Processor](dev/components-constraints-processor.md) — File-based constraint engine
+- [Constraint Rules & Mechanics](CONSTRAINTS_RULES.md) — behavioral rules: precedence, scoping, ceilings, crediting
 - [Container Tracer](dev/components-container-tracer.md) — Carrier flip tracking
 - [Utils](dev/components-utils.md) — Shared helpers
 - [Other Components](dev/components-other.md) — Styling, summaries, analytics, visualizations

@@ -9,6 +9,7 @@ import pandas as pd
 from ..core.config_styling import section_header
 from ..core.utils import count_containers, parse_container_ids, join_container_ids
 from .processor import ceiling_headroom, credit_ceilings
+from config.peel_pile_thresholds import peel_pile_threshold, min_threshold
 
 
 def show_peel_pile_analysis(data):
@@ -58,8 +59,8 @@ def show_peel_pile_analysis(data):
     # Combined all-categories total: sum across categories for the same
     # Vessel/Week/Port/Terminal. A peel pile row counts only its own category
     # (e.g. 32 FBA FCL), so this column surfaces the full group volume (e.g. 38
-    # including the 6 Retail Transload that fall below the 30 threshold) as a
-    # reconciliation aid. Only meaningful when Category is one of the group cols.
+    # including the 6 Retail Transload that fall below the qualifying threshold)
+    # as a reconciliation aid. Only meaningful when Category is one of the group cols.
     combo_cols = [c for c in group_cols if c != 'Category']
     if 'Category' in group_cols and combo_cols:
         combo_totals = data_copy.groupby(combo_cols)['_container_count'].sum()
@@ -70,12 +71,23 @@ def show_peel_pile_analysis(data):
             return int(combo_totals.get(key, row['Container Count']))
         vessel_summary['All Categories Total'] = vessel_summary.apply(_combo_total, axis=1)
 
-    # Filter for peel pile (30+ containers)
-    peel_pile = vessel_summary[vessel_summary['Container Count'] >= 30].copy()
+    # Filter for peel pile using the per-port / per-terminal qualifying threshold
+    # (config/peel_pile_thresholds.py). PNW terminals carry their own limits
+    # (WUT 40, Husky 45, T18/T5 30, PNW default 80); OAK stays at 30; every other
+    # port is effectively disabled. Cheap vectorized pre-filter on the smallest
+    # possible threshold, then the precise per-row threshold.
+    qualifying = vessel_summary[vessel_summary['Container Count'] >= min_threshold()].copy()
+    if len(qualifying) > 0:
+        thresholds = qualifying.apply(
+            lambda r: peel_pile_threshold(
+                r.get('Discharged Port'), r.get('Terminal')), axis=1)
+        peel_pile = qualifying[qualifying['Container Count'] >= thresholds].copy()
+    else:
+        peel_pile = qualifying
     peel_pile = peel_pile.sort_values('Container Count', ascending=False)
-    
+
     if len(peel_pile) == 0:
-        st.info("ℹ️ No Vessel groups meet the peel pile threshold (30+ containers per Week/Port).")
+        st.info("ℹ️ No Vessel groups meet the peel pile threshold for their port/terminal.")
         return
     
     # Get available carriers from the data

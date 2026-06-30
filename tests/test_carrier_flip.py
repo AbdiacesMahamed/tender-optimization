@@ -484,5 +484,57 @@ class TestExcelExport:
         assert data is not None
 
 
+class TestGvtPivot:
+    def _gvt(self):
+        return pd.DataFrame({
+            'Container': ['ABCU1234567', 'ABCU1234568', 'ABCU1234569', 'ABCU1234570'],
+            'Discharged Port': ['LAX', 'LAX', 'SEA', 'SEA'],
+            'NEW SCAC': ['ATMI', 'FRQT', 'ATMI', None],
+        })
+
+    def test_counts_by_port_and_scac(self):
+        piv = cf.build_gvt_pivot(self._gvt())
+        assert piv is not None
+        # Port is the first column (vertical), SCACs are columns (horizontal)
+        assert piv.columns[0] == 'Discharged Port'
+        assert 'ATMI' in piv.columns and 'FRQT' in piv.columns
+        lax = piv[piv['Discharged Port'] == 'LAX'].iloc[0]
+        assert lax['ATMI'] == 1 and lax['FRQT'] == 1 and lax['Total'] == 2
+
+    def test_unassigned_excluded_and_totals(self):
+        piv = cf.build_gvt_pivot(self._gvt())
+        total_row = piv[piv['Discharged Port'] == 'Total'].iloc[0]
+        # Only 3 of 4 containers have a NEW SCAC; the None row is dropped
+        assert total_row['Total'] == 3
+        assert total_row['ATMI'] == 2 and total_row['FRQT'] == 1
+
+    def test_none_without_required_cols(self):
+        assert cf.build_gvt_pivot(None) is None
+        assert cf.build_gvt_pivot(pd.DataFrame({'Container': ['X']})) is None
+
+    def test_none_when_no_assignments(self):
+        gvt = pd.DataFrame({'Container': ['ABCU1234567'],
+                            'Discharged Port': ['LAX'], 'NEW SCAC': [None]})
+        assert cf.build_gvt_pivot(gvt) is None
+
+    def test_pivot_sheet_in_workbook(self):
+        tender = pd.DataFrame({
+            'NEW SCAC': ['ATMI'],
+            'Container Numbers': ['ABCU1234567'],
+            'Carrier Flips': ['Now 1: From HJBT (+1)'],
+            'Lane': ['USLAXLAX9'],
+            'Discharged Port': ['LAX'],
+        })
+        gvt = pd.DataFrame({
+            'Container': ['ABCU1234567'],
+            'Dray SCAC(FL)': ['HJBT'],
+            'Discharged Port': ['LAX'],
+        })
+        res = cf.run_carrier_flip_analysis(tender_dfs=[tender], gvt_df=gvt)
+        data = cf.build_flip_report_excel(res)
+        xl = pd.ExcelFile(io.BytesIO(data))
+        assert 'GVT Pivot (Port x New SCAC)' in xl.sheet_names
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

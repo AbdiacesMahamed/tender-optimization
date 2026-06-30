@@ -4,6 +4,10 @@ The constraint file is an Excel spreadsheet that controls how containers are all
 
 A template is provided at `docs/constraint_template.xlsx`.
 
+> This guide covers the **file format and examples**. For how the engine *behaves*
+> (precedence, scoping, ceiling semantics, processing order), see
+> [Constraint Rules & Mechanics](CONSTRAINTS_RULES.md).
+
 ## Columns
 
 | Column | Required | Type | Description |
@@ -14,12 +18,13 @@ A template is provided at `docs/constraint_template.xlsx`.
 | Lane | No | Text | Filter by lane code (e.g., `USLAXIUSF`). Leave blank to match all. |
 | Port | No | Text | Filter by discharged port (e.g., `LAX`, `BAL`). Leave blank to match all. |
 | Week Number | No | Number | Filter by specific week. Leave blank to match all weeks. |
+| Day of Week | No | Number or Text | Filter by Ocean ETA weekday — Excel WEEKDAY (Sun=1 … Sat=7) or a name like `monday`. Leave blank to match all. |
 | Terminal | No | Text | Filter by port terminal. Leave blank to match all. |
 | SSL | No | Text | Filter by steamship line. Leave blank to match all. |
 | Vessel | No | Text | Filter by vessel name. Leave blank to match all. |
-| Maximum Container Count | No | Number | Hard cap on containers for this carrier. |
+| Maximum Container Count | No | Number | Hard cap on containers for this carrier. `0` = lockout (blocks the carrier from the scope entirely). |
 | Minimum Container Count | No | Number | Floor on containers for this carrier. |
-| Percent Allocation | No | Number | Percentage of matching containers to assign to this carrier. |
+| Percent Allocation | No | Number | Percentage of matching containers to assign to this carrier. `0` = lockout. |
 | Excluded FC | No | Text | Facility code where this carrier is banned (e.g., `IUSF`). |
 
 ## Constraint Types
@@ -126,12 +131,14 @@ The total cost shown in the cost cards includes both constrained and unconstrain
 
 ## Peel Pile
 
-A **peel pile** is a group of containers from the same vessel, week, port, and terminal that meets a minimum volume threshold (30+ containers). These groups are large enough to justify dedicated carrier assignments — either to a single carrier or split across multiple carriers.
+A **peel pile** is a group of containers from the same vessel, week, port, and terminal that meets a minimum volume threshold. These groups are large enough to justify dedicated carrier assignments — either to a single carrier or split across multiple carriers.
+
+The qualifying threshold is **per-port/terminal**, not a single global number: at PNW it varies by terminal (WUT 40, Husky 45, Terminal 18/Terminal 5 30, other/blank PNW terminals 80); outside PNW only Oakland (`OAK`, 30) qualifies and every other port is effectively disabled. The thresholds live in [`config/peel_pile_thresholds.py`](../config/peel_pile_thresholds.py) (see [`PNW_RULES.md`](PNW_RULES.md) Rule 5).
 
 ### How It Works
 
 1. The dashboard automatically identifies qualifying peel pile groups from the filtered data
-2. Groups are defined by **Vessel + Week Number + Discharged Port + Terminal** and must have **30 or more containers**
+2. Groups are defined by **Vessel + Week Number + Discharged Port + Terminal** and must meet the per-port/terminal threshold above
 3. You select a peel pile group and assign one or more carriers
 4. Containers are **split equally** across the selected carriers (first carrier(s) get any extra)
 5. All assigned containers are locked as constraints (moved from unconstrained to constrained data)
@@ -176,7 +183,7 @@ Peel pile allocations are applied **after** all constraint file rules are proces
 ### UI Workflow
 
 1. Scroll to the **Peel Pile Analysis** section at the bottom of the analysis table
-2. Review the table of qualifying vessel groups (30+ containers)
+2. Review the table of qualifying vessel groups (those meeting the per-port/terminal threshold)
 3. Select a group from the dropdown
 4. Use the **multiselect** to pick one or more carriers
 5. Click **Add to Queue** — this queues the assignment without recalculating (fast)
