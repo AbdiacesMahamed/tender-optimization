@@ -12,6 +12,7 @@ from datetime import datetime
 
 from .historic_volume import (
     calculate_carrier_volume_share,
+    calculate_carrier_terminal_share,
     calculate_carrier_weekly_trends,
     get_carrier_lane_participation,
 )
@@ -81,7 +82,14 @@ def show_historic_volume_analysis(
             n_weeks=n_weeks,
             reference_date=reference_date
         )
-        
+
+        # Terminal-level share (reporting view; empty when no Terminal column).
+        terminal_share = calculate_carrier_terminal_share(
+            data,
+            n_weeks=n_weeks,
+            reference_date=reference_date
+        )
+
         weekly_trends = calculate_carrier_weekly_trends(
             data,
             n_weeks=n_weeks,
@@ -112,6 +120,7 @@ def show_historic_volume_analysis(
     
     with tab1:
         show_market_share_analysis(volume_share, n_weeks)
+        show_terminal_share_analysis(terminal_share, n_weeks)
     
     with tab2:
         show_weekly_trends_analysis(weekly_trends, n_weeks)
@@ -253,6 +262,97 @@ def show_market_share_analysis(volume_share: pd.DataFrame, n_weeks: int):
     )
 
 
+def show_terminal_share_analysis(terminal_share: pd.DataFrame, n_weeks: int):
+    """Display carrier market share grouped by terminal.
+
+    The terminal counterpart to :func:`show_market_share_analysis`. Renders
+    nothing when the data has no terminal information (the calc returns an empty
+    frame), so datasets without a Terminal column simply show the lane view.
+    """
+    if terminal_share is None or terminal_share.empty:
+        return
+
+    st.divider()
+    st.subheader("Carrier Market Share by Terminal")
+
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Terminals", terminal_share['Terminal'].nunique())
+    with col2:
+        term_cols = ['Terminal']
+        if 'Category' in terminal_share.columns:
+            term_cols.insert(0, 'Category')
+        unique_terminal_totals = terminal_share.drop_duplicates(
+            subset=term_cols
+        )['Terminal_Total_Containers'].sum()
+        st.metric("Total Containers", f"{unique_terminal_totals:,.0f}")
+    with col3:
+        st.metric("Avg Market Share", f"{terminal_share['Volume_Share_Pct'].mean():.1f}%")
+
+    # Filter options
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_terminal = st.selectbox(
+            "Filter by Terminal",
+            options=["All Terminals"] + sorted(terminal_share['Terminal'].unique().tolist()),
+            index=0,
+            key="terminal_share_filter",
+        )
+    with col2:
+        min_share = st.slider(
+            "Minimum Market Share (%)",
+            min_value=0, max_value=100, value=0, step=5,
+            key="terminal_share_min",
+            help="Only show carriers with at least this market share at the terminal",
+        )
+
+    filtered = terminal_share.copy()
+    if selected_terminal != "All Terminals":
+        filtered = filtered[filtered['Terminal'] == selected_terminal]
+    if min_share > 0:
+        filtered = filtered[filtered['Volume_Share_Pct'] >= min_share]
+
+    if filtered.empty:
+        st.info("No carriers match the selected terminal filters.")
+        return
+
+    fig = px.bar(
+        filtered.head(30),
+        x='Dray SCAC(FL)',
+        y='Volume_Share_Pct',
+        color='Terminal',
+        title=f"Carrier Market Share by Terminal"
+              f"{' - ' + selected_terminal if selected_terminal != 'All Terminals' else ''}",
+        labels={
+            'Dray SCAC(FL)': 'Carrier',
+            'Volume_Share_Pct': 'Market Share (%)',
+            'Terminal': 'Terminal',
+        },
+        hover_data=['Total_Containers', 'Weeks_Active', 'Avg_Weekly_Containers'],
+    )
+    fig.update_layout(xaxis_tickangle=-45, height=500, showlegend=True)
+    st.plotly_chart(fig, use_container_width=True)
+
+    display_cols = [
+        'Dray SCAC(FL)', 'Terminal', 'Volume_Share_Pct', 'Total_Containers',
+        'Terminal_Total_Containers', 'Weeks_Active', 'Avg_Weekly_Containers',
+    ]
+    if 'Category' in filtered.columns:
+        display_cols.insert(1, 'Category')
+
+    st.dataframe(
+        filtered[display_cols].style.format({
+            'Volume_Share_Pct': '{:.2f}%',
+            'Total_Containers': '{:.0f}',
+            'Terminal_Total_Containers': '{:.0f}',
+            'Avg_Weekly_Containers': '{:.1f}',
+        }),
+        use_container_width=True,
+        height=400,
+    )
+
+
 def show_weekly_trends_analysis(weekly_trends: pd.DataFrame, n_weeks: int):
     """Display weekly volume trends."""
     
@@ -262,8 +362,12 @@ def show_weekly_trends_analysis(weekly_trends: pd.DataFrame, n_weeks: int):
         st.warning("No weekly trend data available.")
         return
     
-    # Get week columns
-    week_columns = [col for col in weekly_trends.columns if col.startswith('Week_') and not col.endswith('Active')]
+    # Get week columns. Guard against non-string column names (e.g. numeric week
+    # labels) — a bare col.startswith would raise AttributeError on those.
+    week_columns = [
+        col for col in weekly_trends.columns
+        if isinstance(col, str) and col.startswith('Week_') and not col.endswith('Active')
+    ]
     
     if not week_columns:
         st.warning("No weekly data columns found.")
@@ -466,6 +570,7 @@ def show_detailed_data_export(
 __all__ = [
     "show_historic_volume_analysis",
     "show_market_share_analysis",
+    "show_terminal_share_analysis",
     "show_weekly_trends_analysis",
     "show_participation_analysis",
     "show_detailed_data_export",

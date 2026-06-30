@@ -19,6 +19,7 @@ from optimization.historic_volume import (
     filter_historical_weeks,
     get_last_n_weeks,
     calculate_carrier_volume_share,
+    calculate_carrier_terminal_share,
 )
 
 
@@ -282,3 +283,78 @@ class TestCalculateCarrierVolumeShare:
         result = calculate_carrier_volume_share(historic_data)
         if 'Category' in historic_data.columns:
             assert 'Category' in result.columns
+
+
+@pytest.fixture
+def historic_terminal_data():
+    """Multi-week data with two terminals for terminal-share analysis."""
+    rows = []
+    for week in [5, 6, 7, 8, 9]:
+        for carrier, terminal, count in [
+            ('ABCD', 'TRM-T004', 10),
+            ('EFGH', 'TRM-T004', 5),
+            ('ABCD', 'TRM-TWUT', 4),
+            ('IJKL', 'TRM-TWUT', 6),
+        ]:
+            rows.append({
+                'Dray SCAC(FL)': carrier,
+                'Container Count': count,
+                'Week Number': week,
+                'Lane': 'USLAXIUSF',
+                'Terminal': terminal,
+                'Category': 'CD',
+            })
+    return pd.DataFrame(rows)
+
+
+class TestCalculateCarrierTerminalShare:
+    def test_basic_calculation(self, historic_terminal_data):
+        result = calculate_carrier_terminal_share(historic_terminal_data)
+        assert 'Terminal' in result.columns
+        assert 'Terminal_Total_Containers' in result.columns
+        assert 'Volume_Share_Pct' in result.columns
+        assert 'Weeks_Active' in result.columns
+        assert 'Avg_Weekly_Containers' in result.columns
+
+    def test_volume_share_sums_to_100_per_terminal(self, historic_terminal_data):
+        result = calculate_carrier_terminal_share(historic_terminal_data, n_weeks=5)
+        for terminal in result['Terminal'].unique():
+            share = result[result['Terminal'] == terminal]['Volume_Share_Pct'].sum()
+            assert abs(share - 100.0) < 0.1
+
+    def test_share_is_relative_to_terminal_not_lane(self, historic_terminal_data):
+        # ABCD has 10/15 at T004 (~66.7%) but only 4/10 at TWUT (40%) — the two
+        # rows must differ, proving the denominator is the terminal, not the lane.
+        result = calculate_carrier_terminal_share(historic_terminal_data, n_weeks=5)
+        abcd = result[result['Dray SCAC(FL)'] == 'ABCD'].set_index('Terminal')
+        assert abcd.loc['TRM-T004', 'Volume_Share_Pct'] > abcd.loc['TRM-TWUT', 'Volume_Share_Pct']
+
+    def test_terminal_totals_correct(self, historic_terminal_data):
+        result = calculate_carrier_terminal_share(historic_terminal_data, n_weeks=5)
+        t004 = result[result['Terminal'] == 'TRM-T004']['Terminal_Total_Containers'].iloc[0]
+        twut = result[result['Terminal'] == 'TRM-TWUT']['Terminal_Total_Containers'].iloc[0]
+        assert t004 == (10 + 5) * 5   # 5 weeks
+        assert twut == (4 + 6) * 5
+
+    def test_no_terminal_column_returns_empty(self, historic_terminal_data):
+        # Degrades gracefully (no raise) when the data lacks a Terminal column.
+        result = calculate_carrier_terminal_share(
+            historic_terminal_data.drop(columns=['Terminal'])
+        )
+        assert result.empty
+
+    def test_blank_terminal_rows_excluded(self, historic_terminal_data):
+        data = historic_terminal_data.copy()
+        data.loc[data.index[:2], 'Terminal'] = ''
+        result = calculate_carrier_terminal_share(data, n_weeks=5)
+        assert '' not in result['Terminal'].values
+
+    def test_empty_data(self):
+        assert calculate_carrier_terminal_share(pd.DataFrame()).empty
+
+    def test_none_data(self):
+        assert calculate_carrier_terminal_share(None).empty
+
+    def test_includes_category_in_grouping(self, historic_terminal_data):
+        result = calculate_carrier_terminal_share(historic_terminal_data)
+        assert 'Category' in result.columns

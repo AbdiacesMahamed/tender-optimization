@@ -19,6 +19,7 @@ from .cascading_logic import cascading_allocate_with_constraints
 from .performance_logic import allocate_to_highest_performance
 from .historic_volume import (
     calculate_carrier_volume_share,
+    calculate_carrier_terminal_share,
     calculate_carrier_weekly_trends,
     get_carrier_lane_participation,
     filter_historical_weeks,
@@ -42,6 +43,7 @@ __all__ = [
     'allocate_to_highest_performance',
     # Historic volume analysis
     'calculate_carrier_volume_share',
+    'calculate_carrier_terminal_share',
     'calculate_carrier_weekly_trends',
     'get_carrier_lane_participation',
     'filter_historical_weeks',

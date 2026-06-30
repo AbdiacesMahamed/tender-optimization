@@ -254,6 +254,113 @@ def calculate_carrier_volume_share(
     return result
 
 
+def calculate_carrier_terminal_share(
+    data: pd.DataFrame,
+    *,
+    n_weeks: int = 5,
+    carrier_column: str = "Dray SCAC(FL)",
+    container_column: str = "Container Count",
+    week_column: str = "Week Number",
+    terminal_column: str = "Terminal",
+    category_column: str = "Category",
+    reference_date: datetime | None = None,
+) -> pd.DataFrame:
+    """Carrier market share over the last N weeks, grouped by TERMINAL.
+
+    The terminal counterpart to :func:`calculate_carrier_volume_share`: same
+    metrics (containers handled, share of the group's total, weeks active,
+    average weekly containers), but the group is the **terminal** instead of the
+    lane. This is purely a reporting view — unlike the lane share it does NOT
+    feed the optimizer's growth cap (the cap is lane-level by design; see
+    ``optimization/cascading_logic.py``), so it can group by terminal freely.
+
+    Returns an empty frame (no error) when the data has no ``Terminal`` column,
+    so callers that may not have terminal data degrade gracefully.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: Carrier, Terminal, [Category], Total_Containers,
+        Terminal_Total_Containers, Volume_Share_Pct, Weeks_Active,
+        Avg_Weekly_Containers.
+    """
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    # Terminal data is optional — degrade to empty rather than raising so the
+    # lane view still renders for datasets without a Terminal column.
+    if terminal_column not in data.columns:
+        return pd.DataFrame()
+
+    required_columns = [carrier_column, container_column, week_column]
+    missing_columns = [col for col in required_columns if col not in data.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
+
+    historical_data = get_last_n_weeks(
+        data, n_weeks=n_weeks, week_column=week_column, reference_date=reference_date
+    )
+
+    out_columns = [
+        carrier_column, terminal_column, "Total_Containers",
+        "Terminal_Total_Containers", "Volume_Share_Pct",
+        "Weeks_Active", "Avg_Weekly_Containers",
+    ]
+    if historical_data.empty:
+        return pd.DataFrame(columns=out_columns)
+
+    # Drop rows with no terminal so a blank terminal doesn't form a phantom group.
+    historical_data = historical_data[
+        historical_data[terminal_column].notna()
+        & (historical_data[terminal_column].astype(str).str.strip() != "")
+    ].copy()
+    if historical_data.empty:
+        return pd.DataFrame(columns=out_columns)
+
+    historical_data[container_column] = pd.to_numeric(
+        historical_data[container_column], errors="coerce"
+    ).fillna(0)
+
+    # Group: carrier + terminal (+ category when present), mirroring the lane fn.
+    group_columns = [carrier_column, terminal_column]
+    if category_column in historical_data.columns:
+        group_columns.insert(1, category_column)
+
+    carrier_volume = historical_data.groupby(group_columns).agg({
+        container_column: 'sum',
+        week_column: 'nunique',
+    }).reset_index()
+    carrier_volume.columns = [*group_columns, 'Total_Containers', 'Weeks_Active']
+
+    terminal_group = [terminal_column]
+    if category_column in historical_data.columns:
+        terminal_group.insert(0, category_column)
+
+    terminal_totals = historical_data.groupby(terminal_group)[container_column].sum().reset_index()
+    terminal_totals.columns = [*terminal_group, 'Terminal_Total_Containers']
+
+    result = carrier_volume.merge(terminal_totals, on=terminal_group, how='left')
+
+    result['Volume_Share_Pct'] = (
+        result['Total_Containers'] / result['Terminal_Total_Containers'] * 100
+    ).fillna(0)
+    result['Avg_Weekly_Containers'] = (
+        result['Total_Containers'] / result['Weeks_Active']
+    ).fillna(0)
+
+    result['Volume_Share_Pct'] = result['Volume_Share_Pct'].round(2)
+    result['Avg_Weekly_Containers'] = result['Avg_Weekly_Containers'].round(1)
+
+    sort_columns = [terminal_column, 'Volume_Share_Pct']
+    if category_column in result.columns:
+        sort_columns.insert(0, category_column)
+    result = result.sort_values(
+        sort_columns, ascending=[True] * (len(sort_columns) - 1) + [False]
+    )
+
+    return result
+
+
 def calculate_carrier_weekly_trends(
     data: pd.DataFrame,
     *,
@@ -319,13 +426,15 @@ def calculate_carrier_weekly_trends(
         fill_value=0
     ).reset_index()
     
-    # Rename week columns to be more readable
-    week_columns = [col for col in trends.columns if isinstance(col, (int, np.integer))]
-    column_mapping = {week: f"Week_{week}" for week in week_columns}
+    # Rename week columns to be more readable. Week labels may arrive as ints or
+    # floats (e.g. 47 or 47.0); normalise both to an integer "Week_<n>" name so the
+    # display layer can find them by the "Week_" prefix.
+    week_columns = [col for col in trends.columns if isinstance(col, (int, float, np.integer, np.floating)) and not pd.isna(col)]
+    column_mapping = {week: f"Week_{int(week)}" for week in week_columns}
     trends = trends.rename(columns=column_mapping)
-    
+
     # Calculate total and average
-    week_col_names = [f"Week_{week}" for week in week_columns]
+    week_col_names = [f"Week_{int(week)}" for week in week_columns]
     trends['Total_Containers'] = trends[week_col_names].sum(axis=1)
     trends['Avg_Weekly'] = trends[week_col_names].mean(axis=1).round(1)
     
@@ -415,6 +524,7 @@ __all__ = [
     "filter_historical_weeks",
     "get_last_n_weeks",
     "calculate_carrier_volume_share",
+    "calculate_carrier_terminal_share",
     "calculate_carrier_weekly_trends",
     "get_carrier_lane_participation",
 ]

@@ -558,7 +558,10 @@ def historic_volume_share(df, scope_input=None, n_weeks=5, top_n=25) -> dict:
     average weekly containers — the baseline the optimizer's growth caps and any
     minimum/percent constraints are judged against. Optionally scoped.
     """
-    from optimization.historic_volume import calculate_carrier_volume_share
+    from optimization.historic_volume import (
+        calculate_carrier_volume_share,
+        calculate_carrier_terminal_share,
+    )
     from config.carrier_mapping import get_carrier_name
     from .simulation import Scope
     if df is None or len(df) == 0:
@@ -609,8 +612,37 @@ def historic_volume_share(df, scope_input=None, n_weeks=5, top_n=25) -> dict:
         rows.append(row)
     weeks = sorted(int(w) for w in
                    pd.to_numeric(sub["Week Number"], errors="coerce").dropna().unique())[-nw:]
-    return {"n_weeks": nw, "weeks_analyzed": weeks, "rows": rows,
-            "rows_omitted": max(0, len(share) - cap)}
+
+    # Terminal-level share — same metrics keyed on Terminal instead of Lane.
+    # Reporting only (the optimizer's growth cap stays lane-level); empty frame
+    # when the data has no Terminal column, so callers degrade gracefully.
+    terminal_rows = []
+    try:
+        tshare = calculate_carrier_terminal_share(sub, n_weeks=nw)
+    except ValueError:
+        tshare = None
+    if tshare is not None and len(tshare) > 0:
+        t_has_cat = "Category" in tshare.columns
+        for _, r in tshare.head(cap).iterrows():
+            scac = str(r["Dray SCAC(FL)"])
+            trow = {
+                "carrier": scac, "name": get_carrier_name(scac),
+                "terminal": str(r["Terminal"]),
+                "containers": _plain(r.get("Total_Containers")),
+                "terminal_total": _plain(r.get("Terminal_Total_Containers")),
+                "volume_share_pct": _plain(r.get("Volume_Share_Pct")),
+                "weeks_active": _plain(r.get("Weeks_Active")),
+                "avg_weekly_containers": _plain(r.get("Avg_Weekly_Containers")),
+            }
+            if t_has_cat:
+                trow["category"] = str(r.get("Category"))
+            terminal_rows.append(trow)
+
+    return {"n_weeks": nw, "weeks_analyzed": weeks,
+            "by_lane": rows, "rows": rows,  # 'rows' kept for backward compatibility
+            "by_terminal": terminal_rows,
+            "rows_omitted": max(0, len(share) - cap),
+            "terminal_rows_omitted": max(0, len(tshare) - cap) if tshare is not None else 0}
 
 
 def missing_rate_audit(df, top_n=25) -> dict:

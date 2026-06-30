@@ -280,10 +280,13 @@ OPEN-ENDED ANALYSIS WITH run_analysis:
     (rows_omitted > 0), say so and offer to narrow it.
 
 DATA DIAGNOSTICS — answer "where / how much / who normally" from the real data:
-  - historic_volume_share: a carrier's market share per lane over the last N weeks —
-    the baseline the growth cap and minimum/percent constraints are judged against.
-    Use for "is FRQT growing or shrinking?", "what's RKNE's normal share here?".
-    This is HISTORY, distinct from analyze_data 'by_carrier' (current-view volume).
+  - historic_volume_share: a carrier's market share over the last N weeks, returned
+    BOTH per lane (`by_lane`) and per terminal (`by_terminal`) — share %, container
+    count, weeks active, avg weekly. The lane view is the baseline the growth cap and
+    minimum/percent constraints are judged against; the terminal view answers "who
+    normally hauls this terminal?". Use for "is FRQT growing or shrinking?", "what's
+    RKNE's normal share at TRM-TWUT?". HISTORY, distinct from analyze_data 'by_carrier'
+    (current-view volume).
   - missing_rate_audit: which containers/lanes have no usable rate and can't be
     priced. Use for "what's my rate coverage?" or to explain why some volume is
     unpriced in a flip/scenario. Lead with the affected count and % of total.
@@ -396,9 +399,35 @@ SUGGESTED FOLLOW-UPS — end EVERY reply with 2-4 clickable next steps:
 SYSTEM_PROMPT = _SYSTEM_PROMPT_BASE + "\n\n" + SKILL
 
 
+def _describe_active_filters(filters: object) -> str:
+    """Render the active dashboard filters as a short human phrase, or '' if none.
+
+    ``filters`` is the dict chat_ui reads from session state:
+    ``{"ports": [...], "facilities": [...], "weeks": [...], "carriers": [...]}``.
+    Any un-dict / empty input yields '' (no filter clause), so the status line is
+    unchanged when the user hasn't filtered anything — best-effort, never raises.
+    """
+    if not isinstance(filters, dict):
+        return ""
+    order = [("weeks", "week"), ("ports", "port"),
+             ("facilities", "facility"), ("carriers", "carrier")]
+    parts = []
+    for key, label in order:
+        vals = filters.get(key) or []
+        if not isinstance(vals, (list, tuple, set)):
+            vals = [vals]
+        vals = [str(v).strip() for v in vals if str(v).strip()]
+        if vals:
+            noun = label if len(vals) == 1 else label + "s"
+            parts.append(f"{noun} {', '.join(vals)}")
+    return "; ".join(parts)
+
+
 def build_system_prompt(*, data_rows: int = 0, constraint_rows: int = 0,
                         constraint_source: object = None,
-                        applied_rows: int = 0) -> str:
+                        applied_rows: int = 0,
+                        active_filters: object = None,
+                        filtered_rows: object = None) -> str:
     """Compose the system prompt with a per-turn 'Session status' ground-truth line.
 
     The model otherwise has NO visibility into session state — so when a user
@@ -408,6 +437,12 @@ def build_system_prompt(*, data_rows: int = 0, constraint_rows: int = 0,
     actually loaded (and the source file), the truth is in front of the model
     before it speaks. The WORKING WITH UPLOADED CONSTRAINTS rules tell it to trust
     this line and to never deny the working set without checking describe_constraints.
+
+    ``active_filters`` (the dashboard's live Data Filters) is surfaced the same
+    way: the assistant's data tools are scoped to the filtered slice the user is
+    looking at, so the status line states which filters are active (and how many
+    rows survive them, via ``filtered_rows``). The model must answer "how many
+    containers / which carriers" about THAT slice, not the whole file, and say so.
 
     Kept here (next to the prompt it prefixes) and pure/Streamlit-free so it stays
     unit-testable; chat_ui composes the arguments from session state each turn.
@@ -425,6 +460,17 @@ def build_system_prompt(*, data_rows: int = 0, constraint_rows: int = 0,
         data_part = f"{dr:,} rows of dashboard data loaded"
     else:
         data_part = "no dashboard data loaded yet"
+
+    # Active-filter clause: state the slice the assistant's data view is scoped to,
+    # so the model answers about what the user sees on screen — and names the filter.
+    filter_phrase = _describe_active_filters(active_filters)
+    if filter_phrase and dr > 0:
+        fr = _as_int(filtered_rows)
+        rows_txt = f"{fr:,} of {dr:,} rows" if fr or filtered_rows is not None else "a subset"
+        data_part += (f". ACTIVE DATA FILTERS — your data view is scoped to {filter_phrase} "
+                      f"({rows_txt}); analyze and answer about THIS filtered slice (the table "
+                      f"the user sees), and state the active filter in your answer. Multi-week "
+                      f"history (growth caps, historical share) still uses all data")
 
     n = _as_int(constraint_rows)
     if n > 0:
@@ -828,14 +874,17 @@ TOOL_SPECS = [
         "toolSpec": {
             "name": "historic_volume_share",
             "description": (
-                "Carrier market share over the last N completed weeks (default 5), per "
-                "lane and category: each carrier's share of that lane's volume, weeks "
-                "active, and average weekly containers. This is the historical BASELINE "
-                "the optimizer's growth cap is measured against and the natural ground "
-                "for minimum/percent constraints. Use for 'what's RKNE's historical share "
-                "on this lane?', 'is FRQT growing or shrinking?', 'who normally hauls "
-                "NYC?'. Optionally scoped. Distinct from analyze_data 'by_carrier' (which "
-                "is current-view volume, not historical share)."
+                "Carrier market share over the last N completed weeks (default 5), "
+                "returned BOTH per lane+category ('by_lane') AND per terminal "
+                "('by_terminal'): each carrier's share of that group's volume, plus "
+                "container count, weeks active, and average weekly containers. The lane "
+                "view is the historical BASELINE the optimizer's growth cap is measured "
+                "against and the natural ground for minimum/percent constraints; the "
+                "terminal view shows who normally hauls a given terminal (empty when the "
+                "data has no Terminal column). Use for 'what's RKNE's historical share on "
+                "this lane?', 'who normally hauls TRM-TWUT?', 'is FRQT growing or "
+                "shrinking?'. Optionally scoped. Distinct from analyze_data 'by_carrier' "
+                "(which is current-view volume, not historical share)."
             ),
             "inputSchema": {
                 "json": {
