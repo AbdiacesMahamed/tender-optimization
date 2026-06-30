@@ -53,7 +53,8 @@ from components.reporting.carrier_flip import show_carrier_flip_report
 # JBH Allocation Model — runs the JB Hunt allocation rules (config-driven per
 # port) on an Inbound Container Milestone file. Self-contained: own uploader,
 # no dependency on the tender-optimization data flow.
-from optimization.jbh_allocation.ui import show_jbh_allocation_report
+# TEMPORARILY HIDDEN — re-enable alongside the show_jbh_allocation_report call below.
+# from optimization.jbh_allocation.ui import show_jbh_allocation_report
 
 # AI assistant (Bedrock-powered chatbot for analysis + constraint generation)
 from components.chatbot import show_chatbot_sidebar, get_applied_constraints_df
@@ -232,7 +233,25 @@ def main():
             st.warning("⚠️ Constraints file could not be processed")
         else:
             st.info("ℹ️ No constraints file uploaded - all data is unconstrained")
-    
+
+        # ==================== LEAD-TIME ALLOCATION LOCK ====================
+        # Standing rule: a container within 3 days of its Ocean ETA (vessel
+        # arrival) can no longer be re-tendered — there isn't time to flip it. So
+        # freeze it on its current carrier by moving it out of the scenario-
+        # eligible (unconstrained) pool into the frozen (constrained) pool, which
+        # no scenario reallocates. Runs whether or not a constraints file was
+        # uploaded; volume is conserved.
+        from components.constraints.lead_time_lock import apply_lead_time_lock, LEAD_TIME_DAYS
+        constrained_data, unconstrained_data, _locked = apply_lead_time_lock(
+            constrained_data, unconstrained_data
+        )
+        if _locked > 0:
+            st.info(
+                f"🔒 **Lead-time lock:** {_locked:,} container(s) are within {LEAD_TIME_DAYS} "
+                f"days of their Ocean ETA, so their carrier is locked (no flips). These ship on "
+                "their current carrier and are excluded from optimization scenarios."
+            )
+
     # ==================== PEEL PILE CONSTRAINTS ====================
     # Apply peel pile allocations as constraints (from session state)
     # This must happen after constraint file processing but before metrics calculation
@@ -335,8 +354,10 @@ def main():
 
     # JBH Allocation Model — independent of the filters/flow above; takes its own
     # per-container Inbound Container Milestone upload and a port selection.
-    st.markdown("---")
-    show_jbh_allocation_report(in_app_gvt=GVTdata)
+    # TEMPORARILY HIDDEN — re-enable by uncommenting the two lines below (and the
+    # import near the top of this file) when returning to the JBH work.
+    # st.markdown("---")
+    # show_jbh_allocation_report(in_app_gvt=GVTdata)
 
     # Footer
     show_footer()

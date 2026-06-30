@@ -267,6 +267,60 @@ def normalize_facility_series(series: pd.Series) -> pd.Series:
     return result
 
 
+# ==================== ARROW-SAFE DISPLAY ====================
+
+def arrow_safe(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Return a copy of ``df`` whose columns serialize cleanly to Arrow.
+
+    Streamlit renders every ``st.dataframe`` / ``st.data_editor`` by converting
+    the frame to an Arrow table via ``pyarrow``. A single ``object`` column that
+    mixes types — e.g. some cells ``int`` and others ``str`` — makes pyarrow raise
+    ``ArrowTypeError: Expected bytes, got a 'int' object``, which propagates out of
+    Streamlit, kills the script run, and (on hosted platforms) trips the health
+    check with a "connection reset by peer" on ``/healthz``. Passthrough GVT
+    columns (e.g. ``Carp Appointment``) are the usual culprit: a numeric-looking
+    column with a few blank/text cells lands as ``object`` with mixed python types.
+
+    This coerces any ``object`` column that holds more than one python scalar type
+    (ignoring nulls) to string, leaving clean single-type columns untouched so
+    numeric sorting/formatting elsewhere is unaffected. Best-effort and cheap; it
+    only rewrites the offending columns. Returns the input unchanged if it is not a
+    non-empty DataFrame.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    out = df
+    copied = False
+    for col in df.columns:
+        if df[col].dtype != object:
+            continue
+        non_null = df[col].dropna()
+        if non_null.empty:
+            continue
+        # More than one distinct python type (e.g. int + str) breaks Arrow.
+        if non_null.map(type).nunique() > 1:
+            if not copied:
+                out = df.copy()
+                copied = True
+            # Render ints without a trailing ".0"; everything else via str().
+            out[col] = df[col].map(
+                lambda v: "" if pd.isna(v)
+                else (str(int(v)) if isinstance(v, float) and v.is_integer() else str(v))
+            )
+    return out
+
+
+def st_dataframe_safe(df, *args, **kwargs):
+    """``st.dataframe`` wrapper that first makes the frame Arrow-serializable.
+
+    Drop-in replacement for ``st.dataframe`` at call sites that render
+    GVT-derived frames carrying arbitrary passthrough columns. See
+    :func:`arrow_safe` for why mixed-type ``object`` columns would otherwise crash
+    the whole app run.
+    """
+    return st.dataframe(arrow_safe(df), *args, **kwargs)
+
+
 # ==================== VALUE FORMATTING UTILITIES ====================
 
 def safe_numeric(value: Any) -> float:
