@@ -1,18 +1,40 @@
 """
 Interactive visualizations module for the Carrier Tender Optimization Dashboard
+
+NOTE: plotly is imported LAZILY via _ensure_plotly() (called at the top of the
+single public entry point, show_interactive_visualizations), not at module top
+level. Importing plotly eagerly added a large chunk of RSS at app startup; on
+Streamlit Cloud's ~1 GB tier that contributed to an out-of-memory kill before the
+app rendered (seen by viewers as "Oh no. Error running app."). The internal
+helpers reference px/go/make_subplots as module globals, which _ensure_plotly()
+populates on first use.
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from ..core.config_styling import section_header
 from ..core.utils import get_rate_columns
+
+# Populated lazily by _ensure_plotly(); kept as module globals so the internal
+# helper functions below can reference px/go/make_subplots unchanged.
+px = None
+go = None
+make_subplots = None
+
+
+def _ensure_plotly():
+    """Import plotly on first use and bind it to module globals. Idempotent."""
+    global px, go, make_subplots
+    if px is None:
+        import plotly.express as _px
+        import plotly.graph_objects as _go
+        from plotly.subplots import make_subplots as _make_subplots
+        px, go, make_subplots = _px, _go, _make_subplots
 
 
 def show_interactive_visualizations(final_filtered_data):
     """Display interactive visualizations section"""
+    _ensure_plotly()
     # Get current rate type for display
     rate_type = st.session_state.get('rate_type', 'Base Rate')
     rate_type_label = f" ({rate_type})" if rate_type == 'CPC' else ""

@@ -1,12 +1,16 @@
 """
 Advanced analytics and machine learning module for the Carrier Tender Optimization Dashboard
+
+NOTE: plotly and scikit-learn are imported LAZILY (inside the functions that use
+them), not at module top level. scikit-learn pulls in scipy + extra numpy, and
+plotly is large; importing them eagerly added ~300-500 MB of RSS at app startup,
+which on Streamlit Cloud's ~1 GB tier could OOM-kill the process before the app
+even rendered (shown to viewers as "Oh no. Error running app."). Deferring them
+means that cost is only paid if a user actually opens the analytics/forecast UI.
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from sklearn.linear_model import LinearRegression
 from ..core.config_styling import section_header
 from ..core.utils import get_rate_columns
 
@@ -72,13 +76,16 @@ def show_forecasting_interface(weekly_data):
 
 def generate_forecast(weekly_data, selected_lane, forecast_weeks, confidence_level):
     """Generate and display forecast"""
+    import plotly.graph_objects as go  # lazy: heavy import, see module docstring
+    from sklearn.linear_model import LinearRegression
+
     lane_data = weekly_data[weekly_data['Lane'] == selected_lane].sort_values('Week Number')
-    
+
     if len(lane_data) >= 3:
         # Simple forecasting using linear trend
         X = lane_data['Week Number'].values.reshape(-1, 1)
         y = lane_data['Container Count'].values
-        
+
         model = LinearRegression()
         model.fit(X, y)
         
@@ -154,6 +161,7 @@ def show_performance_trends(final_filtered_data):
 
 def show_trend_analysis_interface(final_filtered_data, perf_trends, top_carriers, rate_cols):
     """Show trend analysis interface"""
+    import plotly.express as px  # lazy: heavy import, see module docstring
     trend_col1, trend_col2 = st.columns(2)
     
     with trend_col1:
@@ -239,6 +247,7 @@ def show_anomaly_metrics(anomalies, final_filtered_data, lower_bound, upper_boun
 
 def show_anomaly_details(anomalies, final_filtered_data, lower_bound, rate_cols):
     """Show anomaly details table and visualization"""
+    import plotly.express as px  # lazy: heavy import, see module docstring
     st.write(f"**Detected {rate_cols['rate']} Anomalies:**")
     anomaly_display = anomalies[['Lane', 'Dray SCAC(FL)', 'Week Number', rate_cols['rate'], 'Container Count']].copy()
     

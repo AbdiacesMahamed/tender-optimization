@@ -3,12 +3,31 @@ Historic Volume Visualization Module
 
 Streamlit UI components for displaying historic volume analysis.
 Shows carrier market share, trends, and participation patterns.
+
+NOTE: plotly is imported LAZILY via _ensure_plotly() (called at the top of the
+public entry point, show_historic_volume_analysis), not at module top level.
+Eager plotly import added a large chunk of RSS at app startup; on Streamlit
+Cloud's ~1 GB tier that contributed to an out-of-memory kill before the app
+rendered ("Oh no. Error running app."). Internal helpers reference px/go as
+module globals, which _ensure_plotly() populates on first use.
 """
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime
+
+# Populated lazily by _ensure_plotly() so the heavy plotly import is deferred
+# until the historic-volume UI is actually rendered.
+px = None
+go = None
+
+
+def _ensure_plotly():
+    """Import plotly on first use and bind it to module globals. Idempotent."""
+    global px, go
+    if px is None:
+        import plotly.express as _px
+        import plotly.graph_objects as _go
+        px, go = _px, _go
 
 from .historic_volume import (
     calculate_carrier_volume_share,
@@ -34,8 +53,9 @@ def show_historic_volume_analysis(
     reference_date : datetime, optional
         Reference date for determining current week (default: today)
     """
+    _ensure_plotly()
     st.header("📊 Historic Volume Analysis")
-    
+
     if data is None or data.empty:
         st.warning("⚠️ No data available for historic volume analysis.")
         return
