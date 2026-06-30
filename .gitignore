@@ -50,3 +50,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+deployment_after_fix.png
+deployment_screenshot.png
