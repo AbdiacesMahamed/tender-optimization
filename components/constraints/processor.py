@@ -859,7 +859,7 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
         lane_carriers_map = {}
         if lane_col:
             lane_carriers_map = remaining_data.groupby('Lane')[carrier_col].apply(
-                lambda s: set(v for v in s.unique() if v and v != '')
+                lambda s: set(v for v in s.unique() if pd.notna(v) and str(v).strip())
             ).to_dict()
 
         # Pre-extract rate data carriers per lane (vectorized, done once)
@@ -1444,6 +1444,16 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                         return 0
                     want = min(want, headroom)
 
+                # Hard lockout: never allocate to a carrier locked out (Max 0 / Percent 0)
+                # of THIS row's scope, even when a different, higher-priority rule for the
+                # same carrier (e.g. a global min or percent) would otherwise pull volume
+                # here. A lockout is inviolable; those containers stay free for other
+                # carriers. Without this, a P10 "FRQT 50%" could seat FRQT on a vessel a
+                # lower-priority "FRQT max 0 on EVER LOGIC" rule bans it from — and the
+                # unconstrained-only enforcement pass would never claw it back.
+                if target_carrier and carrier_locked_out(scoped_lockouts, row_idx, target_carrier):
+                    return 0
+
                 week_num_local = row.get('Week Number', None)
                 allocated_ids, remaining_ids = allocate_specific_containers(
                     row, want, allocated_containers_tracker, target_carrier, week_num_local,
@@ -1712,14 +1722,14 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
         lane_carriers_rd = {}
         if 'Lane' in remaining_data.columns:
             lane_carriers_rd = remaining_data.groupby('Lane')[carrier_col_rd].apply(
-                lambda s: set(v for v in s.unique() if v and str(v).strip())
+                lambda s: set(v for v in s.unique() if pd.notna(v) and str(v).strip())
             ).to_dict()
         rate_lane_carriers_rd = {}
         if rate_data is not None and 'Lane' in rate_data.columns and 'Lookup' in rate_data.columns:
             _rv = rate_data[rate_data['Lookup'].notna() & (rate_data['Lookup'].astype(str).str.len() >= 4)].copy()
             _rv['_scac'] = _rv['Lookup'].astype(str).str[:4]
             rate_lane_carriers_rd = _rv.groupby('Lane')['_scac'].apply(
-                lambda s: set(v for v in s.unique() if str(v).strip())
+                lambda s: set(v for v in s.unique() if pd.notna(v) and str(v).strip())
             ).to_dict()
 
         def _overcap_carrier_for_row(idx, carrier):
@@ -1735,37 +1745,76 @@ def apply_constraints_to_data(data, constraints_df, rate_data=None):
                     return True
             return False
 
+        def _row_count(idx):
+            try:
+                v = remaining_data.at[idx, 'Container Count']
+                return int(v) if pd.notna(v) else 0
+            except Exception:
+                return 0
+
         stripped = 0
         for idx in remaining_data.index:
             cur = remaining_data.at[idx, carrier_col_rd] if carrier_col_rd in remaining_data.columns else None
-            # Strip a carrier off this unconstrained row if it is EITHER over its
-            # in-scope cap OR locked out of this row's scope. A lockout (Max 0) only
-            # blocks NEW assignment during allocation; volume sitting on its ORIGINAL
-            # carrier (e.g. RKNE containers already at SEA, where RKNE is banned) would
-            # otherwise survive in the unconstrained table and breach Rule 0.
-            if not (_overcap_carrier_for_row(idx, cur)
-                    or carrier_locked_out(scoped_lockouts, idx, cur)):
+            if not cur or pd.isna(cur):
                 continue
-            # Find an alternate carrier on this lane that is NOT itself over-cap here and
-            # is not a lockout carrier for this row.
+            row_count = _row_count(idx)
+            locked = carrier_locked_out(scoped_lockouts, idx, cur)
+            # Residual headroom for the CURRENT carrier under any max ceiling binding this
+            # row. None = no ceiling applies (unbounded). The constrained pass already
+            # credited its allocations, so this is what's LEFT after the constrained side.
+            hr_cur = _ceiling_headroom(idx, cur) if not locked else None
+
+            # Keep this row on its current carrier only if it is not locked out AND either
+            # no cap binds it (hr_cur is None) or the whole row still fits under the cap.
+            # Crucially, when a Max sits ABOVE a smaller Percent/Min target, the constrained
+            # side stops at the smaller target and leaves residual headroom — pre-existing
+            # unconstrained volume on the capped carrier must CONSUME that headroom and the
+            # excess must be stripped, or the carrier ends up over its cap across both tables.
+            if not locked and (hr_cur is None or hr_cur >= row_count):
+                if hr_cur is not None and row_count > 0:
+                    _credit_ceilings(idx, cur, row_count)  # consume headroom for later rows
+                continue
+
+            # Over cap (or headroom too small for the whole row) or locked out → re-home.
+            # Find an alternate carrier on this lane that is not itself over-cap here, not
+            # locked out, and not excluded from this row's facility.
             lane = remaining_data.at[idx, 'Lane'] if 'Lane' in remaining_data.columns else ''
             candidates = (lane_carriers_rd.get(lane, set()) | rate_lane_carriers_rd.get(lane, set()))
+            # This row's normalized facility, so we never re-home onto a carrier that is
+            # excluded from it (would trade a cap/lockout breach for an exclusion breach).
+            row_fac_norm = (
+                _facility_norm_series.get(idx)
+                if 'Facility' in remaining_data.columns else None
+            )
             alt = None
             for c in sorted(candidates):
                 if norm_text(c) == norm_text(cur):
                     continue
-                if _overcap_carrier_for_row(idx, c):
+                # Alternate must have room for the WHOLE row under its own ceiling, else
+                # re-homing here would just breach a different carrier's cap.
+                hr_c = _ceiling_headroom(idx, c)
+                if hr_c is not None and hr_c < row_count:
                     continue
                 # Never re-home onto a carrier locked out of this row's scope
                 # (e.g. AOYV is Max-0 at TIW): that would trade a cap breach for a
                 # lockout breach. Skip such candidates so the row clears instead.
                 if carrier_locked_out(scoped_lockouts, idx, c):
                     continue
+                # Never re-home onto a carrier excluded from this row's facility
+                # (e.g. FRQT is Excluded-FC at BFI3): the exclusion is just as hard as
+                # a lockout. Skip so the row clears rather than breaching the exclusion.
+                if (row_fac_norm is not None
+                        and row_fac_norm in carrier_facility_exclusions.get(c, set())):
+                    continue
                 alt = c
                 break
             remaining_data.at[idx, carrier_col_rd] = alt if alt else ''
             if 'Carrier' in remaining_data.columns and carrier_col_rd != 'Carrier':
                 remaining_data.at[idx, 'Carrier'] = alt if alt else ''
+            # Credit the row against the alternate's ceilings so a later row in the same
+            # scope sees the reduced headroom (prevents piling onto one alternate).
+            if alt and row_count > 0:
+                _credit_ceilings(idx, alt, row_count)
             stripped += 1
         if stripped:
             log_explanation(
